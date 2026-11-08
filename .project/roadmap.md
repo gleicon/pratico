@@ -86,5 +86,6 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 
 ## Backlog
 
-- [ ] Image supply-chain scanning: check pulled and built images against OSV (osv-scanner) for known vulnerabilities, and add a Snyk-like check for malware and supply-chain issues; surface findings in the menubar alerts
+- [x] Image scanners work against pratico unchanged via `docker save` (osv-scanner, grype verified; trivy, snyk use the same path) (D-23)
+- [ ] Automatic image scanning: scan pulled and built images (OSV for vulnerabilities and OpenSSF `MAL-` malicious-package advisories, plus a Snyk-like check), keep results per image, surface findings in menubar alerts — design pending
 - [ ] Discuss and design a container manager geared towards agents: not just an MCP server, but a way for developers to use containers for tests, agents, and builds from Claude Code
