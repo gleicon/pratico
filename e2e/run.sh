@@ -1,0 +1,325 @@
+#!/usr/bin/env bash
+# End-to-end suite: runs pratico-daemon in a throwaway home and drives the real
+# `docker` CLI against its socket. Each check names the SPEC AC it covers.
+# Usage: e2e/run.sh <bin-dir>
+set -uo pipefail
+
+BIN="${1:?usage: e2e/run.sh <bin-dir>}"
+# Pinned to the Homebrew docker CLI; override with DOCKER=/path/to/docker.
+DOCKER="${DOCKER:-/opt/homebrew/bin/docker}"
+[ -x "$DOCKER" ] || { echo "e2e needs the docker CLI at $DOCKER"; exit 1; }
+docker() { "$DOCKER" "$@"; }
+echo "docker CLI: $DOCKER ($("$DOCKER" version --format '{{.Client.Version}}' 2>/dev/null))"
+command -v container >/dev/null || { echo "e2e needs Apple container"; exit 1; }
+
+# $TMPDIR keeps the socket path under the 104-byte sun_path limit.
+HOME_DIR="$(mktemp -d -t pratico-e2e)"
+SOCK="$HOME_DIR/docker.sock"
+export DOCKER_HOST="unix://$SOCK"
+DAEMON_PID=""
+APPLE_ONLY="pratico-e2e-apple-$$"
+BUSYBOX_PRESENT=0
+container image inspect busybox >/dev/null 2>&1 && BUSYBOX_PRESENT=1
+
+pass=0
+fail=0
+ok() { echo "ok   $1"; pass=$((pass + 1)); }
+bad() { echo "FAIL $1${2:+ — $2}"; fail=$((fail + 1)); }
+check() { local name="$1"; shift; if "$@" >/dev/null 2>&1; then ok "$name"; else bad "$name"; fi; }
+expect_eq() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "want [$3] got [$2]"; fi; }
+expect_has() { if grep -qi -- "$3" <<<"$2"; then ok "$1"; else bad "$1" "[$3] not in [$2]"; fi; }
+
+start_daemon() {
+    "$BIN/pratico-daemon" --home "$HOME_DIR" >>"$HOME_DIR/daemon.log" 2>&1 &
+    DAEMON_PID=$!
+    for _ in $(seq 50); do [ -S "$SOCK" ] && return 0; sleep 0.1; done
+    echo "daemon did not create $SOCK"; cat "$HOME_DIR/daemon.log"; exit 1
+}
+
+stop_daemon() {
+    [ -n "$DAEMON_PID" ] && kill "$DAEMON_PID" 2>/dev/null && wait "$DAEMON_PID" 2>/dev/null
+    DAEMON_PID=""
+}
+
+cleanup() {
+    if [ -S "$SOCK" ]; then
+        ids=$(docker ps -aq 2>/dev/null)
+        [ -n "$ids" ] && docker rm -f $ids >/dev/null 2>&1
+    fi
+    stop_daemon
+    container rm -f "$APPLE_ONLY" >/dev/null 2>&1
+    [ "$BUSYBOX_PRESENT" = 0 ] && container image delete busybox >/dev/null 2>&1
+    rm -rf "$HOME_DIR"
+}
+trap cleanup EXIT
+
+# AC-3: with the Apple runtime stopped (a fake `container` reporting so), the daemon
+# refuses to start, creates no socket, and leaves a reason naming the runtime.
+FAKE="$HOME_DIR/fake-container"
+printf '#!/bin/sh\necho "apiserver is not running"\nexit 1\n' >"$FAKE"
+chmod +x "$FAKE"
+PRATICO_CONTAINER_BIN="$FAKE" "$BIN/pratico-daemon" --home "$HOME_DIR" >/dev/null 2>&1
+expect_eq "AC-3 daemon refuses when runtime is stopped" "$?" "3"
+if [ -S "$SOCK" ]; then bad "AC-3 no socket when runtime is stopped"; else ok "AC-3 no socket when runtime is stopped"; fi
+expect_has "AC-3 reason names the Apple container runtime" "$(cat "$HOME_DIR/daemon.err" 2>/dev/null)" "Apple container runtime"
+
+# AC-41: an unknown key stops the daemon, naming key and line.
+printf '# pratico\nbogus_key = 1\n' >"$HOME_DIR/config.toml"
+"$BIN/pratico-daemon" --home "$HOME_DIR" >/dev/null 2>&1
+expect_eq "AC-41 daemon refuses unknown config key" "$?" "4"
+err=$(cat "$HOME_DIR/daemon.err" 2>/dev/null)
+expect_has "AC-41 error names the key" "$err" "bogus_key"
+expect_has "AC-41 error names the line" "$err" "line 2"
+printf 'default_memory = lots\n' >"$HOME_DIR/config.toml"
+"$BIN/pratico-daemon" --home "$HOME_DIR" >/dev/null 2>&1
+expect_has "FR-38 invalid value is refused, naming the key" "$(cat "$HOME_DIR/daemon.err" 2>/dev/null)" "default_memory"
+
+# D-14: config defaults apply when Docker sets no limit.
+printf 'default_memory = 512\ndefault_cpus = 2\n' >"$HOME_DIR/config.toml"
+start_daemon
+if [ -e "$HOME_DIR/daemon.err" ]; then bad "startup clears the previous error"; else ok "startup clears the previous error"; fi
+docker run -d --name e2e-cfg alpine sleep 60 >/dev/null
+res=$(container inspect "$(docker inspect e2e-cfg --format '{{.Config.Hostname}}')" |
+    python3 -c 'import json,sys; r=json.load(sys.stdin)[0]["configuration"]["resources"]; print(r["memoryInBytes"], r["cpus"])')
+expect_eq "D-14 config defaults reach the Apple container" "$res" "536870912 2"
+docker rm -f e2e-cfg >/dev/null
+stop_daemon
+rm "$HOME_DIR/config.toml"
+
+start_daemon
+if [ -e "$HOME_DIR/daemon.err" ]; then bad "startup clears the previous error"; else ok "startup clears the previous error"; fi
+
+# --- Skeleton ---------------------------------------------------------------
+tm=$(tmutil isexcluded "$HOME_DIR/store" "$HOME_DIR/containers" 2>&1)
+expect_eq "AC-42 store and containers excluded from Time Machine" "$(grep -c '\[Excluded\]' <<<"$tm")" "2"
+expect_eq "AC-1 socket mode is 0600" "$(stat -f %Lp "$SOCK")" "600"
+check "AC-6 docker version prints client and server" docker version
+expect_eq "AC-53 server API version is pinned" "$(docker version --format '{{.Server.APIVersion}}')" "1.55"
+expect_eq "AC-53 server minimum API version" "$(docker version --format '{{.Server.MinAPIVersion}}')" "1.44"
+expect_has "AC-7 docker inspect nope" "$(docker inspect nope 2>&1)" "no such object: nope"
+resp=$(curl -s -w ' %{http_code}' --unix-socket "$SOCK" http://d/v1.55/swarm)
+expect_has "AC-29 unimplemented endpoint is 501" "$resp" " 501$"
+expect_has "AC-29 501 names the endpoint" "$resp" "/swarm"
+
+# --- First container --------------------------------------------------------
+pull=$(docker pull busybox 2>&1)
+expect_has "AC-8 docker pull streams progress" "$pull" "busybox:latest"
+expect_has "AC-8 docker images lists pulled image" "$(docker images --format '{{.Repository}}:{{.Tag}}')" "busybox:latest"
+expect_eq "AC-10 docker run --rm prints hello" "$(docker run --rm alpine echo hello 2>&1)" "hello"
+docker run --rm alpine sh -c 'exit 3' >/dev/null 2>&1
+expect_eq "AC-10 exit code propagates" "$?" "3"
+expect_eq "stdout and stderr stay separate" "$(docker run --rm alpine sh -c 'echo out; echo err >&2' 2>/dev/null)" "out"
+expect_eq "AC-10 --rm removes the container" "$(docker ps -aq | wc -l | tr -d ' ')" "0"
+expect_eq "AC-18 env and workdir reach the process" \
+    "$(docker run --rm -e FOO=bar -w /tmp alpine sh -c 'echo $FOO; pwd' | tr '\n' ' ')" "bar /tmp "
+
+# --- Bind mounts --------------------------------------------------------------
+MNT="$HOME_DIR/mnt"
+mkdir -p "$MNT" && echo hi >"$MNT/f"
+expect_eq "AC-16 bind mount reads host file" "$(docker run --rm -v "$MNT:/x" alpine cat /x/f)" "hi"
+docker run --rm -v "$MNT:/x" alpine touch /x/g >/dev/null 2>&1
+if [ -e "$MNT/g" ]; then ok "AC-17 bind mount is read-write without suffix"; else bad "AC-17 bind mount is read-write without suffix"; fi
+docker run --rm -v "$MNT:/x:ro" alpine touch /x/h >/dev/null 2>&1
+expect_eq "AC-17 :ro mount refuses writes (exit 1)" "$?" "1"
+if [ -e "$MNT/h" ]; then bad "AC-17 :ro leaves host untouched"; else ok "AC-17 :ro leaves host untouched"; fi
+expect_eq "--mount type=bind,readonly works" \
+    "$(docker run --rm --mount "type=bind,source=$MNT,target=/x,readonly" alpine sh -c 'cat /x/f; touch /x/i 2>/dev/null || echo ro')" "hi
+ro"
+docker run --rm -v "$MNT/new:/n" alpine true >/dev/null 2>&1
+if [ -d "$MNT/new" ]; then ok "-v creates a missing host directory"; else bad "-v creates a missing host directory"; fi
+expect_has "--mount with missing source is refused" \
+    "$(docker run --rm --mount "type=bind,source=$MNT/missing,target=/x" alpine true 2>&1)" "does not exist"
+
+# --- Ports ------------------------------------------------------------------
+LAN_IP=$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null)
+WEB='mkdir -p /w && echo pratico-ok >/w/index.html && httpd -f -p 80 -h /w'
+docker run -d --name e2e-p1 -p 18080:80 busybox sh -c "$WEB" >/dev/null
+docker run -d --name e2e-p2 -p 127.0.0.1:18081:80 busybox sh -c "$WEB" >/dev/null
+for _ in $(seq 50); do curl -s -m 1 localhost:18080 >/dev/null && curl -s -m 1 localhost:18081 >/dev/null && break; sleep 0.2; done
+expect_eq "AC-15 -p reachable on localhost" "$(curl -s -m 2 localhost:18080)" "pratico-ok"
+if [ -n "$LAN_IP" ]; then
+    expect_eq "AC-15 -p reachable on LAN IP $LAN_IP" "$(curl -s -m 2 "$LAN_IP:18080")" "pratico-ok"
+    expect_eq "AC-15.a -p 127.0.0.1 reachable on localhost" "$(curl -s -m 2 localhost:18081)" "pratico-ok"
+    curl -s -m 2 "$LAN_IP:18081" >/dev/null 2>&1
+    if [ $? -eq 0 ]; then bad "AC-15.a -p 127.0.0.1 not reachable on LAN IP"; else ok "AC-15.a -p 127.0.0.1 not reachable on LAN IP"; fi
+else
+    bad "AC-15 needs a LAN IP on en0 or en1"
+fi
+expect_eq "docker port shows the binding" "$(docker port e2e-p2 80/tcp)" "127.0.0.1:18081"
+docker rm -f e2e-p1 e2e-p2 >/dev/null
+
+docker run -d --name e2e-web -l a=1 -v "$MNT:/x:ro" alpine sleep 300 >/dev/null
+docker run -d --name e2e-other -l a=2 alpine sleep 300 >/dev/null
+apple_id=$(docker inspect e2e-web --format '{{.Config.Hostname}}')
+expect_has "AC-11 Docker container is its own Apple container" "$(container list)" "$apple_id"
+expect_eq "AC-14 docker ps filters by label" "$(docker ps --filter label=a=1 --format '{{.Names}}')" "e2e-web"
+
+before=$(docker inspect e2e-web --format '{{.Name}} {{json .Config.Labels}} {{json .HostConfig.PortBindings}} {{json .Mounts}}')
+stop_daemon
+start_daemon
+after=$(docker inspect e2e-web --format '{{.Name}} {{json .Config.Labels}} {{json .HostConfig.PortBindings}} {{json .Mounts}}' 2>&1)
+expect_eq "AC-12 metadata survives daemon restart" "$after" "$before"
+
+container run -d --name "$APPLE_ONLY" alpine sleep 300 >/dev/null 2>&1
+if docker ps -a --format '{{.Names}}' | grep -q "$APPLE_ONLY"; then bad "AC-30 container-CLI container hidden from docker ps"; else ok "AC-30 container-CLI container hidden from docker ps"; fi
+expect_has "AC-30 docker rm of container-CLI container is 404" "$(docker rm "$APPLE_ONLY" 2>&1)" "No such container"
+
+# --- Lifecycle ---------------------------------------------------------------
+docker run -d --name e2e-life alpine sleep 300 >/dev/null
+if docker stop -t 2 e2e-life >/dev/null && docker start e2e-life >/dev/null && docker restart e2e-life >/dev/null &&
+    docker pause e2e-life >/dev/null && docker unpause e2e-life >/dev/null &&
+    docker kill -s KILL e2e-life >/dev/null && docker rm e2e-life >/dev/null; then
+    ok "AC-13 stop/start/restart/pause/unpause/kill/rm"
+else
+    bad "AC-13 stop/start/restart/pause/unpause/kill/rm"
+fi
+if docker ps -a --format '{{.Names}}' | grep -q e2e-life; then bad "AC-13 removed container is gone"; else ok "AC-13 removed container is gone"; fi
+
+# AC-13.a: a paused container runs nothing until unpaused.
+docker run -d --name e2e-count alpine sh -c 'i=0; while true; do i=$((i+1)); echo $i; sleep 0.1; done' >/dev/null
+sleep 1
+docker pause e2e-count >/dev/null
+expect_eq "AC-13.a inspect reports State.Paused" "$(docker inspect e2e-count --format '{{.State.Paused}} {{.State.Status}}')" "true paused"
+expect_eq "AC-13.a docker ps filters paused" "$(docker ps --filter status=paused --format '{{.Names}}')" "e2e-count"
+n1=$(docker logs e2e-count | wc -l); sleep 2; n2=$(docker logs e2e-count | wc -l)
+expect_eq "AC-13.a no lines logged while paused" "$n2" "$n1"
+expect_has "pause twice is a conflict" "$(docker pause e2e-count 2>&1)" "already paused"
+docker unpause e2e-count >/dev/null; sleep 1
+if [ "$(docker logs e2e-count | wc -l)" -gt "$n2" ]; then ok "AC-13.a lines resume after unpause"; else bad "AC-13.a lines resume after unpause"; fi
+docker pause e2e-count >/dev/null
+check "stop works on a paused container" docker stop -t 1 e2e-count
+docker start e2e-count >/dev/null; docker pause e2e-count >/dev/null
+stop_daemon
+start_daemon
+apple_count=$(docker inspect e2e-count --format '{{.Config.Hostname}}')
+# An exec joins the frozen cgroup, so it can only finish once the container is thawed.
+container exec "$apple_count" cat /sys/fs/cgroup/pratico/cgroup.freeze >"$HOME_DIR/freeze" 2>&1 &
+exec_pid=$!
+for _ in $(seq 50); do kill -0 "$exec_pid" 2>/dev/null || break; sleep 0.1; done
+if kill -0 "$exec_pid" 2>/dev/null; then
+    kill "$exec_pid"; bad "D-15 daemon exit thaws a paused container" "exec hung: still frozen"
+else
+    expect_eq "D-15 daemon exit thaws a paused container" "$(cat "$HOME_DIR/freeze")" "0"
+fi
+docker rm -f e2e-count >/dev/null
+
+# AC-23: lifecycle events stream in order; since/until replays them.
+t0=$(date +%s)
+docker events --filter label=e2e-ev=1 --format '{{.Action}}' >"$HOME_DIR/events" 2>&1 &
+ev_pid=$!
+sleep 1
+docker run -d --name e2e-ev -l e2e-ev=1 alpine sleep 300 >/dev/null
+docker pause e2e-ev >/dev/null && docker unpause e2e-ev >/dev/null && docker rm -f e2e-ev >/dev/null
+sleep 1
+kill "$ev_pid" 2>/dev/null; wait "$ev_pid" 2>/dev/null
+live=$(grep -vx kill "$HOME_DIR/events" | tr '\n' ' ')
+expect_eq "AC-23 events stream create/start/pause/unpause/die/destroy" "$live" "create start pause unpause die destroy "
+replay=$(docker events --since "$t0" --until "$(($(date +%s) + 1))" --filter label=e2e-ev=1 --filter event=die --format '{{.Action}} {{.Actor.Attributes.name}} {{.Actor.Attributes.exitCode}}')
+expect_eq "events --since/--until replays with filters" "$replay" "die e2e-ev 137"
+
+# AC-52 (daemon part): healthcheck status, events, and recovery.
+docker events --filter container=e2e-h --filter event=health_status --format '{{.Action}}' >"$HOME_DIR/hevents" 2>&1 &
+hev_pid=$!
+docker run -d --name e2e-h --health-cmd 'test -f /ok' --health-interval 1s --health-retries 2 alpine sleep 300 >/dev/null
+hs=""
+for _ in $(seq 50); do hs=$(docker inspect e2e-h --format '{{.State.Health.Status}}'); [ "$hs" = unhealthy ] && break; sleep 0.1; done
+expect_eq "AC-52 State.Health.Status becomes unhealthy within 5 s" "$hs" "unhealthy"
+expect_has "ps shows the health status" "$(docker ps --filter name=e2e-h --format '{{.Status}}')" "(unhealthy)"
+docker exec e2e-h touch /ok
+for _ in $(seq 30); do hs=$(docker inspect e2e-h --format '{{.State.Health.Status}}'); [ "$hs" = healthy ] && break; sleep 0.1; done
+expect_eq "AC-52 status becomes healthy within 3 s of the fix" "$hs" "healthy"
+expect_eq "ps filters by health" "$(docker ps --filter health=healthy --format '{{.Names}}')" "e2e-h"
+sleep 0.5
+kill "$hev_pid" 2>/dev/null; wait "$hev_pid" 2>/dev/null
+expect_eq "AC-52 health_status events emitted" "$(tr '\n' ' ' <"$HOME_DIR/hevents")" "health_status: unhealthy health_status: healthy "
+docker rm -f e2e-h >/dev/null
+
+# AC-22: stats one-shot and streamed.
+docker run -d --name e2e-stats alpine sh -c 'while true; do :; done' >/dev/null
+docker run -d --name e2e-idle alpine sleep 300 >/dev/null
+docker stats --no-stream e2e-stats >/dev/null 2>&1  # first call starts sampling; CPU % needs two samples
+sleep 5
+row=$(docker stats --no-stream --format '{{.Name}}|{{.CPUPerc}}|{{.MemUsage}}|{{.NetIO}}' e2e-stats)
+IFS='|' read -r s_name s_cpu s_mem s_net <<<"$row"
+if [ "$s_name" = e2e-stats ] && [ "$s_cpu" != "--" ] && [ -n "$s_cpu" ] && [ "$s_mem" != "-- / --" ] && [ "$s_net" != "--" ]; then
+    ok "AC-22 stats --no-stream row has CPU, MEM, NET ($row)"
+else
+    bad "AC-22 stats --no-stream row has CPU, MEM, NET" "$row"
+fi
+cpu_num=${s_cpu%\%}
+if [ "${cpu_num%%.*}" -ge 50 ] 2>/dev/null; then ok "busy loop shows high CPU ($s_cpu)"; else bad "busy loop shows high CPU" "$s_cpu"; fi
+expect_has "stats on an unlimited container does not crash the daemon" \
+    "$(docker stats --no-stream --format '{{.Name}} {{.CPUPerc}}' e2e-idle 2>&1)" "^e2e-idle [0-9]"
+lines=$(curl -s -m 7 --unix-socket "$SOCK" "http://d/v1.55/containers/e2e-stats/stats?stream=true" | grep -c '"cpu_stats"')
+if [ "$lines" -ge 2 ]; then ok "stats streams repeated samples ($lines in 7s)"; else bad "stats streams repeated samples" "$lines"; fi
+docker rm -f e2e-stats e2e-idle >/dev/null
+
+# AC-21: docker cp out of and into a running container.
+docker run -d --name e2e-cp alpine sleep 300 >/dev/null
+CP="$HOME_DIR/cp"; mkdir -p "$CP"
+check "AC-21 docker cp out succeeds" docker cp e2e-cp:/etc/hostname "$CP/h"
+expect_eq "AC-21 copied file has the container hostname" "$(cat "$CP/h" 2>/dev/null)" "$(docker inspect e2e-cp --format '{{.Config.Hostname}}')"
+check "AC-21 docker cp in succeeds" docker cp "$CP/h" e2e-cp:/tmp/h
+expect_eq "AC-21 contents match after the round trip" "$(docker exec e2e-cp cat /tmp/h)" "$(cat "$CP/h")"
+mkdir -p "$CP/d/sub" && echo deep >"$CP/d/sub/f"
+docker cp "$CP/d" e2e-cp:/tmp/ >/dev/null 2>&1
+expect_eq "cp copies a directory tree in" "$(docker exec e2e-cp cat /tmp/d/sub/f)" "deep"
+docker cp e2e-cp:/tmp/d "$CP/back" >/dev/null 2>&1
+expect_eq "cp copies a directory tree out" "$(cat "$CP/back/sub/f" 2>/dev/null)" "deep"
+expect_has "cp of a missing path is refused" "$(docker cp e2e-cp:/nope "$CP/x" 2>&1)" "Could not find the file /nope"
+docker rm -f e2e-cp >/dev/null
+
+# AC-20: exec with and without a TTY.
+docker run -d --name e2e-exec alpine sleep 300 >/dev/null
+expect_eq "AC-20 docker exec echo ok" "$(docker exec e2e-exec echo ok)" "ok"
+docker exec e2e-exec sh -c 'exit 7' >/dev/null 2>&1
+expect_eq "exec exit code propagates" "$?" "7"
+expect_eq "exec -i pipes stdin" "$(echo piped | docker exec -i e2e-exec cat)" "piped"
+expect_eq "exec stderr stays separate" "$(docker exec e2e-exec sh -c 'echo out; echo err >&2' 2>/dev/null)" "out"
+tty_out=$(python3 -I "$(dirname "$0")/pty.py" 33 111 "$DOCKER" exec -it e2e-exec sh -c 'sleep 1; tty; stty size' | tr -d '\r')
+expect_has "AC-20 exec -it gets a /dev/pts tty" "$tty_out" "^/dev/pts/"
+expect_has "exec -it receives the terminal size" "$tty_out" "^33 111$"
+docker exec -d e2e-exec touch /tmp/detached
+sleep 1
+check "exec -d runs detached" docker exec e2e-exec test -e /tmp/detached
+docker pause e2e-exec >/dev/null
+expect_has "exec on a paused container is refused" "$(docker exec e2e-exec true 2>&1)" "paused"
+docker rm -f e2e-exec >/dev/null
+
+id=$(docker run -d alpine sh -c 'echo one; echo two; echo three')
+docker wait "$id" >/dev/null
+expect_eq "docker logs --tail" "$(docker logs --tail 2 "$id" | tr '\n' ' ')" "two three "
+expect_has "docker ps -a shows exit status" "$(docker ps -a --filter id="$id" --format '{{.Status}}')" "Exited (0)"
+
+# AC-19: tail + follow prints the last lines, then keeps streaming.
+docker run -d --name e2e-tick alpine sh -c 'i=0; while true; do i=$((i+1)); echo tick $i; sleep 1; done' >/dev/null
+sleep 4
+docker logs --tail 2 -f e2e-tick >"$HOME_DIR/follow" 2>&1 &
+follow_pid=$!
+sleep 3
+kill "$follow_pid" 2>/dev/null; wait "$follow_pid" 2>/dev/null
+first=$(head -1 "$HOME_DIR/follow" | awk '{print $2}')
+total=$(wc -l <"$HOME_DIR/follow" | tr -d ' ')
+if [ "$total" -ge 4 ] && [ "$(tail -1 "$HOME_DIR/follow" | awk '{print $2}')" -gt $((first + 2)) ]; then
+    ok "AC-19 logs --tail 2 -f streams new lines"
+else
+    bad "AC-19 logs --tail 2 -f streams new lines" "$(tr '\n' '|' <"$HOME_DIR/follow")"
+fi
+expect_has "logs --timestamps prefixes RFC 3339 time" "$(docker logs -t --tail 1 e2e-tick)" "^20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]T"
+docker rm -f e2e-tick >/dev/null
+
+# AC-51: 200 MiB of output leaves at most 100 MiB on disk, newest line kept.
+big=$(docker run -d alpine sh -c 'yes 0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456 | head -n 2097152; echo LAST-LINE')
+docker wait "$big" >/dev/null
+disk=$(cat "$HOME_DIR/containers/$big"/log* | wc -c | tr -d ' ')
+if [ "$disk" -le 104857600 ] && [ "$disk" -gt 0 ]; then ok "AC-51 on-disk log capped at 100 MiB ($disk bytes)"; else bad "AC-51 on-disk log capped at 100 MiB" "$disk bytes"; fi
+expect_eq "AC-51 logs --tail 1 returns the latest line" "$(docker logs --tail 1 "$big")" "LAST-LINE"
+docker rm "$big" >/dev/null
+
+docker rm -f $(docker ps -aq) >/dev/null 2>&1
+pid="$DAEMON_PID"
+stop_daemon
+if [ -S "$SOCK" ] || kill -0 "$pid" 2>/dev/null; then bad "AC-2 stop leaves no socket and no process"; else ok "AC-2 stop leaves no socket and no process"; fi
+
+echo "$pass passed, $fail failed"
+[ "$fail" -eq 0 ] || { echo "--- daemon log"; tail -20 "$HOME_DIR/daemon.log"; exit 1; }
