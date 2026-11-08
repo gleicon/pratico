@@ -204,17 +204,29 @@ public final class ImageService: Sendable {
 
     /// `POST /images/create`: pulls through `container image pull`, streaming
     /// Docker-style JSON progress lines (SPEC FR-8).
-    public func pull(_ ref: String, platform: String?, conn: Connection) {
+    func pull(_ ref: String, platform: String?, auth: RegistryAuth?, conn: Connection) {
         let full = ImageRef.normalize(ref)
         let familiar = ImageRef.familiar(full)
         let tag = full.split(separator: ":").last.map(String.init) ?? "latest"
         conn.beginChunked()
         func emit(_ v: JSON) { conn.chunk(v.encoded() + Data("\n".utf8)) }
 
+        if var auth {
+            // Credentials belong to the image's registry, whatever server the client named.
+            auth.server = RegistryAuth.host(ofImage: full)
+            let r = runtime.login(auth)
+            guard r.ok else {
+                let msg = "login to \(auth.server) failed: \(r.errorText)"
+                emit(["errorDetail": ["message": .string(msg)], "error": .string(msg)])
+                conn.endChunked()
+                return
+            }
+        }
+
         let existed = runtime.image(full) != nil
         emit(["status": .string("Pulling from \(familiar.split(separator: ":").first ?? "")"), "id": .string(tag)])
 
-        var args = ["image", "pull", "--progress", "plain"]
+        var args = ["image", "pull", "--progress", "plain"] + RegistryAuth.schemeArgs(RegistryAuth.host(ofImage: full))
         if let platform, !platform.isEmpty { args += ["--platform", platform] }
         let p = runtime.process(args + [full])
         let out = Pipe()

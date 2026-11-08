@@ -3,3 +3,10 @@ dist/
 .DS_Store
 *.dmg
 .swiftpm/
+.env
+.env.*
+*.pem
+*.key
+*.p12
+htpasswd
+.docker/

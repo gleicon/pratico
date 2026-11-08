@@ -128,3 +128,21 @@ func normalizesImageRefs(input: String, expected: String) {
     for _ in 0..<7 { _ = h.record(pass, retries: 2, inStartPeriod: false) }
     #expect(h.log.count == 5)
 }
+
+@Test func registryAuthHeaderDecodesBase64URL() {
+    // {"username":"u","password":"p?>","serveraddress":"https://index.docker.io/v1/"}
+    let json = #"{"username":"u","password":"p?>","serveraddress":"https://index.docker.io/v1/"}"#
+    let b64url = Data(json.utf8).base64EncodedString()
+        .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+        .replacingOccurrences(of: "=", with: "")
+    #expect(RegistryAuth.header(b64url) == RegistryAuth(username: "u", password: "p?>", server: "docker.io"))
+    #expect(RegistryAuth.header("e30=") == nil)  // {} from an anonymous pull
+}
+
+@Test func loopbackRegistriesUseHTTPLikeDocker() {
+    #expect(RegistryAuth.schemeArgs("localhost:5000") == ["--scheme", "http"])
+    #expect(RegistryAuth.schemeArgs("127.0.0.1:15000") == ["--scheme", "http"])
+    #expect(RegistryAuth.schemeArgs("ghcr.io").isEmpty)
+    #expect(RegistryAuth.host(ofImage: "127.0.0.1:15000/e2e/bb:1") == "127.0.0.1:15000")
+    #expect(RegistryAuth.host(ofImage: "alpine") == "docker.io")
+}

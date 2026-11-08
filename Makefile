@@ -8,7 +8,7 @@ ENTITLEMENTS := Support/pratico.entitlements
 # Ad-hoc by default (SPEC D-10). Set to a Developer ID identity to sign for distribution.
 SIGN_IDENTITY ?= -
 
-.PHONY: all build test e2e app sign install uninstall clean
+.PHONY: all build test e2e e2e-registry app sign install uninstall clean
 
 all: build
 
@@ -20,6 +20,10 @@ test:
 
 e2e: build
 	e2e/run.sh "$(BIN_DIR)"
+
+# Test harness only: spins up a throwaway private registry to check docker login + pull.
+e2e-registry: build
+	e2e/registry.sh "$(BIN_DIR)"
 
 app: build
 	rm -rf "$(APP)"

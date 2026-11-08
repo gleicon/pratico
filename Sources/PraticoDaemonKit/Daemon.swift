@@ -74,6 +74,14 @@ public final class Daemon: @unchecked Sendable {
         case ("GET", "events") where parts.count == 1:
             events.serve(req, conn: conn)
             return .close
+        case ("POST", "auth") where parts.count == 1:
+            guard let body = JSON.parse(req.body), let auth = RegistryAuth.body(body) else {
+                throw APIError(400, "username and password are required")
+            }
+            let r = runtime.login(auth)
+            guard r.ok else { throw APIError(401, "login to \(auth.server) failed: \(r.errorText)") }
+            conn.json(200, ["Status": "Login Succeeded", "IdentityToken": ""])
+            return .keepAlive
         case ("GET", "info") where parts.count == 1:
             conn.json(200, info())
             return .keepAlive
@@ -184,7 +192,8 @@ public final class Daemon: @unchecked Sendable {
             guard let from = req.query["fromImage"], !from.isEmpty else {
                 throw APIError(400, "image import is not supported; use fromImage")
             }
-            images.pull(ImageRef.join(from, tag: req.query["tag"]), platform: req.query["platform"], conn: conn)
+            images.pull(ImageRef.join(from, tag: req.query["tag"]), platform: req.query["platform"],
+                        auth: RegistryAuth.header(req.headers["x-registry-auth"]), conn: conn)
         case "POST" where p == ["prune"]:
             conn.json(200, images.prune(filters: ContainerService.parseFilters(req.query["filters"])))
         case "GET" where p.count >= 2 && p.last == "json":
