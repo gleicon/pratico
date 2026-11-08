@@ -209,34 +209,73 @@ public final class ImageService: Sendable {
         let familiar = ImageRef.familiar(full)
         let tag = full.split(separator: ":").last.map(String.init) ?? "latest"
         conn.beginChunked()
-        func emit(_ v: JSON) { conn.chunk(v.encoded() + Data("\n".utf8)) }
-
-        if var auth {
-            // Credentials belong to the image's registry, whatever server the client named.
-            auth.server = RegistryAuth.host(ofImage: full)
-            let r = runtime.login(auth)
-            guard r.ok else {
-                let msg = "login to \(auth.server) failed: \(r.errorText)"
-                emit(["errorDetail": ["message": .string(msg)], "error": .string(msg)])
-                conn.endChunked()
-                return
-            }
-        }
+        defer { conn.endChunked() }
+        let emit = Self.emitter(conn)
+        guard login(for: full, auth, emit) else { return }
 
         let existed = runtime.image(full) != nil
         emit(["status": .string("Pulling from \(familiar.split(separator: ":").first ?? "")"), "id": .string(tag)])
-
         var args = ["image", "pull", "--progress", "plain"] + RegistryAuth.schemeArgs(RegistryAuth.host(ofImage: full))
         if let platform, !platform.isEmpty { args += ["--platform", platform] }
-        let p = runtime.process(args + [full])
+        let (ok, last) = stream(args + [full], id: tag, emit)
+        guard ok else {
+            return Self.fail("pull access denied or manifest unknown for \(familiar): \(last)", emit)
+        }
+        if let d = runtime.image(full)?["configuration"]?["descriptor"]?["digest"]?.string {
+            emit(["status": .string("Digest: \(d)")])
+        }
+        let status = existed ? "Image is up to date for \(familiar)" : "Downloaded newer image for \(familiar)"
+        emit(["status": .string("Status: \(status)")])
+    }
+
+    /// `POST /images/{name}/push` (SPEC FR-22): `container image push`, ending with the
+    /// `aux` digest record the Docker CLI prints.
+    func push(_ ref: String, auth: RegistryAuth?, conn: Connection) throws {
+        let full = ImageRef.normalize(ref)
+        guard let img = runtime.image(full) else {
+            throw APIError(404, "An image does not exist locally with the tag: \(ImageRef.familiar(full))")
+        }
+        let tag = full.split(separator: ":").last.map(String.init) ?? "latest"
+        let repo = ImageRef.familiar(String(full.dropLast(tag.count + 1)))
+        conn.beginChunked()
+        defer { conn.endChunked() }
+        let emit = Self.emitter(conn)
+        guard login(for: full, auth, emit) else { return }
+
+        emit(["status": .string("The push refers to repository [\(repo)]")])
+        let args = ["image", "push", "--progress", "plain"] + RegistryAuth.schemeArgs(RegistryAuth.host(ofImage: full))
+        let (ok, last) = stream(args + [full], id: tag, emit)
+        guard ok else { return Self.fail("push to \(repo) failed: \(last)", emit) }
+        let digest = img["configuration"]?["descriptor"]?["digest"]?.string ?? ""
+        let size = img["configuration"]?["descriptor"]?["size"]?.int ?? 0
+        emit(["status": .string("\(tag): digest: \(digest) size: \(size)")])
+        emit(["progressDetail": [:], "aux": ["Tag": .string(tag), "Digest": .string(digest), "Size": .int(size)]])
+    }
+
+    private static func emitter(_ conn: Connection) -> (JSON) -> Void {
+        { v in conn.chunk(v.encoded() + Data("\n".utf8)) }
+    }
+
+    private static func fail(_ msg: String, _ emit: (JSON) -> Void) {
+        emit(["errorDetail": ["message": .string(msg)], "error": .string(msg)])
+    }
+
+    /// Logs in with the client's credentials, if it sent any for the image's registry.
+    /// Credentials named for another server are ignored, never sent elsewhere.
+    private func login(for full: String, _ auth: RegistryAuth?, _ emit: (JSON) -> Void) -> Bool {
+        guard let auth, auth.server == RegistryAuth.host(ofImage: full) else { return true }
+        let r = runtime.login(auth)
+        if !r.ok { Self.fail("login to \(auth.server) failed: \(r.errorText)", emit) }
+        return r.ok
+    }
+
+    /// Runs `container <args>`, relaying each distinct progress line as a status message.
+    private func stream(_ args: [String], id: String, _ emit: (JSON) -> Void) -> (ok: Bool, last: String) {
+        let p = runtime.process(args)
         let out = Pipe()
         p.standardOutput = out
         p.standardError = out
-        do { try p.run() } catch {
-            emit(["errorDetail": ["message": .string("\(error)")], "error": .string("\(error)")])
-            conn.endChunked()
-            return
-        }
+        do { try p.run() } catch { return (false, "\(error)") }
         var last = ""
         var pending = Data()
         while case let data = out.fileHandleForReading.availableData, !data.isEmpty {
@@ -246,21 +285,10 @@ public final class ImageService: Sendable {
                 pending.removeSubrange(...nl)
                 if line.isEmpty || line == last { continue }
                 last = line
-                emit(["status": .string(line), "id": .string(tag)])
+                emit(["status": .string(line), "id": .string(id)])
             }
         }
         p.waitUntilExit()
-
-        if p.terminationStatus != 0 {
-            let msg = "pull access denied or manifest unknown for \(familiar): \(last)"
-            emit(["errorDetail": ["message": .string(msg)], "error": .string(msg)])
-        } else {
-            if let img = runtime.image(full), let d = img["configuration"]?["descriptor"]?["digest"]?.string {
-                emit(["status": .string("Digest: \(d)")])
-            }
-            let status = existed ? "Image is up to date for \(familiar)" : "Downloaded newer image for \(familiar)"
-            emit(["status": .string("Status: \(status)")])
-        }
-        conn.endChunked()
+        return (p.terminationStatus == 0, last)
     }
 }

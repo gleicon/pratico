@@ -38,7 +38,7 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 
 - [x] Image tag/inspect/rm/prune (AC-24)
 - [x] Pull from an authenticated private registry; no password ever lands under `~/.pratico` (AC-9, AC-50)
-- [ ] Push to a registry; fresh pull returns same digest (AC-25)
+- [x] Push to a registry; fresh pull returns same digest (AC-25)
 
 ## Networks and volumes
 
@@ -82,3 +82,7 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 - [ ] DMG background and bundled README walk the user through Gatekeeper approval ("Open Anyway" or `xattr -dr com.apple.quarantine`)
 - [ ] `make install` copies `Pratico.app` to `/Applications` with no Gatekeeper prompt
 - [ ] When a Developer ID identity and notary credentials are configured, `make dmg` signs with it and notarizes; ad-hoc remains the fallback (blocked until a paid Apple Developer account exists)
+
+## Backlog
+
+- [ ] Image supply-chain scanning: check pulled and built images against OSV (osv-scanner) for known vulnerabilities, and add a Snyk-like check for malware and supply-chain issues; surface findings in the menubar alerts

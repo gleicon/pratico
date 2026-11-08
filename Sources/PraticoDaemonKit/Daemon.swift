@@ -199,6 +199,9 @@ public final class Daemon: @unchecked Sendable {
         case "GET" where p.count >= 2 && p.last == "json":
             guard let img = images.resolve(name) else { throw APIError(404, "No such image: \(name)") }
             conn.json(200, ImageService.inspect(img.image))
+        case "POST" where p.count >= 2 && p.last == "push":
+            try images.push(ImageRef.join(name, tag: req.query["tag"]), auth: RegistryAuth.header(req.headers["x-registry-auth"]),
+                            conn: conn)
         case "POST" where p.count >= 2 && p.last == "tag":
             try images.tag(name, repo: req.query["repo"] ?? "", tag: req.query["tag"])
             conn.respond(201)

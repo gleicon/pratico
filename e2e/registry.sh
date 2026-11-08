@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # TEST HARNESS ONLY — not part of pratico's setup and not run by `make e2e`.
 #
-# Verifies private-registry pulls (SPEC AC-9, AC-50) without a real private account.
+# Verifies private-registry pull and push (SPEC AC-9, AC-25, AC-50) without a real
+# private account.
 # It starts a throwaway password-protected `registry:2` on 127.0.0.1, seeds it with
 # busybox, then drives `docker login` + `docker pull` through pratico-daemon. Everything
 # it creates is removed on exit: the registry container, the pushed image, the Keychain
@@ -15,6 +16,7 @@ DOCKER="${DOCKER:-/opt/homebrew/bin/docker}"
 PORT="${REG_PORT:-15000}"
 REG="127.0.0.1:$PORT"
 IMAGE="$REG/pratico-e2e/bb:1"
+PUSHED="$REG/pratico-e2e/pushed:1"
 USER_NAME=e2euser
 PASSWORD="e2e-$(openssl rand -hex 8)"
 for tool in "$DOCKER" container htpasswd openssl; do
@@ -27,6 +29,8 @@ HOME_DIR="$WORK/home"
 mkdir -p "$HOME_DIR" "$WORK/auth" "$WORK/docker-config"
 export DOCKER_HOST="unix://$HOME_DIR/docker.sock"
 export DOCKER_CONFIG="$WORK/docker-config"  # keeps the CLI's login out of ~/.docker
+# With no auth settings the CLI would fall back to the macOS Keychain helper.
+echo '{"auths":{"pratico.invalid":{}}}' >"$DOCKER_CONFIG/config.json"
 REG_NAME="pratico-e2e-registry-$$"
 DAEMON_PID=""
 had_registry=0; container image inspect registry:2 >/dev/null 2>&1 && had_registry=1
@@ -40,7 +44,7 @@ bad() { echo "FAIL $1${2:+ — $2}"; fail=$((fail + 1)); }
 cleanup() {
     [ -n "$DAEMON_PID" ] && kill "$DAEMON_PID" 2>/dev/null && wait "$DAEMON_PID" 2>/dev/null
     container rm -f "$REG_NAME" >/dev/null 2>&1
-    container image delete "$IMAGE" >/dev/null 2>&1
+    container image delete "$IMAGE" "$PUSHED" >/dev/null 2>&1
     container registry logout "$REG" >/dev/null 2>&1
     [ "$had_registry" = 0 ] && container image delete registry:2 >/dev/null 2>&1
     [ "$had_busybox" = 0 ] && container image delete busybox >/dev/null 2>&1
@@ -87,6 +91,24 @@ if [ $? -eq 0 ]; then ok "AC-9 docker pull of a private image succeeds"; else ba
 grep -rqF -D skip "$PASSWORD" "$HOME_DIR"
 rc=$?
 if [ "$rc" -eq 1 ]; then ok "AC-50 password not stored under the pratico home"; else bad "AC-50 password not stored under the pratico home" "grep exit $rc"; fi
+
+# AC-25: push, then a fresh pull returns the same digest.
+container registry logout "$REG" >/dev/null 2>&1
+docker tag busybox "$PUSHED" >/dev/null 2>&1
+out=$(docker push "$PUSHED" 2>&1)
+pushed_digest=$(grep -oE 'digest: sha256:[0-9a-f]{64}' <<<"$out" | head -1 | cut -d' ' -f2)
+if [ -n "$pushed_digest" ]; then ok "AC-25 docker push reports a digest"; else bad "AC-25 docker push reports a digest" "$out"; fi
+docker rmi "$PUSHED" >/dev/null 2>&1
+container registry logout "$REG" >/dev/null 2>&1
+docker pull "$PUSHED" >/dev/null 2>&1
+pulled_digest=$(docker image inspect "$PUSHED" --format '{{index .RepoDigests 0}}' 2>/dev/null | cut -d@ -f2)
+if [ -n "$pushed_digest" ] && [ "$pulled_digest" = "$pushed_digest" ]; then
+    ok "AC-25 fresh pull returns the pushed digest"
+else
+    bad "AC-25 fresh pull returns the pushed digest" "pushed [$pushed_digest] pulled [$pulled_digest]"
+fi
+out=$(docker push "$REG/pratico-e2e/missing:1" 2>&1)
+if grep -q "does not exist locally" <<<"$out"; then ok "push of a missing image is refused"; else bad "push of a missing image is refused" "$out"; fi
 
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ] || { echo "--- daemon log"; tail -20 "$WORK/daemon.log"; exit 1; }

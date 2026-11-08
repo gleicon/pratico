@@ -16,6 +16,12 @@ command -v container >/dev/null || { echo "e2e needs Apple container"; exit 1; }
 HOME_DIR="$(mktemp -d -t pratico-e2e)"
 SOCK="$HOME_DIR/docker.sock"
 export DOCKER_HOST="unix://$SOCK"
+# An isolated CLI config: the user's registry logins must never reach the daemon under
+# test. A config with no auth settings makes the CLI fall back to the macOS Keychain
+# helper, so it carries one inert entry.
+export DOCKER_CONFIG="$HOME_DIR/docker-config"
+mkdir -p "$DOCKER_CONFIG"
+echo '{"auths":{"pratico.invalid":{}}}' >"$DOCKER_CONFIG/config.json"
 DAEMON_PID=""
 APPLE_ONLY="pratico-e2e-apple-$$"
 BUSYBOX_PRESENT=0

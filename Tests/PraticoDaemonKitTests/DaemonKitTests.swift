@@ -146,3 +146,8 @@ func normalizesImageRefs(input: String, expected: String) {
     #expect(RegistryAuth.host(ofImage: "127.0.0.1:15000/e2e/bb:1") == "127.0.0.1:15000")
     #expect(RegistryAuth.host(ofImage: "alpine") == "docker.io")
 }
+
+@Test func emptyServerAddressMeansDockerHub() {
+    #expect(RegistryAuth.body(["username": "u", "password": "p"])?.server == "docker.io")
+    #expect(RegistryAuth.body(["username": "u", "password": "p", "serveraddress": "ghcr.io"])?.server == "ghcr.io")
+}
