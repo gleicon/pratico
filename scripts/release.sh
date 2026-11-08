@@ -15,7 +15,8 @@ die() { echo "release: $*" >&2; exit 1; }
 code_version=$(sed -n 's/.*static let version = "\(.*\)"/\1/p' Sources/PraticoCore/Pratico.swift)
 plist_version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Support/Info.plist)
 [ "$code_version" = "$VERSION" ] || die "Pratico.version is $code_version, not $VERSION"
-[ "$plist_version" = "$VERSION" ] || die "Info.plist CFBundleShortVersionString is $plist_version, not $VERSION"
+# Apple requires a plain x.y.z here, so a -pre suffix is not part of it.
+[ "$plist_version" = "${VERSION%%-*}" ] || die "Info.plist CFBundleShortVersionString is $plist_version, not ${VERSION%%-*}"
 [ -z "$(git status --porcelain)" ] || die "working tree is not clean"
 git rev-parse -q --verify "refs/tags/$TAG" >/dev/null && die "tag $TAG already exists locally"
 git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1 && die "tag $TAG already exists on origin"
