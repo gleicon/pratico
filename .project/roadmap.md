@@ -36,7 +36,7 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 
 ## Images and registries
 
-- [ ] Image tag/inspect/rm/prune (AC-24)
+- [x] Image tag/inspect/rm/prune (AC-24)
 - [ ] Pull from an authenticated private registry; no password ever lands under `~/.pratico` (AC-9, AC-50)
 - [ ] Push to a registry; fresh pull returns same digest (AC-25)
 

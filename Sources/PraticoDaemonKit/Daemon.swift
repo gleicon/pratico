@@ -175,19 +175,26 @@ public final class Daemon: @unchecked Sendable {
     }
 
     private func routeImages(_ m: String, _ p: [String], _ req: Request, _ conn: Connection) throws -> Disposition? {
-        // Image names contain `/`, so `/images/<name>/json` is matched on its ends.
+        // Image names contain `/`, so `/images/<name>/<action>` is matched on its ends.
+        let name = p.dropLast().joined(separator: "/")
         switch m {
         case "GET" where p == ["json"]:
-            conn.json(200, .array(images.runtimeImages().map(ImageService.summary)))
+            conn.json(200, .array(images.localImages().map(ImageService.summary)))
         case "POST" where p == ["create"]:
             guard let from = req.query["fromImage"], !from.isEmpty else {
                 throw APIError(400, "image import is not supported; use fromImage")
             }
             images.pull(ImageRef.join(from, tag: req.query["tag"]), platform: req.query["platform"], conn: conn)
+        case "POST" where p == ["prune"]:
+            conn.json(200, images.prune(filters: ContainerService.parseFilters(req.query["filters"])))
         case "GET" where p.count >= 2 && p.last == "json":
-            let name = p.dropLast().joined(separator: "/")
-            guard let img = images.find(name) else { throw APIError(404, "No such image: \(name)") }
-            conn.json(200, ImageService.inspect(img))
+            guard let img = images.resolve(name) else { throw APIError(404, "No such image: \(name)") }
+            conn.json(200, ImageService.inspect(img.image))
+        case "POST" where p.count >= 2 && p.last == "tag":
+            try images.tag(name, repo: req.query["repo"] ?? "", tag: req.query["tag"])
+            conn.respond(201)
+        case "DELETE" where !p.isEmpty:
+            conn.json(200, .array(try images.remove(p.joined(separator: "/"), force: req.flag("force"))))
         default:
             return nil
         }
@@ -224,7 +231,7 @@ public final class Daemon: @unchecked Sendable {
             "ContainersRunning": .int(Int64(c.running)),
             "ContainersPaused": .int(Int64(c.paused)),
             "ContainersStopped": .int(Int64(c.total - c.running - c.paused)),
-            "Images": .int(Int64(images.runtimeImages().count)),
+            "Images": .int(Int64(images.localImages().count)),
             "Driver": "pratico",
             "DockerRootDir": .string(home.path),
             "OperatingSystem": "macOS (Apple container)",
@@ -243,6 +250,3 @@ public final class Daemon: @unchecked Sendable {
     }
 }
 
-extension ImageService {
-    func runtimeImages() -> [JSON] { runtime.images() }
-}

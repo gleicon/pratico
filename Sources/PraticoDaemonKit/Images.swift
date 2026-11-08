@@ -40,6 +40,14 @@ public enum ImageRef {
     }
 }
 
+struct LocalImage {
+    var id: String  // sha256:<index digest>
+    var record: JSON  // first Apple record; all share the same content
+    var refs: [String]  // full references
+
+    var tags: [String] { refs.map(ImageRef.familiar) }
+}
+
 public final class ImageService: Sendable {
     let runtime: AppleContainer
 
@@ -65,46 +73,40 @@ public final class ImageService: Sendable {
 
     static func created(_ img: JSON) -> String { img["configuration"]?["creationDate"]?.string ?? "" }
 
-    static func tags(_ img: JSON) -> [String] {
-        [img["configuration"]?["name"]?.string].compactMap { $0 }.map(ImageRef.familiar)
-    }
-
-    static func digests(_ img: JSON) -> [String] {
-        guard let name = img["configuration"]?["name"]?.string,
-            let digest = img["configuration"]?["descriptor"]?["digest"]?.string
-        else { return [] }
-        let repo = name.lastIndex(of: ":").map { String(name[..<$0]) } ?? name
-        return [ImageRef.familiar(repo) + "@" + digest]
+    static func digests(_ img: LocalImage) -> [String] {
+        guard let digest = img.record["configuration"]?["descriptor"]?["digest"]?.string else { return [] }
+        let repos = img.refs.map { ref in ref.lastIndex(of: ":").map { String(ref[..<$0]) } ?? ref }
+        return Array(Set(repos)).sorted().map { ImageRef.familiar($0) + "@" + digest }
     }
 
     /// `GET /images/json` entry.
-    public static func summary(_ img: JSON) -> JSON {
-        let size = variant(img)?["size"]?.int ?? 0
+    static func summary(_ img: LocalImage) -> JSON {
+        let size = variant(img.record)?["size"]?.int ?? 0
         return [
-            "Id": .string(id(img)),
+            "Id": .string(img.id),
             "ParentId": "",
-            "RepoTags": JSON(tags(img)),
+            "RepoTags": JSON(img.tags),
             "RepoDigests": JSON(digests(img)),
-            "Created": .int(Int64(Timestamp.parse(created(img))?.timeIntervalSince1970 ?? 0)),
+            "Created": .int(Int64(Timestamp.parse(created(img.record))?.timeIntervalSince1970 ?? 0)),
             "Size": .int(size),
             "SharedSize": -1,
             "VirtualSize": .int(size),
-            "Labels": config(img)["Labels"] ?? [:],
+            "Labels": config(img.record)["Labels"] ?? [:],
             "Containers": -1,
         ]
     }
 
     /// `GET /images/{name}/json` body.
-    public static func inspect(_ img: JSON) -> JSON {
-        let v = variant(img)
-        let cfg = config(img)
+    static func inspect(_ img: LocalImage) -> JSON {
+        let v = variant(img.record)
+        let cfg = config(img.record)
         return [
-            "Id": .string(id(img)),
-            "RepoTags": JSON(tags(img)),
+            "Id": .string(img.id),
+            "RepoTags": JSON(img.tags),
             "RepoDigests": JSON(digests(img)),
             "Parent": "",
             "Comment": "",
-            "Created": .string(created(img)),
+            "Created": .string(created(img.record)),
             "DockerVersion": "",
             "Author": "",
             "Config": cfg,
@@ -116,6 +118,88 @@ public final class ImageService: Sendable {
             "RootFS": ["Type": "layers", "Layers": v?["config"]?["rootfs"]?["diff_ids"] ?? []],
             "Metadata": ["LastTagTime": "0001-01-01T00:00:00Z"],
         ]
+    }
+
+    // MARK: Local images, tag, remove, prune (SPEC FR-21)
+
+    /// Apple keeps one record per reference; Docker shows one image per ID with all its tags.
+    func localImages() -> [LocalImage] {
+        var byId: [String: LocalImage] = [:]
+        var order: [String] = []
+        for r in runtime.images() {
+            let id = Self.id(r)
+            let ref = r["configuration"]?["name"]?.string
+            if byId[id] == nil {
+                byId[id] = LocalImage(id: id, record: r, refs: [])
+                order.append(id)
+            }
+            if let ref { byId[id]?.refs.append(ref) }
+        }
+        return order.compactMap { byId[$0] }
+    }
+
+    /// By reference (`matched` is that reference) or by ID prefix (`matched` is nil).
+    func resolve(_ nameOrId: String) -> (image: LocalImage, matched: String?)? {
+        let all = localImages()
+        let full = ImageRef.normalize(nameOrId)
+        if let img = all.first(where: { $0.refs.contains(full) }) { return (img, full) }
+        let hex = nameOrId.hasPrefix("sha256:") ? String(nameOrId.dropFirst(7)) : nameOrId
+        guard hex.count >= 4, hex.allSatisfy(\.isHexDigit) else { return nil }
+        let matches = all.filter { $0.id.dropFirst(7).hasPrefix(hex) }
+        return matches.count == 1 ? (matches[0], nil) : nil
+    }
+
+    /// Image IDs used by any Apple container, Docker-created or not.
+    func inUse() -> Set<String> {
+        Set(runtime.containers().compactMap { $0["configuration"]?["image"]?["descriptor"]?["digest"]?.string })
+    }
+
+    func tag(_ source: String, repo: String, tag: String?) throws {
+        guard let (img, matched) = resolve(source) else { throw APIError(404, "No such image: \(source)") }
+        guard !repo.isEmpty else { throw APIError(400, "repository name must be given") }
+        let target = ImageRef.normalize(ImageRef.join(repo, tag: tag.flatMap { $0.isEmpty ? nil : $0 } ?? "latest"))
+        let r = runtime.run(["image", "tag", matched ?? img.refs[0], target])
+        guard r.ok else { throw APIError(500, "cannot tag image: \(r.errorText)") }
+    }
+
+    /// `DELETE /images/{name}`: by reference untags it (deleting the image with its last
+    /// tag); by ID removes every reference. Images in use need `force`, as in Docker.
+    func remove(_ nameOrId: String, force: Bool) throws -> [JSON] {
+        guard let (img, matched) = resolve(nameOrId) else { throw APIError(404, "No such image: \(nameOrId)") }
+        let short = String(img.id.dropFirst(7).prefix(12))
+        let refs = matched.map { [$0] } ?? img.refs
+        let removesImage = refs.count == img.refs.count
+        if matched == nil && img.refs.count > 1 && !force {
+            throw APIError(409, "conflict: unable to delete \(short) (must be forced) - image is referenced in multiple repositories")
+        }
+        if removesImage && !force && inUse().contains(img.id) {
+            throw APIError(409, "conflict: unable to remove repository reference \"\(nameOrId)\" (must force) - image \(short) is being used by a container")
+        }
+        var out: [JSON] = []
+        for ref in refs {
+            let r = runtime.run(["image", "delete", ref])
+            guard r.ok else { throw APIError(500, "cannot remove \(ImageRef.familiar(ref)): \(r.errorText)") }
+            out.append(["Untagged": .string(ImageRef.familiar(ref))])
+        }
+        if removesImage { out.append(["Deleted": .string(img.id)]) }
+        return out
+    }
+
+    /// `POST /images/prune`. Every Apple image has a reference, so nothing is dangling and
+    /// the default prune removes nothing; `dangling=false` (`prune -a`) removes unused images.
+    func prune(filters: [String: [String]]) -> JSON {
+        guard filters["dangling"]?.contains(where: { $0 == "false" || $0 == "0" }) == true else {
+            return ["ImagesDeleted": .null, "SpaceReclaimed": 0]
+        }
+        let used = inUse()
+        var deleted: [JSON] = []
+        var reclaimed: Int64 = 0
+        for img in localImages() where !used.contains(img.id) {
+            guard let items = try? remove(img.id, force: true) else { continue }
+            deleted += items
+            reclaimed += Self.variant(img.record)?["size"]?.int ?? 0
+        }
+        return ["ImagesDeleted": deleted.isEmpty ? .null : .array(deleted), "SpaceReclaimed": .int(reclaimed)]
     }
 
     /// `POST /images/create`: pulls through `container image pull`, streaming
