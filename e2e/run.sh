@@ -124,6 +124,17 @@ check "busybox survives the untag" docker image inspect busybox
 docker run -d --name e2e-img busybox sleep 300 >/dev/null
 expect_has "rmi of an image in use needs force" "$(docker rmi busybox 2>&1)" "being used by a container"
 docker rm -f e2e-img >/dev/null
+docker save busybox -o "$HOME_DIR/saved.tar"
+saved=$(python3 -I - "$HOME_DIR/saved.tar" <<'PY'
+import json, sys, tarfile
+t = tarfile.open(sys.argv[1])
+names = set(t.getnames())
+m = json.load(t.extractfile("manifest.json"))[0]
+ok = all(p in names for p in [m["Config"], *m["Layers"]]) and not any(n.startswith("./") for n in names)
+print(m["RepoTags"][0] if ok else "broken")
+PY
+)
+expect_eq "docker save writes a Docker archive scanners can read" "$saved" "busybox:latest"
 check "AC-24 docker image prune -f" docker image prune -f
 expect_has "docker rmi of a missing image is 404" "$(docker rmi pratico-e2e/none 2>&1)" "No such image"
 

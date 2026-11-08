@@ -194,6 +194,12 @@ public final class Daemon: @unchecked Sendable {
             }
             images.pull(ImageRef.join(from, tag: req.query["tag"]), platform: req.query["platform"],
                         auth: RegistryAuth.header(req.headers["x-registry-auth"]), conn: conn)
+        case "GET" where p == ["get"]:
+            // `docker save` of one image; several at once are not supported yet.
+            guard let names = req.query["names"], !names.isEmpty else { throw APIError(400, "names is required") }
+            try images.save(names, conn: conn)
+        case "GET" where p.count >= 2 && p.last == "get":
+            try images.save(name, conn: conn)
         case "POST" where p == ["prune"]:
             conn.json(200, images.prune(filters: ContainerService.parseFilters(req.query["filters"])))
         case "GET" where p.count >= 2 && p.last == "json":

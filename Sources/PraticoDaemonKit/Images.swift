@@ -252,6 +252,73 @@ public final class ImageService: Sendable {
         emit(["progressDetail": [:], "aux": ["Tag": .string(tag), "Digest": .string(digest), "Size": .int(size)]])
     }
 
+    /// `GET /images/{name}/get` (`docker save`), D-23. Apple saves an OCI layout; Docker's
+    /// archive is that layout plus a `manifest.json`, which scanners (osv-scanner, grype,
+    /// trivy, snyk) need. Entries are written without a `./` prefix, which some reject.
+    func save(_ nameOrId: String, conn: Connection) throws {
+        guard let (img, matched) = resolve(nameOrId) else { throw APIError(404, "No such image: \(nameOrId)") }
+        let ref = matched ?? img.refs[0]
+        let fm = FileManager.default
+        let work = fm.temporaryDirectory.appending(path: "pratico-save-\(UUID().uuidString)")
+        let dir = work.appending(path: "image")
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: work) }
+
+        let platform = Self.variant(img.record)?["platform"]
+        let arch = platform?["architecture"]?.string ?? "arm64"
+        let os = platform?["os"]?.string ?? "linux"
+        let archive = work.appending(path: "oci.tar").path
+        let r = runtime.run(["image", "save", "--platform", "\(os)/\(arch)", "-o", archive, ref])
+        guard r.ok else { throw APIError(500, "cannot save \(ImageRef.familiar(ref)): \(r.errorText)") }
+        guard Self.tar(["-xf", archive, "-C", dir.path]) else { throw APIError(500, "cannot unpack saved image") }
+
+        func blob(_ digest: String?) -> JSON? {
+            guard let digest, digest.hasPrefix("sha256:") else { return nil }
+            return (try? Data(contentsOf: dir.appending(path: "blobs/sha256/\(digest.dropFirst(7))"))).flatMap(JSON.parse)
+        }
+        // index.json → (nested indexes) → the platform's image manifest.
+        var node = (try? Data(contentsOf: dir.appending(path: "index.json"))).flatMap(JSON.parse)
+        while let manifests = node?["manifests"]?.array {
+            let pick = manifests.first { $0["platform"]?["architecture"]?.string == arch } ?? manifests.first
+            node = blob(pick?["digest"]?.string)
+        }
+        guard let manifest = node, let config = manifest["config"]?["digest"]?.string else {
+            throw APIError(500, "saved image has no manifest for \(os)/\(arch)")
+        }
+        let path: (String) -> JSON = { .string("blobs/sha256/\($0.dropFirst(7))") }
+        let docker: JSON = [[
+            "Config": path(config),
+            "RepoTags": [.string(ImageRef.familiar(ref))],
+            "Layers": .array((manifest["layers"]?.array ?? []).compactMap { $0["digest"]?.string }.map(path)),
+        ]]
+        try docker.encoded().write(to: dir.appending(path: "manifest.json"))
+
+        let p = Process()
+        p.executableURL = URL(filePath: "/usr/bin/tar")
+        p.arguments = ["-cf", "-", "-C", dir.path, "manifest.json", "index.json", "oci-layout", "blobs"]
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = FileHandle.nullDevice
+        try p.run()
+        conn.beginChunked(contentType: "application/x-tar")
+        while case let data = out.fileHandleForReading.availableData, !data.isEmpty {
+            if !conn.chunk(data) { p.terminate(); break }
+        }
+        p.waitUntilExit()
+        conn.endChunked()
+    }
+
+    private static func tar(_ args: [String]) -> Bool {
+        let p = Process()
+        p.executableURL = URL(filePath: "/usr/bin/tar")
+        p.arguments = args
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return false }
+        p.waitUntilExit()
+        return p.terminationStatus == 0
+    }
+
     private static func emitter(_ conn: Connection) -> (JSON) -> Void {
         { v in conn.chunk(v.encoded() + Data("\n".utf8)) }
     }
