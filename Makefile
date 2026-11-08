@@ -7,8 +7,10 @@ APP          := $(DIST_DIR)/Pratico.app
 ENTITLEMENTS := Support/pratico.entitlements
 # Ad-hoc by default (SPEC D-10). Set to a Developer ID identity to sign for distribution.
 SIGN_IDENTITY ?= -
+VERSION      ?= $(shell sed -n 's/.*static let version = "\(.*\)"/\1/p' Sources/PraticoCore/Pratico.swift)
+DMG          := $(DIST_DIR)/Pratico-$(VERSION).dmg
 
-.PHONY: all build test e2e e2e-registry app sign install uninstall clean
+.PHONY: all build test e2e e2e-registry app sign dmg release install uninstall clean
 
 all: build
 
@@ -37,6 +39,21 @@ sign:
 	codesign --force --sign "$(SIGN_IDENTITY)" --entitlements "$(ENTITLEMENTS)" --options runtime \
 		"$(APP)/Contents/MacOS/pratico-daemon"
 	codesign --force --sign "$(SIGN_IDENTITY)" --entitlements "$(ENTITLEMENTS)" --options runtime "$(APP)"
+
+# Drag-to-Applications image with the Gatekeeper walkthrough (SPEC D-10).
+dmg: app
+	rm -rf "$(DIST_DIR)/dmg" "$(DMG)"
+	mkdir -p "$(DIST_DIR)/dmg"
+	cp -R "$(APP)" "$(DIST_DIR)/dmg/"
+	ln -s /Applications "$(DIST_DIR)/dmg/Applications"
+	cp Support/dmg-README.txt "$(DIST_DIR)/dmg/READ ME FIRST.txt"
+	hdiutil create -volname "Pratico $(VERSION)" -srcfolder "$(DIST_DIR)/dmg" -ov -format UDZO "$(DMG)"
+	codesign --force --sign "$(SIGN_IDENTITY)" "$(DMG)"
+	rm -rf "$(DIST_DIR)/dmg"
+
+# Tags vVERSION and publishes the DMG to GitHub; see scripts/release.sh for the checks.
+release:
+	scripts/release.sh "$(VERSION)"
 
 # Locally built bundles carry no quarantine flag, so Gatekeeper does not prompt (SPEC D-10).
 install: app
