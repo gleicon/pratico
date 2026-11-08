@@ -151,3 +151,10 @@ func normalizesImageRefs(input: String, expected: String) {
     #expect(RegistryAuth.body(["username": "u", "password": "p"])?.server == "docker.io")
     #expect(RegistryAuth.body(["username": "u", "password": "p", "serveraddress": "ghcr.io"])?.server == "ghcr.io")
 }
+
+@Test func onlyWellFormedDigestsBecomePaths() {
+    #expect(ImageService.isDigest("sha256:" + String(repeating: "a", count: 64)))
+    #expect(!ImageService.isDigest("sha256:../../etc/passwd"))
+    #expect(!ImageService.isDigest("sha256:" + String(repeating: "A", count: 64)))
+    #expect(!ImageService.isDigest("sha512:" + String(repeating: "a", count: 64)))
+}

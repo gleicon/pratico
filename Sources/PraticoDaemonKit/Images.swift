@@ -272,24 +272,29 @@ public final class ImageService: Sendable {
         guard r.ok else { throw APIError(500, "cannot save \(ImageRef.familiar(ref)): \(r.errorText)") }
         guard Self.tar(["-xf", archive, "-C", dir.path]) else { throw APIError(500, "cannot unpack saved image") }
 
+        // Digests come from the archive's JSON: only well-formed ones become paths.
         func blob(_ digest: String?) -> JSON? {
-            guard let digest, digest.hasPrefix("sha256:") else { return nil }
+            guard let digest, Self.isDigest(digest) else { return nil }
             return (try? Data(contentsOf: dir.appending(path: "blobs/sha256/\(digest.dropFirst(7))"))).flatMap(JSON.parse)
         }
-        // index.json → (nested indexes) → the platform's image manifest.
+        // index.json → (nested indexes, bounded) → the platform's image manifest.
         var node = (try? Data(contentsOf: dir.appending(path: "index.json"))).flatMap(JSON.parse)
+        var depth = 0
         while let manifests = node?["manifests"]?.array {
+            depth += 1
+            guard depth <= 8 else { throw APIError(500, "saved image index nests too deeply") }
             let pick = manifests.first { $0["platform"]?["architecture"]?.string == arch } ?? manifests.first
             node = blob(pick?["digest"]?.string)
         }
-        guard let manifest = node, let config = manifest["config"]?["digest"]?.string else {
-            throw APIError(500, "saved image has no manifest for \(os)/\(arch)")
+        let layers = (node?["layers"]?.array ?? []).compactMap { $0["digest"]?.string }
+        guard let config = node?["config"]?["digest"]?.string, Self.isDigest(config), layers.allSatisfy(Self.isDigest) else {
+            throw APIError(500, "saved image has no valid manifest for \(os)/\(arch)")
         }
         let path: (String) -> JSON = { .string("blobs/sha256/\($0.dropFirst(7))") }
         let docker: JSON = [[
             "Config": path(config),
             "RepoTags": [.string(ImageRef.familiar(ref))],
-            "Layers": .array((manifest["layers"]?.array ?? []).compactMap { $0["digest"]?.string }.map(path)),
+            "Layers": .array(layers.map(path)),
         ]]
         try docker.encoded().write(to: dir.appending(path: "manifest.json"))
 
@@ -306,6 +311,10 @@ public final class ImageService: Sendable {
         }
         p.waitUntilExit()
         conn.endChunked()
+    }
+
+    static func isDigest(_ s: String) -> Bool {
+        s.count == 71 && s.hasPrefix("sha256:") && s.dropFirst(7).allSatisfy { $0.isHexDigit && !$0.isUppercase }
     }
 
     private static func tar(_ args: [String]) -> Bool {
