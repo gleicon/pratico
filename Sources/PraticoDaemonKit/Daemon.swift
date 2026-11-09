@@ -15,17 +15,36 @@ public final class Daemon: @unchecked Sendable {
     let networks: NetworkService
     let scans: ScanService
     private var server: HTTPServer?
+    /// Embedded runtime asked for but could not open: refuse to serve rather than fall back.
+    let embeddedStartupFailed: Bool
 
     public init(home: URL, config: Config = Config(), socketPath: String? = nil, runtime: AppleContainer = AppleContainer()) {
         self.home = home
         self.socketPath = socketPath ?? home.appending(path: "docker.sock").path
         self.runtime = runtime
-        self.images = ImageService(runtime: runtime)
+        // PRATICO_RUNTIME=embedded selects pratico's own runtime (docs/design/runtime.md),
+        // which becomes the default once it covers every operation.
+        var embedded: EmbeddedContainers?
+        var images = ImageService(runtime: runtime)
+        if ProcessInfo.processInfo.environment["PRATICO_RUNTIME"] == "embedded" {
+            switch EmbeddedContainers.open(home: home) {
+            case .success(let (e, store)):
+                embedded = e
+                images = ImageService(backend: EmbeddedImageBackend(store: store))
+            case .failure(let error):
+                FileHandle.standardError.write(Data("pratico-daemon: embedded runtime unavailable: \(error.message)\n".utf8))
+            }
+        }
+        self.embeddedStartupFailed = ProcessInfo.processInfo.environment["PRATICO_RUNTIME"] == "embedded" && embedded == nil
+        self.images = images
         self.networks = NetworkService(runtime: runtime, root: home.appending(path: "networks", directoryHint: .isDirectory),
-                                       events: events)
+                                       events: events, apple: embedded == nil)
         self.containers = ContainerService(
             runtime: runtime, images: images, root: home.appending(path: "containers", directoryHint: .isDirectory),
-            networks: networks, config: config, events: events)
+            networks: networks, config: config, events: events, embedded: embedded)
+        if let backend = images.backend as? EmbeddedImageBackend {
+            backend.usedBy = { [containers] in Set(containers.all().map(\.imageId)) }
+        }
         self.execs = ExecService(runtime: runtime, containers: containers)
         self.archives = ArchiveService(runtime: runtime, containers: containers)
         self.stats = StatsService(runtime: runtime, containers: containers)
@@ -34,6 +53,7 @@ public final class Daemon: @unchecked Sendable {
     }
 
     public func start() throws {
+        guard !embeddedStartupFailed else { throw APIError(500, "embedded runtime unavailable") }
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
         // Container data is rebuildable and large; keep it out of Time Machine (FR-39).
         for name in ["store", "containers"] {
@@ -82,6 +102,7 @@ public final class Daemon: @unchecked Sendable {
             events.serve(req, conn: conn)
             return .close
         case ("POST", "auth") where parts.count == 1:
+            try containers.requireCLIBackend("docker login")
             guard let body = JSON.parse(req.body), let auth = RegistryAuth.body(body) else {
                 throw APIError(400, "username and password are required")
             }
@@ -95,6 +116,7 @@ public final class Daemon: @unchecked Sendable {
         case (_, "containers"):
             if let d = try routeContainers(m, Array(parts.dropFirst()), req, conn) { return d }
         case (_, "exec") where parts.count == 3:
+            try containers.requireCLIBackend("exec")
             if let d = try routeExec(m, parts[1], parts[2], req, conn) { return d }
         case (_, "images"):
             if let d = try routeImages(m, Array(parts.dropFirst()), req, conn) { return d }
@@ -144,17 +166,22 @@ public final class Daemon: @unchecked Sendable {
             try containers.unpause(p[0])
             conn.respond(204)
         case ("POST", 2, "exec"):
+            try containers.requireCLIBackend("exec")
             guard let body = JSON.parse(req.body) else { throw APIError(400, "invalid JSON body") }
             conn.json(201, ["Id": .string(try execs.create(p[0], body: body).id)])
         case ("GET", 2, "stats"):
+            try containers.requireCLIBackend("stats")
             let stream = req.query["stream"].map { $0 == "1" || $0 == "true" } ?? true
             try stats.stats(p[0], stream: stream, oneShot: req.flag("one-shot"), conn: conn)
         case ("HEAD", 2, "archive"):
+            try containers.requireCLIBackend("docker cp")
             let stat = try archives.stat(p[0], path: req.query["path"] ?? "/")
             conn.respond(200, extra: [("X-Docker-Container-Path-Stat", stat)], headOnly: true)
         case ("GET", 2, "archive"):
+            try containers.requireCLIBackend("docker cp")
             try archives.get(p[0], path: req.query["path"] ?? "/", conn: conn)
         case ("PUT", 2, "archive"):
+            try containers.requireCLIBackend("docker cp")
             try archives.put(p[0], path: req.query["path"] ?? "/", tar: req.body)
             conn.respond(200, body: Data())
         case ("POST", 2, "wait"):

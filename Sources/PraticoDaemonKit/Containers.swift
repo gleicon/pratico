@@ -64,6 +64,9 @@ public final class ContainerService: @unchecked Sendable {
     let config: Config
     let events: EventBus
     let networks: NetworkService
+    /// Set when the embedded runtime runs containers (docs/design/runtime.md); nil means
+    /// Apple's `container` CLI.
+    let embedded: EmbeddedContainers?
     let health = HealthMonitor()
     /// Returns why a container may not start (pratico's image scan, D-24), if it may not.
     var startGate: (@Sendable (ContainerRecord) -> String?)?
@@ -76,10 +79,12 @@ public final class ContainerService: @unchecked Sendable {
     private var removeWaiters: [String: [@Sendable (Int) -> Void]] = [:]
     private var attached: [String: [Connection]] = [:]
     private var pauseAgents: [String: PauseAgent] = [:]
+    private var pausedVMs: Set<String> = []  // embedded: paused through the shim
 
     init(runtime: AppleContainer, images: ImageService, root: URL, networks: NetworkService, config: Config = Config(),
-         events: EventBus = EventBus()) {
+         events: EventBus = EventBus(), embedded: EmbeddedContainers? = nil) {
         self.runtime = runtime
+        self.embedded = embedded
         self.events = events
         self.networks = networks
         self.config = config
@@ -99,6 +104,33 @@ public final class ContainerService: @unchecked Sendable {
         let dec = JSONDecoder()
         dec.dateDecodingStrategy = .iso8601
         let ids = (try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? []
+        if let embedded {
+            for id in ids {
+                guard let data = try? Data(contentsOf: dir(id).appending(path: "config.json")),
+                    var rec = try? dec.decode(ContainerRecord.self, from: data)
+                else { continue }
+                let files = ShimFiles(dir: dir(id))
+                let pid = rec.state.running ? ShimClient.livePid(files) : nil
+                if rec.state.running && pid == nil {
+                    // Exited while the daemon was down; the shim recorded how.
+                    let status = ShimClient.exitStatus(files)
+                    rec.state.status = "exited"
+                    rec.state.exitCode = status?.code ?? 0
+                    rec.state.error = status?.error ?? ""
+                    rec.state.finishedAt = status?.finishedAt ?? Date()
+                    save(rec)
+                }
+                records[id] = rec
+                let log = LogStore(path: files.log)
+                logs[id] = log
+                if let pid {
+                    if ShimClient.read(files.state)?["status"]?.string == "paused" { pausedVMs.insert(id) }
+                    log.tailExternalWriter()
+                    track(id, pid: pid, log: log, shim: embedded.shim)
+                }
+            }
+            return
+        }
         let live = Dictionary(runtime.containers().compactMap { c in c["id"]?.string.map { ($0, c) } },
                               uniquingKeysWith: { a, _ in a })
         for id in ids {
@@ -248,8 +280,25 @@ public final class ContainerService: @unchecked Sendable {
             args += cmd
         }
 
-        let r = runtime.run(Self.withNetworks(args, attach.map(\.0.appleName)))
-        guard r.ok else { throw APIError(500, "container create failed: \(r.errorText)") }
+        if let embedded {
+            // No network until pratico-net (docs/design/runtime.md); say so rather than drop it.
+            guard attach.allSatisfy({ $0.0.builtin }) else {
+                throw APIError(400, "pratico: custom networks are not on the embedded runtime yet")
+            }
+            guard host["PortBindings"]?.object?.isEmpty ?? true else {
+                throw APIError(400, "pratico: published ports are not on the embedded runtime yet")
+            }
+            try FileManager.default.createDirectory(at: dir(id), withIntermediateDirectories: true)
+            do {
+                try embedded.prepareRootfs(image: ImageRef.normalize(imageRef), at: dir(id).appending(path: "rootfs.ext4"))
+            } catch {
+                try? FileManager.default.removeItem(at: dir(id))
+                throw APIError(500, "container create failed: \(error)")
+            }
+        } else {
+            let r = runtime.run(Self.withNetworks(args, attach.map(\.0.appleName)))
+            guard r.ok else { throw APIError(500, "container create failed: \(r.errorText)") }
+        }
 
         let rec = ContainerRecord(
             id: id, name: shortName, appleId: appleId, image: imageRef, imageId: ImageService.id(img),
@@ -351,6 +400,7 @@ public final class ContainerService: @unchecked Sendable {
     }
 
     private func launch(_ rec: ContainerRecord) throws {
+        if let embedded { return try launchEmbedded(rec, embedded) }
         let anchored = networks.raiseDefaultIfNeeded(rec)
         defer { if anchored { networks.dropAnchor() } }
         let p = runtime.process(["start", "--attach", rec.appleId])
@@ -404,6 +454,61 @@ public final class ContainerService: @unchecked Sendable {
         health.started(rec)
     }
 
+    /// Starts the container's shim. Its output reaches attached clients and log followers
+    /// through the log file the shim writes.
+    private func launchEmbedded(_ rec: ContainerRecord, _ embedded: EmbeddedContainers) throws {
+        let files = ShimFiles(dir: dir(rec.id))
+        let mounts = try Self.mounts(rec.hostConfig).map { ShimMount(source: $0.source, destination: $0.destination, readOnly: $0.readOnly) }
+        let mem = rec.hostConfig["Memory"]?.int.flatMap { $0 > 0 ? Int($0 / 1_048_576) : nil } ?? config.defaultMemoryMiB
+        let cpus = rec.hostConfig["NanoCpus"]?.int.flatMap { $0 > 0 ? Int(($0 + 999_999_999) / 1_000_000_000) : nil } ?? config.defaultCPUs
+        let spec = ShimSpec(
+            id: rec.appleId, kernel: embedded.kernel, initfs: embedded.initfs, rootfs: files.dir.appending(path: "rootfs.ext4").path,
+            arguments: [rec.path] + rec.args, environment: rec.config["Env"]?.strings ?? [],
+            workingDirectory: rec.config["WorkingDir"]?.string ?? "", user: rec.config["User"]?.string ?? "",
+            tty: rec.tty, hostname: rec.config["Hostname"]?.string ?? rec.appleId, cpus: max(cpus, 1), memoryMiB: max(mem, 64),
+            mounts: mounts)
+        try JSONEncoder().encode(spec).write(to: files.spec, options: .atomic)
+
+        lock.lock()
+        let log = logs[rec.id] ?? LogStore(path: files.log)
+        logs[rec.id] = log
+        lock.unlock()
+        log.tailExternalWriter()
+        let pid = try embedded.shim.spawn(files)
+        update(rec.id) { $0.state = ContainerState(status: "running", startedAt: Date()) }
+        track(rec.id, pid: pid, log: log, shim: embedded.shim)
+        emit(rec, "start")
+    }
+
+    /// Relays the shim's output to attached clients and records the exit when it ends.
+    private func track(_ id: String, pid: pid_t, log: LogStore, shim: ShimClient) {
+        let tty = (try? resolve(id))?.tty ?? false
+        log.subscribe { [weak self] line in
+            guard let self, let line else { return false }
+            self.broadcast(id, tty ? line.data : StdCopy.frame(stream: line.stream, line.data))
+            return true
+        }
+        let done = Box(false)
+        Thread.detachNewThread {
+            while !done.value {
+                log.refresh()
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+        }
+        shim.onExit(pid) { [weak self] in
+            done.value = true
+            log.refresh()  // last output reaches attached clients before they are closed
+            let status = ShimClient.exitStatus(ShimFiles(dir: log.path.deletingLastPathComponent()))
+            if let error = status?.error, !error.isEmpty { self?.update(id) { $0.state.error = error } }
+            self?.finished(id, code: status?.code ?? 137)
+        }
+    }
+
+    /// Operations still on the CLI backend's guest-agent path; see the runtime roadmap.
+    func requireCLIBackend(_ what: String) throws {
+        if embedded != nil { throw APIError(501, "pratico: \(what) is not on the embedded runtime yet") }
+    }
+
     /// Docker event attributes: the container's labels plus `image` and `name`.
     func emit(_ rec: ContainerRecord, _ action: String, _ extra: [String: String] = [:]) {
         var attrs = rec.labels
@@ -454,6 +559,9 @@ public final class ContainerService: @unchecked Sendable {
         log?.finish()
         health.stopped(id)
         networks.stopped(id)
+        lock.lock()
+        pausedVMs.remove(id)
+        lock.unlock()
         update(id) {
             $0.state.status = "exited"
             $0.state.exitCode = code
@@ -480,13 +588,22 @@ public final class ContainerService: @unchecked Sendable {
     func isPaused(_ id: String) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        return pauseAgents[id] != nil
+        return pauseAgents[id] != nil || pausedVMs.contains(id)
     }
 
     func pause(_ ref: String) throws {
         let rec = try resolve(ref)
         guard rec.state.running else { throw APIError(409, "Container \(rec.id) is not running") }
         guard !isPaused(rec.id) else { throw APIError(409, "Container \(rec.id) is already paused") }
+        if let embedded {
+            // The whole VM pauses: no guest tools, nothing runs until resume.
+            try embedded.shim.call(ShimFiles(dir: dir(rec.id)), "POST", "/pause")
+            lock.lock()
+            pausedVMs.insert(rec.id)
+            lock.unlock()
+            emit(rec, "pause")
+            return
+        }
         let agent = try PauseAgent.freeze(rec.appleId, runtime: runtime)
         lock.lock()
         pauseAgents[rec.id] = agent
@@ -496,6 +613,18 @@ public final class ContainerService: @unchecked Sendable {
 
     func unpause(_ ref: String) throws {
         let rec = try resolve(ref)
+        if let embedded {
+            lock.lock()
+            let paused = pausedVMs.contains(rec.id)
+            lock.unlock()
+            guard paused else { throw APIError(409, "Container \(rec.id) is not paused") }
+            try embedded.shim.call(ShimFiles(dir: dir(rec.id)), "POST", "/resume")
+            lock.lock()
+            pausedVMs.remove(rec.id)
+            lock.unlock()
+            emit(rec, "unpause")
+            return
+        }
         lock.lock()
         let agent = pauseAgents.removeValue(forKey: rec.id)
         lock.unlock()
@@ -509,8 +638,10 @@ public final class ContainerService: @unchecked Sendable {
     private func thawIfPaused(_ id: String) {
         lock.lock()
         let agent = pauseAgents.removeValue(forKey: id)
+        let vm = pausedVMs.remove(id) != nil
         lock.unlock()
         agent?.thaw()
+        if vm, let embedded { try? embedded.shim.call(ShimFiles(dir: dir(id)), "POST", "/resume") }
     }
 
     func stop(_ ref: String, timeout: Int?) throws -> Bool {
@@ -519,8 +650,12 @@ public final class ContainerService: @unchecked Sendable {
         thawIfPaused(rec.id)
         let t = timeout ?? 10
         emit(rec, "kill", ["signal": "15"])
-        let r = runtime.run(["stop", "-t", "\(t)", rec.appleId])
-        guard r.ok else { throw APIError(500, "cannot stop container: \(r.errorText)") }
+        if let embedded {
+            try embedded.shim.call(ShimFiles(dir: dir(rec.id)), "POST", "/stop?t=\(t)")
+        } else {
+            let r = runtime.run(["stop", "-t", "\(t)", rec.appleId])
+            guard r.ok else { throw APIError(500, "cannot stop container: \(r.errorText)") }
+        }
         awaitExit(rec.id, seconds: Double(t) + 10)
         emit(rec, "stop")
         return true
@@ -534,8 +669,13 @@ public final class ContainerService: @unchecked Sendable {
         let sig = (signal.flatMap { $0.isEmpty ? nil : $0 } ?? "KILL").uppercased()
         thawIfPaused(rec.id)
         emit(rec, "kill", ["signal": Self.signalNumber(sig)])
-        let r = runtime.run(["kill", "-s", sig, rec.appleId])
-        guard r.ok else { throw APIError(500, "cannot kill container: \(r.errorText)") }
+        if let embedded {
+            guard let n = Int(Self.signalNumber(sig)) else { throw APIError(400, "invalid signal: \(sig)") }
+            try embedded.shim.call(ShimFiles(dir: dir(rec.id)), "POST", "/kill?signal=\(n)")
+        } else {
+            let r = runtime.run(["kill", "-s", sig, rec.appleId])
+            guard r.ok else { throw APIError(500, "cannot kill container: \(r.errorText)") }
+        }
         if ["KILL", "SIGKILL", "9"].contains(sig) { awaitExit(rec.id, seconds: 10) }
     }
 
@@ -555,7 +695,11 @@ public final class ContainerService: @unchecked Sendable {
             }
             thawIfPaused(rec.id)
             emit(rec, "kill", ["signal": "9"])
-            _ = runtime.run(["kill", "-s", "KILL", rec.appleId])
+            if let embedded {
+                try? embedded.shim.call(ShimFiles(dir: dir(rec.id)), "POST", "/kill?signal=9")
+            } else {
+                _ = runtime.run(["kill", "-s", "KILL", rec.appleId])
+            }
             awaitExit(rec.id, seconds: 10)
         }
         removeNow(rec.id, code: (try? resolve(rec.id))?.state.exitCode ?? 0)
@@ -567,8 +711,9 @@ public final class ContainerService: @unchecked Sendable {
         logs[id] = nil
         let waiters = removeWaiters.removeValue(forKey: id) ?? []
         lock.unlock()
-        _ = runtime.run(["delete", "--force", rec.appleId])
-        try? FileManager.default.removeItem(at: dir(id))
+        if embedded == nil { _ = runtime.run(["delete", "--force", rec.appleId]) }
+        try? FileManager.default.removeItem(at: ShimFiles(dir: dir(id)).socket)
+        try? FileManager.default.removeItem(at: dir(id))  // embedded: rootfs and shim files too
         health.removed(id)
         emit(rec, "destroy")
         for w in waiters { w(code) }

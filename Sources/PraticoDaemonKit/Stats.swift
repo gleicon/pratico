@@ -31,7 +31,8 @@ final class StatsService: @unchecked Sendable {
     init(runtime: AppleContainer, containers: ContainerService) {
         self.runtime = runtime
         self.containers = containers
-        Thread.detachNewThread { [self] in sampleLoop() }
+        // The embedded runtime gets stats from the guest agent instead (runtime step 3).
+        if containers.embedded == nil { Thread.detachNewThread { [self] in sampleLoop() } }
     }
 
     /// Samples soon, e.g. after a container starts.

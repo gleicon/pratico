@@ -21,6 +21,9 @@ final class LogStore: @unchecked Sendable {
     private var partial: [UInt8: Data] = [:]
     private var followers: [Int: Follower] = [:]
     private var nextFollower = 0
+    /// Set when another process (a pratico-shim) writes the file: `refresh()` then
+    /// delivers its new lines to followers.
+    private var tailOffset: Int?
     private static let maxLine = 256 * 1024
 
     static let defaultCap = 100 * 1_048_576
@@ -59,8 +62,33 @@ final class LogStore: @unchecked Sendable {
         write(lines)
     }
 
+    /// Followers will get lines another process appends, from the file's current end on.
+    func tailExternalWriter() {
+        lock.lock()
+        tailOffset = (try? FileManager.default.attributesOfItem(atPath: path.path)[.size] as? Int) ?? 0
+        lock.unlock()
+    }
+
+    /// Reads what the external writer appended since the last call; a shorter file means
+    /// it rotated, so reading restarts at its beginning.
+    func refresh() {
+        lock.lock()
+        guard var offset = tailOffset, let h = try? FileHandle(forReadingFrom: path) else { lock.unlock(); return }
+        let size = Int((try? h.seekToEnd()) ?? 0)
+        if size < offset { offset = 0 }
+        try? h.seek(toOffset: UInt64(offset))
+        let data = (try? h.readToEnd()) ?? Data()
+        try? h.close()
+        let (lines, used) = Self.parseCounting(data)
+        tailOffset = offset + used
+        let current = followers
+        lock.unlock()
+        deliver(lines, current)
+    }
+
     /// Flushes unterminated output and tells followers the stream is over.
     func finish() {
+        refresh()
         lock.lock()
         let rest = partial.filter { !$0.value.isEmpty }.map { LogLine(stream: $0.key, time: Date(), data: $0.value) }
         partial = [:]
@@ -99,6 +127,10 @@ final class LogStore: @unchecked Sendable {
         }
         let current = followers
         lock.unlock()
+        deliver(lines, current)
+    }
+
+    private func deliver(_ lines: [LogLine], _ current: [Int: Follower]) {
         for (id, f) in current {
             for l in lines where !f(l) {
                 lock.lock()
@@ -115,6 +147,11 @@ final class LogStore: @unchecked Sendable {
 
     private static func parse(_ data: Data?) -> [LogLine] {
         guard let data else { return [] }
+        return parseCounting(data).lines
+    }
+
+    /// Complete frames, and how many bytes they took.
+    private static func parseCounting(_ data: Data) -> (lines: [LogLine], used: Int) {
         var lines: [LogLine] = []
         var i = data.startIndex
         while i + 13 <= data.endIndex {
@@ -127,7 +164,15 @@ final class LogStore: @unchecked Sendable {
                                  data: Data(data[start..<(start + n)])))
             i = start + n
         }
-        return lines
+        return (lines, i - data.startIndex)
+    }
+
+    /// Live lines only, no snapshot.
+    func subscribe(_ f: @escaping Follower) {
+        lock.lock()
+        followers[nextFollower] = f
+        nextFollower += 1
+        lock.unlock()
     }
 
     /// Snapshot of past lines, then live lines until `finish()`, atomically (no gap).

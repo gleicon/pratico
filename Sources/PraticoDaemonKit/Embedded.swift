@@ -91,3 +91,43 @@ final class CollectingWriter: Writer, @unchecked Sendable {
 
     func close() throws {}
 }
+
+/// The daemon's side of embedded containers: root filesystems and shim specs.
+final class EmbeddedContainers: Sendable {
+    let shim: ShimClient
+    let kernel: String
+    let initfs: String
+    let store: ImageStore
+
+    init(shim: ShimClient, kernel: String, initfs: String, store: ImageStore) {
+        self.shim = shim
+        self.kernel = kernel
+        self.initfs = initfs
+        self.store = store
+    }
+
+    /// Opens the runtime under `home`; nil with a reason when it cannot run here.
+    static func open(home: URL) -> Result<(EmbeddedContainers, ImageStore), APIError> {
+        guard let binary = ShimClient.locate() else { return .failure(APIError(500, "pratico-shim not found next to the daemon")) }
+        do {
+            let rt = try blocking { try await EmbeddedRuntime.open(home: home) }
+            let initfs = rt.store.path.appending(path: "initfs.ext4").path
+            let kernel = rt.assets.appending(path: "vmlinux").path
+            return .success((EmbeddedContainers(shim: ShimClient(binary: binary), kernel: kernel, initfs: initfs, store: rt.store), rt.store))
+        } catch let e as APIError {
+            return .failure(e)
+        } catch {
+            return .failure(APIError(500, "embedded runtime: \(error)"))
+        }
+    }
+
+    /// Unpacks the image into the container's own ext4 root filesystem (sparse, 8 GiB
+    /// capacity). Done once at create; the file keeps the container's changes across
+    /// restarts, as Docker does.
+    func prepareRootfs(image ref: String, at url: URL) throws {
+        try blocking { [store] in
+            let image = try await store.get(reference: ref)
+            _ = try await EXT4Unpacker(capacityInBytes: 8.gib()).unpack(image, for: .current, at: url)
+        }
+    }
+}

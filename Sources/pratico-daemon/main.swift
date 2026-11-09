@@ -37,8 +37,12 @@ let config: Config
 do { config = try Config.load(home: home) } catch { fail("\(error)", code: 4) }
 
 let runtime = AppleContainer()
-guard runtime.isInstalled else { fail("Apple container runtime not installed (\(runtime.binary))", code: 3) }
-guard runtime.serviceRunning else { fail("Apple container runtime is not running; run `container system start`", code: 3) }
+// The embedded runtime (docs/design/runtime.md) needs no Apple `container` install.
+let embedded = ProcessInfo.processInfo.environment["PRATICO_RUNTIME"] == "embedded"
+if !embedded {
+    guard runtime.isInstalled else { fail("Apple container runtime not installed (\(runtime.binary))", code: 3) }
+    guard runtime.serviceRunning else { fail("Apple container runtime is not running; run `container system start`", code: 3) }
+}
 
 // A child that exits before reading its stdin must not take the daemon down with it.
 signal(SIGPIPE, SIG_IGN)

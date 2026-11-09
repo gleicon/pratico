@@ -12,12 +12,14 @@ DMG          := $(DIST_DIR)/Pratico-$(VERSION).dmg
 
 ASSETS_DIR   := $(BUILD_DIR)/runtime-assets
 
-.PHONY: all build assets probe test e2e e2e-registry app sign dmg release install uninstall clean
+.PHONY: all build assets probe test e2e e2e-embedded e2e-registry app sign dmg release install uninstall clean
 
 all: build
 
+# The shim runs VMs, so every build re-signs it with the virtualization entitlement.
 build:
 	swift build -c $(CONFIG)
+	codesign --force --sign - --entitlements "$(ENTITLEMENTS)" "$(BIN_DIR)/pratico-shim"
 
 # Kernel + vminit for the embedded runtime, pinned and verified (docs/design/runtime.md).
 assets:
@@ -33,6 +35,10 @@ test:
 
 e2e: build
 	e2e/run.sh "$(BIN_DIR)"
+
+# The embedded runtime, with Apple's `container` CLI replaced by a fake that must stay unused.
+e2e-embedded: build assets
+	e2e/embedded.sh "$(BIN_DIR)"
 
 # Test harness only: spins up a throwaway private registry to check docker login + pull.
 e2e-registry: build

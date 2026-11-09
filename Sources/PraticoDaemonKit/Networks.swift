@@ -119,8 +119,13 @@ final class NetworkService: @unchecked Sendable {
     private let anchorLock = NSLock()
     private var anchorRunning = false  // guarded by anchorLock
 
-    init(runtime: AppleContainer, root: URL, events: EventBus) {
+    /// `apple` false: the embedded runtime, where no Apple networks exist (pratico-net
+    /// replaces them, docs/design/runtime.md).
+    let apple: Bool
+
+    init(runtime: AppleContainer, root: URL, events: EventBus, apple: Bool = true) {
         self.runtime = runtime
+        self.apple = apple
         self.root = root
         self.events = events
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -140,7 +145,7 @@ final class NetworkService: @unchecked Sendable {
             else { continue }
             records[rec.id] = rec
         }
-        let apple = Dictionary(
+        let apple = !self.apple ? [:] : Dictionary(
             (runtime.runJSON(["network", "list", "--format", "json"])?.array ?? []).compactMap { n in
                 n["id"]?.string.map { ($0, n) }
             }, uniquingKeysWith: { a, _ in a })
@@ -155,7 +160,7 @@ final class NetworkService: @unchecked Sendable {
             save(none)
         }
         // A custom network deleted behind pratico's back comes back with its subnet.
-        for rec in records.values where !rec.builtin && apple[rec.appleName] == nil {
+        for rec in records.values where self.apple && !rec.builtin && apple[rec.appleName] == nil {
             _ = runtime.run(Self.appleCreateArgs(rec))
         }
     }
@@ -219,6 +224,7 @@ final class NetworkService: @unchecked Sendable {
     // MARK: Create, remove
 
     func create(_ body: JSON) throws -> NetworkRecord {
+        guard apple else { throw APIError(501, "pratico: custom networks are not on the embedded runtime yet") }
         guard let name = body["Name"]?.string, !name.isEmpty else { throw APIError(400, "network name is required") }
         // Container-name rules, but one character is allowed.
         guard Names.valid(name) || (name.count == 1 && (name.first!.isLetter || name.first!.isNumber)) else {
