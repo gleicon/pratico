@@ -80,6 +80,42 @@ sleep 3
 expect_eq "and recovers to healthy" "$(docker inspect e-hc --format '{{.State.Health.Status}}')" "healthy"
 docker rm -f e-hc >/dev/null
 
+# exec, cp, stats through the guest agent
+docker run -d --name e-box alpine sleep 600 >/dev/null
+expect_eq "exec prints output" "$(docker exec e-box echo ok)" "ok"
+docker exec e-box sh -c 'exit 3'
+expect_eq "exec returns the exit code" "$?" "3"
+expect_eq "exec keeps stderr separate" "$(docker exec e-box sh -c 'echo out; echo err >&2' 2>/dev/null)" "out"
+expect_eq "exec -i pipes stdin" "$(echo piped | docker exec -i e-box cat)" "piped"
+expect_eq "exec -it gets a sized tty" "$($PTY 33 111 "$DOCKER" exec -it e-box sh -c 'sleep 1; tty; stty size' | tr -d '\r' | xargs)" "/dev/pts/0 33 111"
+docker exec -d e-box sh -c 'echo d > /tmp/d'
+sleep 1
+expect_eq "exec -d runs detached" "$(docker exec e-box cat /tmp/d)" "d"
+expect_eq "exec -e -w -u" "$(docker exec -e FOO=bar -w /tmp -u nobody e-box sh -c 'echo $FOO $(pwd) $(id -un)')" "bar /tmp nobody"
+docker exec e-box /nonexistent >/dev/null 2>&1
+expect_eq "exec of a missing command exits 127" "$?" "127"
+CP="$HOME_DIR/cp"
+mkdir -p "$CP/in/sub"
+echo hi >"$CP/in/a.txt"
+echo deep >"$CP/in/sub/b.txt"
+printf '#!/bin/sh\necho ran\n' >"$CP/in/x.sh"
+chmod +x "$CP/in/x.sh"
+docker cp e-box:/etc/alpine-release "$CP/rel" >/dev/null
+check "cp copies a file out" test -s "$CP/rel"
+docker cp e-box:/etc/apk "$CP/apk" >/dev/null
+check "cp copies a directory out" test -d "$CP/apk/keys"
+docker cp "$CP/in" e-box:/tmp/ >/dev/null
+expect_eq "cp copies a tree in, keeping modes" "$(docker exec e-box /tmp/in/x.sh)" "ran"
+expect_eq "copied files are owned by root" "$(docker exec e-box stat -c %U /tmp/in/sub/b.txt)" "root"
+if docker cp e-box:/nope "$CP/n" >/dev/null 2>&1; then bad "cp of a missing path is refused"; else ok "cp of a missing path is refused"; fi
+docker run -d --name e-busy alpine sh -c 'while true; do :; done' >/dev/null
+sleep 2
+cpu=$(docker stats --no-stream --format '{{.CPUPerc}}' e-busy | tr -d '%' | cut -d. -f1)
+check "stats shows a busy container's CPU" test "${cpu:-0}" -gt 50
+expect_has_mem=$(docker stats --no-stream --format '{{.MemUsage}}' e-box)
+check "stats shows memory usage and limit" grep -q 'GiB' <<<"$expect_has_mem"
+docker rm -f e-box e-busy >/dev/null
+
 docker run -d --name e-tick alpine sh -c 'for i in 1 2 3; do echo tick $i; sleep 1; done' >/dev/null
 expect_eq "logs -f follows to the end" "$(docker logs -f e-tick | xargs)" "tick 1 tick 2 tick 3"
 expect_eq "exit 0 recorded" "$(docker inspect e-tick --format '{{.State.Status}} {{.State.ExitCode}}')" "exited 0"
@@ -109,7 +145,14 @@ expect_eq "its output was kept" "$(docker logs e-late)" "late"
 docker stop -t 1 e-clock >/dev/null
 check "a restarted daemon still controls it" test "$(docker inspect e-clock --format '{{.State.Running}}')" = false
 
-docker rm -f e-tick e-clock e-sleep e-late >/dev/null
+# SIGTERM to a shim (logout, shutdown) stops its container like `docker stop`.
+docker run -d --name e-term alpine sh -c 'trap "exit 9" TERM; while true; do sleep 0.1; done' >/dev/null
+sleep 1
+pkill -TERM -f "pratico-shim $HOME_DIR/containers/$(docker inspect e-term --format '{{.Id}}')"
+sleep 2
+expect_eq "SIGTERM to the shim stops the container gracefully" "$(docker inspect e-term --format '{{.State.ExitCode}}')" "9"
+
+docker rm -f e-tick e-clock e-sleep e-late e-term >/dev/null
 expect_eq "rm removes rootfs and shim files" "$(ls "$HOME_DIR/containers" | wc -l | tr -d ' ')" "0"
 check "tag" docker tag alpine pratico-e2e/emb:1
 check "inspect by tag" test "$(docker image inspect pratico-e2e/emb:1 --format '{{.Os}}/{{.Architecture}}')" = "linux/arm64"

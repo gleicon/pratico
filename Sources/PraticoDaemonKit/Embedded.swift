@@ -72,10 +72,14 @@ public actor EmbeddedRuntime {
     }
 }
 
-/// Collects a process's output in memory.
+/// Collects a process's output in memory, keeping at most `limit` bytes (the first ones):
+/// the output is the container's, so it must not grow the collector without bound.
 final class CollectingWriter: Writer, @unchecked Sendable {
     private let lock = NSLock()
     private var buffer = Data()
+    let limit: Int
+
+    init(limit: Int = Int.max) { self.limit = limit }
 
     var data: Data {
         lock.lock()
@@ -85,7 +89,8 @@ final class CollectingWriter: Writer, @unchecked Sendable {
 
     func write(_ data: Data) throws {
         lock.lock()
-        buffer.append(data)
+        let room = limit - buffer.count
+        if room > 0 { buffer.append(data.prefix(room)) }
         lock.unlock()
     }
 

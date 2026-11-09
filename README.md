@@ -35,8 +35,8 @@ Pratico has no CLI of its own: `docker` is the CLI, the menubar is the control p
 | VMs | Apple's services | pratico, via [apple/containerization](https://github.com/apple/containerization) |
 | Exit codes after a daemon restart | lost (reported as 0) | kept (each VM has its own `pratico-shim`) |
 | Pause | cgroup freezer agent | whole-VM pause |
-| stdin (`-i`, `-it`), healthchecks | yes | yes |
-| exec, cp, stats, login | yes | not yet (HTTP 501 with a reason) |
+| stdin (`-i`, `-it`), healthchecks, exec, cp, stats | yes | yes (guest agent; no tools needed in the image) |
+| `docker login` | yes | not yet (HTTP 501 with a reason) |
 | Networks, published ports | yes ([D-25](SPEC.md)) | not yet: pratico-net is next |
 
 The embedded runtime is the target: once it covers every operation it becomes the

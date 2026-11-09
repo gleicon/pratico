@@ -18,6 +18,7 @@ final class ExecInstance: @unchecked Sendable {
     var started = false
     var exitCode: Int?
     var master: Int32 = -1  // pty master when tty
+    var shim: ShimFiles?  // embedded runtime: the exec runs in this shim
 
     init(id: String, containerId: String, body: JSON) {
         self.id = id
@@ -80,6 +81,7 @@ final class ExecService: @unchecked Sendable {
         e.lock.unlock()
         let rec = try containers.resolve(e.containerId)
         guard rec.state.running else { throw APIError(409, "Container \(rec.id) is not running") }
+        if let embedded = containers.embedded { return try startEmbedded(e, rec, body: body, embedded, conn) }
 
         var args = ["exec"]
         if e.attachStdin { args.append("-i") }
@@ -188,6 +190,72 @@ final class ExecService: @unchecked Sendable {
         return .detached
     }
 
+    /// The shim runs the process and frames its output as Docker does, so the daemon only
+    /// splices bytes between the client and the shim, then asks for the exit code.
+    private func startEmbedded(_ e: ExecInstance, _ rec: ContainerRecord, body: JSON, _ embedded: EmbeddedContainers,
+                               _ conn: Connection) throws -> Disposition
+    {
+        let detach = body["Detach"]?.bool ?? false
+        let files = containers.shimFiles(rec.id)
+        var req: [String: JSON] = [
+            "id": .string(e.id), "args": JSON(e.cmd), "env": JSON(e.env), "workdir": .string(e.workdir),
+            "user": .string(e.user), "tty": .bool(e.tty), "stdin": .bool(e.attachStdin && !detach),
+            "stdout": .bool(e.attachStdout && !detach), "stderr": .bool(e.attachStderr && !detach),
+        ]
+        if let size = body["ConsoleSize"]?.array, size.count == 2 {
+            req["height"] = size[0]
+            req["width"] = size[1]
+        }
+        let fd = try embedded.shim.openStream(files, "/exec-stream", body: JSON.object(req).encoded())
+        e.lock.lock()
+        e.running = true
+        e.shim = files
+        e.lock.unlock()
+
+        let finishFromShim: @Sendable () -> Void = { [self] in
+            let status = (try? embedded.shim.request(files, "GET", "/exec-status?id=\(e.id)")).flatMap { JSON.parse($0.body) }
+            finish(e, code: Int(status?["exitCode"]?.int ?? 137))
+        }
+        if detach {
+            conn.respond(200)
+            Thread.detachNewThread {
+                var buf = [UInt8](repeating: 0, count: 65536)
+                while Darwin.read(fd, &buf, buf.count) > 0 {}
+                close(fd)
+                finishFromShim()
+            }
+            return .keepAlive
+        }
+        conn.hijack(contentType: e.tty ? "application/vnd.docker.raw-stream" : "application/vnd.docker.multiplexed-stream")
+        if e.attachStdin {
+            Thread.detachNewThread {
+                while let data = conn.readRaw() {
+                    let ok = data.withUnsafeBytes { buf -> Bool in
+                        var off = 0
+                        while off < buf.count {
+                            let n = write(fd, buf.baseAddress! + off, buf.count - off)
+                            if n <= 0 { return false }
+                            off += n
+                        }
+                        return true
+                    }
+                    if !ok { return }
+                }
+                shutdown(fd, SHUT_WR)  // the shim's stdin ends; output keeps flowing
+            }
+        }
+        Thread.detachNewThread {
+            var buf = [UInt8](repeating: 0, count: 65536)
+            while case let n = Darwin.read(fd, &buf, buf.count), n > 0 {
+                if !conn.write(Data(buf[0..<n])) { break }
+            }
+            close(fd)
+            finishFromShim()
+            conn.close()
+        }
+        return .detached
+    }
+
     private func finish(_ e: ExecInstance, code: Int) {
         e.lock.lock()
         e.running = false
@@ -204,8 +272,12 @@ final class ExecService: @unchecked Sendable {
         let e = try get(id)
         e.lock.lock()
         let master = e.master
+        let shim = e.shim
         e.lock.unlock()
         if master >= 0 { Self.resize(master, height: height, width: width) }
+        if let shim, let embedded = containers.embedded, height > 0, width > 0 {
+            try? embedded.shim.call(shim, "POST", "/exec-resize?id=\(id)&h=\(height)&w=\(width)")
+        }
     }
 
     private static func resize(_ fd: Int32, height: Int, width: Int) {

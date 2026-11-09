@@ -821,6 +821,8 @@ public final class ContainerService: @unchecked Sendable {
         }
     }
 
+    func shimFiles(_ id: String) -> ShimFiles { ShimFiles(dir: dir(id)) }
+
     /// `POST /containers/{id}/resize` for a TTY container.
     func resize(_ ref: String, height: Int, width: Int) throws {
         let rec = try resolve(ref)

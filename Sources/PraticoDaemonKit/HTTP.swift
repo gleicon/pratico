@@ -219,8 +219,8 @@ public final class Connection: @unchecked Sendable {
     /// Docker-format error body (SPEC FR-7).
     public func error(_ status: Int, _ message: String) { json(status, ["message": .string(message)]) }
 
-    public func beginChunked(_ status: Int = 200, contentType: String = "application/json") {
-        write(head(status, [("Content-Type", contentType), ("Transfer-Encoding", "chunked")]))
+    public func beginChunked(_ status: Int = 200, contentType: String = "application/json", extra: [(String, String)] = []) {
+        write(head(status, [("Content-Type", contentType), ("Transfer-Encoding", "chunked")] + extra))
     }
 
     @discardableResult

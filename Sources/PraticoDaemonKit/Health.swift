@@ -140,8 +140,12 @@ final class HealthMonitor: @unchecked Sendable {
         let output = Box<Data>(Data())
         let reader = DispatchSemaphore(value: 0)
         DispatchQueue.global().async {
-            // Docker keeps at most 4 KiB of probe output.
-            output.value = out.fileHandleForReading.readDataToEndOfFile().prefix(4096)
+            // Docker keeps at most 4 KiB of probe output; the rest is drained, never held.
+            let h = out.fileHandleForReading
+            while case let data = h.availableData, !data.isEmpty {
+                let room = 4096 - output.value.count
+                if room > 0 { output.value.append(data.prefix(room)) }
+            }
             reader.signal()
         }
         try? out.fileHandleForWriting.close()

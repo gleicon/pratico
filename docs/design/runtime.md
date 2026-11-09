@@ -1,6 +1,6 @@
 # Embedded runtime — design
 
-Status: in progress. Steps 1–2 of the migration are done behind
+Status: in progress. Steps 1–3 of the migration are done behind
 `PRATICO_RUNTIME=embedded` (SPEC D-26–D-28). Replaces the `container` CLI backend.
 
 ## Why
@@ -159,7 +159,8 @@ The app gets an "Acknowledgements" file in the DMG and in About. Naming stays
 1. ✅ Assets and image store: pull, list, inspect, tag, rm, save on `ContainerizationOCI`.
 2. ✅ Shim and lifecycle: create/start/stop/kill/wait/logs/rm and VM pause; exit codes
    survive daemon restart; stdin (`run -i`, `-it`, attach), TTY resize, healthchecks.
-3. Exec, cp, stats, pause on the agent; remove the freezer agent and the stats sampler.
+3. ✅ Exec (TTY, stdin, detach, env/workdir/user), cp both ways, stats, pause on the
+   agent. The freezer agent and `container stats` sampler leave with the CLI backend.
 4. pratico-net: switch, IPAM, embedded DNS (+ `.pratico.internal`, `host.docker.internal`),
    Swift uplink (ARP/ICMP/UDP/TCP), port publishing; bridge and none.
 5. Custom networks with hot connect/disconnect (new e2e: disconnect cuts traffic by IP).
@@ -191,7 +192,11 @@ Shim control API (HTTP over the socket, one request per connection): `POST /kill
 `POST /stop?t=S` (SIGTERM, SIGKILL after S seconds), `POST /pause`, `POST /resume`,
 `POST /resize?h=&w=`, `POST /stdin` (hijacked: raw bytes into the process's stdin until
 EOF), `POST /exec` (`{"args", "timeout"}` → `{"exitCode", "output"}`, used by
-healthchecks).
+healthchecks and stat), `POST /exec-stream` (hijacked; Docker's raw or multiplexed
+framing), `GET /exec-status?id=`, `POST /exec-resize?id=&h=&w=`, `POST /copy-out?src=&dst=`
+and `POST /copy-in?src=&dst=&mode=` (host paths must be inside the container directory),
+`GET /stats` (agent counters under the CLI backend's keys). SIGTERM to a shim stops its
+container like `docker stop` (SIGKILL after 10 s).
 
 Learned while building:
 - Virtualization.framework needs the `com.apple.security.virtualization` entitlement on
@@ -205,8 +210,14 @@ Learned while building:
   with `terminal=true`.
 - The Docker CLI picks `run`'s exit code from the start error's wording (127 for
   "executable file not found", 126 for "permission denied"), so start errors use it.
-- Interim limits, each 501 with a reason: exec, cp, stats, `docker login`, custom
-  networks, published ports; containers have no network yet (step 4).
+- `cp` out uses the agent's copy (extraction is `openat`/`O_NOFOLLOW`, rejects `..`) and
+  tars on the host; `cp` in unpacks with bsdtar on the host, copies each entry in, then
+  `chown -R 0:0` where the image has it. Stat runs `stat` in the guest, falling back to
+  a copy-out for images without a shell.
+- `StatsService.epoch` is a lazy `static let`; it is pinned at init, or the first CPU
+  totals come out negative and the Docker CLI reports `EOF`.
+- Interim limits, each 501 with a reason: `docker login`, custom networks, published
+  ports; containers have no network yet (step 4).
 
 ## Risks and costs
 

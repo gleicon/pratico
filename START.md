@@ -76,8 +76,9 @@ export DOCKER_HOST=unix:///tmp/pratico-try/docker.sock
 docker run --rm alpine uname -a
 ```
 
-It covers pull, images, run, logs, stop, kill, pause, rm, tag, save. Containers have no
-network yet, and exec, cp, stats, login answer 501. Progress:
+It covers pull, images, run (`-d`, `-i`, `-it`), logs, exec, cp, stats, healthchecks,
+stop, kill, pause, rm, tag, save. Containers have no network yet, and `docker login`,
+custom networks and published ports answer 501. Progress:
 [docs/design/runtime.md](docs/design/runtime.md).
 
 ## Troubleshooting

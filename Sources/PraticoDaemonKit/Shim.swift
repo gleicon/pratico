@@ -99,6 +99,17 @@ public enum ShimHost {
         writeJSON(["pid": .int(Int64(getpid())), "status": "running"], to: files.state)
 
         try? FileManager.default.createDirectory(at: files.socket.deletingLastPathComponent(), withIntermediateDirectories: true)
+        // SIGTERM (logout, shutdown, `kill`) stops the container like `docker stop`, so the
+        // normal exit path still records its code.
+        signal(SIGTERM, SIG_IGN)
+        let term = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global())
+        term.setEventHandler {
+            Task { try? await container.kill(Signal(rawValue: 15)) }
+            DispatchQueue.global().asyncAfter(deadline: .now() + 10) {
+                Task { try? await container.kill(Signal(rawValue: 9)) }
+            }
+        }
+        term.resume()
         let control = ShimControl(container: container, files: files, spec: spec, stdin: stdin)
         let server = HTTPServer(path: files.socket.path) { req, conn in control.handle(req, conn) }
         try? server.start()
@@ -108,6 +119,7 @@ public enum ShimHost {
         log.finish()
         try? await container.stop()
         server.stop()
+        term.cancel()
         writeExit(files, code: code, error: "")
         return 0
     }
@@ -138,6 +150,7 @@ final class ShimControl: Sendable {
     let files: ShimFiles
     let spec: ShimSpec
     let stdin: StdinStream?
+    let execs = ExecTable()
 
     init(container: LinuxContainer, files: ShimFiles, spec: ShimSpec, stdin: StdinStream?) {
         self.container = container
@@ -183,6 +196,38 @@ final class ShimControl: Sendable {
             case ("POST", "exec"):
                 conn.json(200, try run(JSON.parse(req.body) ?? [:]))
                 return .close
+            case ("POST", "copy-out"):
+                // Guest path → host path the daemon chose inside this container's directory.
+                guard let src = req.query["src"], let dst = req.query["dst"], dst.hasPrefix(files.dir.path + "/") else {
+                    conn.error(400, "shim: copy-out needs src and a dst in the container directory")
+                    return .close
+                }
+                try blocking { try await c.copyOut(from: URL(filePath: src), to: URL(filePath: dst)) }
+            case ("POST", "copy-in"):
+                guard let src = req.query["src"], src.hasPrefix(files.dir.path + "/"), let dst = req.query["dst"] else {
+                    conn.error(400, "shim: copy-in needs a src in the container directory and dst")
+                    return .close
+                }
+                let mode = UInt32(req.query["mode"] ?? "", radix: 8) ?? 0o644
+                try blocking { try await c.copyIn(from: URL(filePath: src), to: URL(filePath: dst), mode: mode) }
+            case ("GET", "stats"):
+                let st = try blocking { try await c.statistics() }
+                conn.json(200, Self.statsRecord(st))
+                return .close
+            case ("POST", "exec-stream"):
+                try stream(JSON.parse(req.body) ?? [:], conn)
+                return .detached
+            case ("GET", "exec-status"):
+                let id = req.query["id"] ?? ""
+                guard let entry = execs.get(id) else { conn.error(404, "shim: no exec \(id)"); return .close }
+                conn.json(200, ["running": .bool(entry.exitCode == nil), "exitCode": entry.exitCode.map { .int(Int64($0)) } ?? .null])
+                return .close
+            case ("POST", "exec-resize"):
+                let w = UInt16(req.query["w"] ?? "") ?? 0
+                let h = UInt16(req.query["h"] ?? "") ?? 0
+                if let p = execs.get(req.query["id"] ?? "")?.process, w > 0, h > 0 {
+                    try blocking { try await p.resize(to: Terminal.Size(width: w, height: h)) }
+                }
             case ("POST", "pause"):
                 try blocking { try await c.withVirtualMachineInstance { try await $0.pause() } }
                 record("paused")
@@ -210,7 +255,7 @@ extension ShimControl {
         let timeout = Int64(body["timeout"]?.int ?? 30)
         let c = container
         let spec = spec
-        let output = CollectingWriter()
+        let output = CollectingWriter(limit: 4096)  // Docker keeps 4 KiB of probe output
         let id = "exec-\(randomHexID().prefix(12))"
         let code: Int32 = try blocking {
             let p = try await c.exec(id) { cfg in
@@ -230,8 +275,136 @@ extension ShimControl {
                 return -1
             }
         }
-        let text = code == -1 ? "Health check exceeded timeout (\(timeout)s)" : String(decoding: output.data.prefix(4096), as: UTF8.self)
+        let text = code == -1 ? "Health check exceeded timeout (\(timeout)s)" : String(decoding: output.data, as: UTF8.self)
         return ["exitCode": .int(Int64(code)), "output": .string(text)]
+    }
+}
+
+extension ShimControl {
+    /// Agent statistics under the keys Apple's `container stats` uses, so the daemon's
+    /// sampler and Docker encoder serve both runtimes.
+    static func statsRecord(_ s: ContainerStatistics) -> JSON {
+        let rx = s.networks?.reduce(UInt64(0)) { $0 + $1.receivedBytes } ?? 0
+        let tx = s.networks?.reduce(UInt64(0)) { $0 + $1.transmittedBytes } ?? 0
+        let rd = s.blockIO?.devices.reduce(UInt64(0)) { $0 + $1.readBytes } ?? 0
+        let wr = s.blockIO?.devices.reduce(UInt64(0)) { $0 + $1.writeBytes } ?? 0
+        func n(_ v: UInt64?) -> JSON { .int(Int64(clamping: v ?? 0)) }
+        return [
+            "cpuUsageUsec": n(s.cpu?.usageUsec), "numProcesses": n(s.process?.current),
+            "memoryUsageBytes": n(s.memory?.usageBytes), "memoryLimitBytes": n(s.memory?.limitBytes),
+            "networkRxBytes": n(rx), "networkTxBytes": n(tx), "blockReadBytes": n(rd), "blockWriteBytes": n(wr),
+        ]
+    }
+}
+
+/// Running and finished execs, by Docker exec ID.
+final class ExecTable: @unchecked Sendable {
+    struct Entry {
+        var process: LinuxProcess?
+        var exitCode: Int32?
+    }
+    private let lock = NSLock()
+    private var entries: [String: Entry] = [:]
+
+    func get(_ id: String) -> Entry? {
+        lock.lock()
+        defer { lock.unlock() }
+        return entries[id]
+    }
+
+    func set(_ id: String, _ change: (inout Entry) -> Void) {
+        lock.lock()
+        var e = entries[id] ?? Entry()
+        change(&e)
+        entries[id] = e
+        lock.unlock()
+    }
+}
+
+/// Exec output straight onto a hijacked connection, framed as Docker frames it.
+struct ConnWriter: Writer {
+    let conn: Connection
+    let stream: UInt8
+    let raw: Bool
+    func write(_ data: Data) throws { _ = conn.write(raw ? data : StdCopy.frame(stream: stream, data)) }
+    func close() throws {}
+}
+
+/// Discards output a client did not attach to.
+struct NullWriter: Writer {
+    func write(_ data: Data) throws {}
+    func close() throws {}
+}
+
+extension ShimControl {
+    /// `docker exec` streamed: `{"id", "args", "env", "workdir", "user", "tty", "stdin",
+    /// "stdout", "stderr", "height", "width"}`. The connection carries Docker's raw (TTY)
+    /// or multiplexed stream, takes stdin until the client half-closes, and closes when the
+    /// process exits; its code is then at `/exec-status`.
+    func stream(_ body: JSON, _ conn: Connection) throws {
+        guard let id = body["id"]?.string, let args = body["args"]?.strings, !args.isEmpty else {
+            throw APIError(400, "shim: exec needs id and args")
+        }
+        let tty = body["tty"]?.bool ?? false
+        let wantStdout = body["stdout"]?.bool ?? true
+        let wantStderr = body["stderr"]?.bool ?? true
+        let input = (body["stdin"]?.bool ?? false) ? StdinStream() : nil
+        let env = spec.environment + (body["env"]?.strings ?? [])
+        let workdir = body["workdir"]?.string.flatMap { $0.isEmpty ? nil : $0 } ?? (spec.workingDirectory.isEmpty ? "/" : spec.workingDirectory)
+        let user = body["user"]?.string.flatMap { $0.isEmpty ? nil : $0 } ?? spec.user
+        let c = container
+        let process = try blocking {
+            try await c.exec(id) { cfg in
+                cfg.arguments = args
+                cfg.environmentVariables = env
+                cfg.workingDirectory = workdir
+                cfg.user = ShimHost.user(user)
+                cfg.terminal = tty
+                cfg.stdin = input
+                let out: any Writer = wantStdout ? ConnWriter(conn: conn, stream: 1, raw: tty) : NullWriter()
+                let err: any Writer = wantStderr ? ConnWriter(conn: conn, stream: 2, raw: false) : NullWriter()
+                cfg.stdout = out
+                cfg.stderr = tty ? nil : err
+            }
+        }
+        conn.hijack(contentType: tty ? "application/vnd.docker.raw-stream" : "application/vnd.docker.multiplexed-stream")
+        execs.set(id) { $0.process = process }
+        do {
+            try blocking { try await process.start() }
+        } catch {
+            // The stream is already switched: report in it, with Docker's code for a
+            // command that cannot run.
+            let missing = "\(error)".contains("failed to find target executable")
+            let detail = missing ? "exec: \"\(args[0])\": executable file not found in $PATH" : "\(error)"
+            let msg = Data("OCI runtime exec failed: exec failed: unable to start container process: \(detail): unknown\n".utf8)
+            _ = conn.write(tty ? msg : StdCopy.frame(stream: 2, msg))
+            execs.set(id) {
+                $0.exitCode = 127
+                $0.process = nil
+            }
+            try? blocking { try await process.delete() }
+            conn.close()
+            return
+        }
+        if tty, let h = body["height"]?.int, let w = body["width"]?.int, h > 0, w > 0 {
+            try? blocking { try await process.resize(to: Terminal.Size(width: UInt16(clamping: w), height: UInt16(clamping: h))) }
+        }
+        if let input {
+            Thread.detachNewThread {
+                while let data = conn.readRaw() { input.feed(data) }
+                input.finish()
+            }
+        }
+        let execs = execs
+        Thread.detachNewThread {
+            let code = (try? blocking { try await process.wait().exitCode }) ?? 137
+            try? blocking { try await process.delete() }
+            execs.set(id) {
+                $0.exitCode = code
+                $0.process = nil
+            }
+            conn.close()
+        }
     }
 }
 
@@ -359,20 +532,30 @@ struct ShimClient: Sendable {
         return (status, Data(payload))
     }
 
-    /// A hijacked raw stream (`/stdin`): returns the socket once the shim switched protocols.
-    func openStream(_ files: ShimFiles, _ path: String) throws -> Int32 {
+    /// A hijacked raw stream (`/stdin`, `/exec-stream`): returns the socket once the shim
+    /// switched protocols.
+    func openStream(_ files: ShimFiles, _ path: String, body: Data = Data()) throws -> Int32 {
         let fd = try connectSocket(files)
-        let request = "POST \(path) HTTP/1.1\r\nHost: shim\r\nContent-Length: 0\r\n\r\n"
-        _ = request.withCString { write(fd, $0, strlen($0)) }
+        var request = Data("POST \(path) HTTP/1.1\r\nHost: shim\r\nContent-Type: application/json\r\nContent-Length: \(body.count)\r\n\r\n".utf8)
+        request.append(body)
+        _ = request.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
         var head = Data()
         var byte: UInt8 = 0
         while head.count < 4096, Darwin.read(fd, &byte, 1) == 1 {
             head.append(byte)
             if head.suffix(4) == Data("\r\n\r\n".utf8) { break }
         }
-        guard String(decoding: head, as: UTF8.self).hasPrefix("HTTP/1.1 101") else {
+        let text = String(decoding: head, as: UTF8.self)
+        guard text.hasPrefix("HTTP/1.1 101") else {
+            // An error reply: relay its status and message.
+            let status = Int(text.split(separator: " ").dropFirst().first ?? "") ?? 500
+            let length = text.split(separator: "\r\n").first { $0.lowercased().hasPrefix("content-length:") }
+                .flatMap { Int($0.split(separator: ":")[1].trimmingCharacters(in: .whitespaces)) } ?? 0
+            var body = [UInt8](repeating: 0, count: min(max(length, 0), 65536))
+            var got = 0
+            while got < body.count, case let n = Darwin.read(fd, &body[got], body.count - got), n > 0 { got += n }
             close(fd)
-            throw APIError(409, "shim refused \(path)")
+            throw APIError(status, JSON.parse(Data(body[0..<got]))?["message"]?.string ?? "shim refused \(path)")
         }
         return fd
     }

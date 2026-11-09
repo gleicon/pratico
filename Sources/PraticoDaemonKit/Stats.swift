@@ -31,8 +31,10 @@ final class StatsService: @unchecked Sendable {
     init(runtime: AppleContainer, containers: ContainerService) {
         self.runtime = runtime
         self.containers = containers
-        // The embedded runtime gets stats from the guest agent instead (runtime step 3).
-        if containers.embedded == nil { Thread.detachNewThread { [self] in sampleLoop() } }
+        // `static let` is lazy: pin the epoch before any sample, or the first deltas
+        // are negative (the Docker CLI then fails to decode them as unsigned).
+        _ = Self.epoch
+        Thread.detachNewThread { [self] in sampleLoop() }
     }
 
     /// Samples soon, e.g. after a container starts.
@@ -41,24 +43,48 @@ final class StatsService: @unchecked Sendable {
     private func sampleLoop() {
         while true {
             let targets = containers.all().filter { $0.state.running && !containers.isPaused($0.id) }
-            if !targets.isEmpty {
-                let byApple = Dictionary(targets.map { ($0.appleId, $0.id) }, uniquingKeysWith: { a, _ in a })
-                let r = runtime.run(["stats", "--no-stream", "--format", "json"] + targets.map(\.appleId))
-                let now = Date()
-                lock.lock()
-                for raw in (r.ok ? JSON.parse(r.stdout)?.array : nil) ?? [] {
-                    guard let apple = raw["id"]?.string, let id = byApple[apple] else { continue }
-                    samples[id] = (Sample(time: now, raw: raw), samples[id]?.now)
-                }
-                let live = Set(targets.map(\.id))
-                samples = samples.filter { live.contains($0.key) || containers.isPaused($0.key) }
-                generation += 1
-                lock.unlock()
-            }
+            if !targets.isEmpty { sample(targets, prune: true) }
             lock.lock()
             let busy = Date().timeIntervalSince(lastDemand) < Self.demandWindow
             lock.unlock()
             if !(busy && !targets.isEmpty) { _ = wakeup.wait(timeout: .now() + Self.idleInterval) }
+        }
+    }
+
+    private func sample(_ targets: [ContainerRecord], prune: Bool) {
+        let byApple = Dictionary(targets.map { ($0.appleId, $0.id) }, uniquingKeysWith: { a, _ in a })
+        let fetched = fetch(targets)
+        let now = Date()
+        lock.lock()
+        for raw in fetched {
+            guard let apple = raw["id"]?.string, let id = byApple[apple] else { continue }
+            // A per-record fetch time keeps CPU deltas right when samples interleave.
+            let at = raw["fetchedAt"]?.double.map { Date(timeIntervalSince1970: $0) } ?? now
+            if let last = samples[id]?.now, at <= last.time { continue }
+            samples[id] = (Sample(time: at, raw: raw), samples[id]?.now)
+        }
+        if prune {
+            let live = Set(targets.map(\.id))
+            samples = samples.filter { live.contains($0.key) || containers.isPaused($0.key) }
+        }
+        generation += 1
+        lock.unlock()
+    }
+
+    /// One record per container, `id` = Apple/VM name. Embedded: the guest agent through
+    /// each shim (fast); CLI backend: one `container stats` call (about 2 s).
+    private func fetch(_ targets: [ContainerRecord]) -> [JSON] {
+        guard let embedded = containers.embedded else {
+            let r = runtime.run(["stats", "--no-stream", "--format", "json"] + targets.map(\.appleId))
+            return (r.ok ? JSON.parse(r.stdout)?.array : nil) ?? []
+        }
+        return targets.compactMap { rec in
+            guard let r = try? embedded.shim.request(containers.shimFiles(rec.id), "GET", "/stats"),
+                var o = JSON.parse(r.body)?.object
+            else { return nil }
+            o["id"] = .string(rec.appleId)
+            o["fetchedAt"] = .double(Date().timeIntervalSince1970)
+            return .object(o)
         }
     }
 
@@ -95,6 +121,14 @@ final class StatsService: @unchecked Sendable {
             return
         }
         var c = current(rec.id)
+        if containers.embedded != nil, !stream || c == nil {
+            // Agent stats take milliseconds: sample now rather than rely on the loop, twice,
+            // so CPU has a fresh delta within the CLI's 2 s patience.
+            sample([rec], prune: false)
+            Thread.sleep(forTimeInterval: 0.5)
+            sample([rec], prune: false)
+            c = current(rec.id)
+        }
         if c == nil {
             // Not sampled yet (just started): ask for one, within the client's patience.
             wake()
@@ -129,7 +163,7 @@ final class StatsService: @unchecked Sendable {
             }
             let usageNs = (s.raw["cpuUsageUsec"]?.int ?? 0) * 1000
             // Measured from daemon start: Unix-epoch nanoseconds times many CPUs overflows Int64.
-            let systemNs = Int64(s.time.timeIntervalSince(epoch) * 1e9) * cpus
+            let systemNs = max(Int64(s.time.timeIntervalSince(epoch) * 1e9), 0) * cpus
             return [
                 "cpu_usage": ["total_usage": .int(usageNs), "usage_in_kernelmode": 0, "usage_in_usermode": .int(usageNs)],
                 "system_cpu_usage": .int(systemNs),

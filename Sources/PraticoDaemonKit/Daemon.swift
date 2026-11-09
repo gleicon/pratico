@@ -77,11 +77,21 @@ public final class Daemon: @unchecked Sendable {
         do {
             return try route(req, conn)
         } catch let e as APIError {
-            conn.error(e.status, e.message)
+            fail(req, conn, e.status, e.message)
         } catch {
-            conn.error(500, "\(error)")
+            fail(req, conn, 500, "\(error)")
         }
         return .keepAlive
+    }
+
+    /// Docker JSON error; a reply to HEAD carries headers only (a body would be read as
+    /// the next response on a kept-alive connection).
+    private func fail(_ req: Request, _ conn: Connection, _ status: Int, _ message: String) {
+        if req.method == "HEAD" {
+            conn.respond(status, body: (["message": .string(message)] as JSON).encoded(), headOnly: true)
+        } else {
+            conn.error(status, message)
+        }
     }
 
     private func route(_ req: Request, _ conn: Connection) throws -> Disposition {
@@ -116,7 +126,6 @@ public final class Daemon: @unchecked Sendable {
         case (_, "containers"):
             if let d = try routeContainers(m, Array(parts.dropFirst()), req, conn) { return d }
         case (_, "exec") where parts.count == 3:
-            try containers.requireCLIBackend("exec")
             if let d = try routeExec(m, parts[1], parts[2], req, conn) { return d }
         case (_, "images"):
             if let d = try routeImages(m, Array(parts.dropFirst()), req, conn) { return d }
@@ -166,22 +175,17 @@ public final class Daemon: @unchecked Sendable {
             try containers.unpause(p[0])
             conn.respond(204)
         case ("POST", 2, "exec"):
-            try containers.requireCLIBackend("exec")
             guard let body = JSON.parse(req.body) else { throw APIError(400, "invalid JSON body") }
             conn.json(201, ["Id": .string(try execs.create(p[0], body: body).id)])
         case ("GET", 2, "stats"):
-            try containers.requireCLIBackend("stats")
             let stream = req.query["stream"].map { $0 == "1" || $0 == "true" } ?? true
             try stats.stats(p[0], stream: stream, oneShot: req.flag("one-shot"), conn: conn)
         case ("HEAD", 2, "archive"):
-            try containers.requireCLIBackend("docker cp")
             let stat = try archives.stat(p[0], path: req.query["path"] ?? "/")
             conn.respond(200, extra: [("X-Docker-Container-Path-Stat", stat)], headOnly: true)
         case ("GET", 2, "archive"):
-            try containers.requireCLIBackend("docker cp")
             try archives.get(p[0], path: req.query["path"] ?? "/", conn: conn)
         case ("PUT", 2, "archive"):
-            try containers.requireCLIBackend("docker cp")
             try archives.put(p[0], path: req.query["path"] ?? "/", tar: req.body)
             conn.respond(200, body: Data())
         case ("POST", 2, "wait"):

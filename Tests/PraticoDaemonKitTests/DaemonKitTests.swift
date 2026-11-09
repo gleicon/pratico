@@ -254,3 +254,11 @@ private let grypeSample = Data(#"""
     #expect(ContainerService.startError("permission denied", executable: "/x").message.contains("permission denied"))
     #expect(ContainerService.startError("vm failed", executable: "/x").status == 500)
 }
+
+@Test func collectingWriterStopsAtItsLimit() throws {
+    let w = CollectingWriter(limit: 5)
+    try w.write(Data("abc".utf8))
+    try w.write(Data("defgh".utf8))
+    try w.write(Data("ijk".utf8))
+    #expect(w.data == Data("abcde".utf8))
+}
