@@ -114,6 +114,10 @@ State lives in `~/.pratico/`: `docker.sock`, `config.toml`, `containers/`, `stor
 tests and e2e, builds and verifies the DMG, tags `vX.Y.Z`, and publishes a GitHub
 release with the DMG and its SHA-256.
 
+## License
+
+MIT, see [LICENSE](LICENSE).
+
 ## Acknowledgements
 
 pratico embeds [apple/containerization](https://github.com/apple/containerization)
