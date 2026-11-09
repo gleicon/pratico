@@ -127,6 +127,7 @@ public final class ContainerService: @unchecked Sendable {
                     if ShimClient.read(files.state)?["status"]?.string == "paused" { pausedVMs.insert(id) }
                     log.tailExternalWriter()
                     track(id, pid: pid, log: log, shim: embedded.shim)
+                    health.started(rec)
                 }
             }
             return
@@ -461,11 +462,16 @@ public final class ContainerService: @unchecked Sendable {
         let mounts = try Self.mounts(rec.hostConfig).map { ShimMount(source: $0.source, destination: $0.destination, readOnly: $0.readOnly) }
         let mem = rec.hostConfig["Memory"]?.int.flatMap { $0 > 0 ? Int($0 / 1_048_576) : nil } ?? config.defaultMemoryMiB
         let cpus = rec.hostConfig["NanoCpus"]?.int.flatMap { $0 > 0 ? Int(($0 + 999_999_999) / 1_000_000_000) : nil } ?? config.defaultCPUs
+        let rootfs: String = files.dir.appending(path: "rootfs.ext4").path
+        let env: [String] = rec.config["Env"]?.strings ?? []
+        let workdir: String = rec.config["WorkingDir"]?.string ?? ""
+        let user: String = rec.config["User"]?.string ?? ""
+        let hostname: String = rec.config["Hostname"]?.string ?? rec.appleId
+        let openStdin: Bool = rec.config["OpenStdin"]?.bool ?? false
         let spec = ShimSpec(
-            id: rec.appleId, kernel: embedded.kernel, initfs: embedded.initfs, rootfs: files.dir.appending(path: "rootfs.ext4").path,
-            arguments: [rec.path] + rec.args, environment: rec.config["Env"]?.strings ?? [],
-            workingDirectory: rec.config["WorkingDir"]?.string ?? "", user: rec.config["User"]?.string ?? "",
-            tty: rec.tty, hostname: rec.config["Hostname"]?.string ?? rec.appleId, cpus: max(cpus, 1), memoryMiB: max(mem, 64),
+            id: rec.appleId, kernel: embedded.kernel, initfs: embedded.initfs, rootfs: rootfs,
+            arguments: [rec.path] + rec.args, environment: env, workingDirectory: workdir, user: user,
+            tty: rec.tty, openStdin: openStdin, hostname: hostname, cpus: max(cpus, 1), memoryMiB: max(mem, 64),
             mounts: mounts)
         try JSONEncoder().encode(spec).write(to: files.spec, options: .atomic)
 
@@ -477,7 +483,27 @@ public final class ContainerService: @unchecked Sendable {
         let pid = try embedded.shim.spawn(files)
         update(rec.id) { $0.state = ContainerState(status: "running", startedAt: Date()) }
         track(rec.id, pid: pid, log: log, shim: embedded.shim)
+        // The process never ran (bad image config, missing executable): fail the start, as
+        // Docker does, instead of reporting a container that exited at once.
+        if let status = ShimClient.exitStatus(files), !status.error.isEmpty {
+            awaitExit(rec.id, seconds: 5)
+            throw Self.startError(status.error, executable: rec.path)
+        }
         emit(rec, "start")
+        health.started(rec)
+    }
+
+    /// Docker's wording for a process that cannot start. The CLI picks `run`'s exit code
+    /// from it: "executable file not found" → 127, "permission denied" → 126.
+    static func startError(_ error: String, executable: String) -> APIError {
+        let e = error.lowercased()
+        if e.contains("failed to find target executable") || e.contains("no such file") {
+            return APIError(400, "failed to create task for container: exec: \"\(executable)\": executable file not found in $PATH: unknown")
+        }
+        if e.contains("permission denied") {
+            return APIError(400, "failed to create task for container: exec: \"\(executable)\": permission denied: unknown")
+        }
+        return APIError(500, error)
     }
 
     /// Relays the shim's output to attached clients and records the exit when it ends.
@@ -755,12 +781,65 @@ public final class ContainerService: @unchecked Sendable {
         lock.unlock()
     }
 
-    func attach(_ ref: String, conn: Connection) throws {
+    func attach(_ ref: String, stdin: Bool, conn: Connection) throws {
         let rec = try resolve(ref)
         conn.hijack(contentType: rec.tty ? "application/vnd.docker.raw-stream" : "application/vnd.docker.multiplexed-stream")
         lock.lock()
         attached[rec.id, default: []].append(conn)
         lock.unlock()
+        if stdin, rec.config["OpenStdin"]?.bool == true, let embedded { pumpStdin(rec, conn, embedded) }
+    }
+
+    /// Client keystrokes or piped input into the shim's `/stdin`. The Docker CLI attaches
+    /// before it starts the container, so this waits for the shim; until then the input
+    /// stays in the socket buffer.
+    private func pumpStdin(_ rec: ContainerRecord, _ conn: Connection, _ embedded: EmbeddedContainers) {
+        let files = ShimFiles(dir: dir(rec.id))
+        let attachedAt = Date()
+        Thread.detachNewThread { [weak self] in
+            var fd: Int32 = -1
+            while fd < 0 {
+                if let s = try? embedded.shim.openStream(files, "/stdin") { fd = s; break }
+                guard let self, Date().timeIntervalSince(attachedAt) < 120 else { return }
+                // Started and already gone: nothing will read stdin.
+                if let r = try? self.resolve(rec.id), !r.state.running, let started = r.state.startedAt, started > attachedAt { return }
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+            while let data = conn.readRaw() {
+                let sent = data.withUnsafeBytes { buf -> Bool in
+                    var off = 0
+                    while off < buf.count {
+                        let n = write(fd, buf.baseAddress! + off, buf.count - off)
+                        if n <= 0 { return false }
+                        off += n
+                    }
+                    return true
+                }
+                if !sent { break }
+            }
+            close(fd)  // EOF ends the process's stdin
+        }
+    }
+
+    /// `POST /containers/{id}/resize` for a TTY container.
+    func resize(_ ref: String, height: Int, width: Int) throws {
+        let rec = try resolve(ref)
+        guard let embedded, rec.state.running, height > 0, width > 0 else { return }
+        try? embedded.shim.call(ShimFiles(dir: dir(rec.id)), "POST", "/resize?h=\(height)&w=\(width)")
+    }
+
+    /// One healthcheck probe: through the shim's agent on the embedded runtime.
+    func healthProbe(_ rec: ContainerRecord, _ check: HealthConfig) -> HealthState.Probe {
+        guard let embedded else { return HealthMonitor.probe(runtime, appleId: rec.appleId, check: check) }
+        let start = Date()
+        let body: JSON = ["args": JSON(check.command), "timeout": .int(Int64(max(check.timeout.rounded(.up), 1)))]
+        do {
+            let r = try embedded.shim.request(ShimFiles(dir: dir(rec.id)), "POST", "/exec", body: body.encoded())
+            let j = JSON.parse(r.body) ?? [:]
+            return .init(start: start, end: Date(), exitCode: Int(j["exitCode"]?.int ?? -1), output: j["output"]?.string ?? "")
+        } catch {
+            return .init(start: start, end: Date(), exitCode: -1, output: "\(error)")
+        }
     }
 
     func logs(_ ref: String, query: Request, conn: Connection) throws {

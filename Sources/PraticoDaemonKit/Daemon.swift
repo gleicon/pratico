@@ -188,12 +188,12 @@ public final class Daemon: @unchecked Sendable {
             try containers.wait(p[0], condition: req.query["condition"] ?? "not-running", conn: conn)
             return .detached
         case ("POST", 2, "attach"):
-            try containers.attach(p[0], conn: conn)
+            try containers.attach(p[0], stdin: req.flag("stdin"), conn: conn)
             return .detached
         case ("GET", 2, "logs"):
             try containers.logs(p[0], query: req, conn: conn)
         case ("POST", 2, "resize"):
-            _ = try containers.resolve(p[0])
+            try containers.resize(p[0], height: req.query["h"].flatMap(Int.init) ?? 0, width: req.query["w"].flatMap(Int.init) ?? 0)
             conn.respond(200, body: Data())
         default:
             return nil

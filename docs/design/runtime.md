@@ -158,8 +158,7 @@ The app gets an "Acknowledgements" file in the DMG and in About. Naming stays
 
 1. ✅ Assets and image store: pull, list, inspect, tag, rm, save on `ContainerizationOCI`.
 2. ✅ Shim and lifecycle: create/start/stop/kill/wait/logs/rm and VM pause; exit codes
-   survive daemon restart. Next within it: stdin (`run -i`, `-it`, attach) and
-   healthchecks through the shim.
+   survive daemon restart; stdin (`run -i`, `-it`, attach), TTY resize, healthchecks.
 3. Exec, cp, stats, pause on the agent; remove the freezer agent and the stats sampler.
 4. pratico-net: switch, IPAM, embedded DNS (+ `.pratico.internal`, `host.docker.internal`),
    Swift uplink (ARP/ICMP/UDP/TCP), port publishing; bridge and none.
@@ -189,7 +188,10 @@ Per-container files in `<home>/containers/<id>/`: `config.json` (Docker record),
 `<home>/run/<short id>.sock`.
 
 Shim control API (HTTP over the socket, one request per connection): `POST /kill?signal=N`,
-`POST /stop?t=S` (SIGTERM, SIGKILL after S seconds), `POST /pause`, `POST /resume`.
+`POST /stop?t=S` (SIGTERM, SIGKILL after S seconds), `POST /pause`, `POST /resume`,
+`POST /resize?h=&w=`, `POST /stdin` (hijacked: raw bytes into the process's stdin until
+EOF), `POST /exec` (`{"args", "timeout"}` → `{"exitCode", "output"}`, used by
+healthchecks).
 
 Learned while building:
 - Virtualization.framework needs the `com.apple.security.virtualization` entitlement on
@@ -199,6 +201,10 @@ Learned while building:
   for `logs -f` and attach, and flushes it before closing attached clients on exit.
 - Async Containerization calls are bridged into the daemon's thread-per-connection
   model with `blocking { }`; it must never run on a Swift concurrency thread.
+- A terminal process has one output stream: Containerization rejects a separate stderr
+  with `terminal=true`.
+- The Docker CLI picks `run`'s exit code from the start error's wording (127 for
+  "executable file not found", 126 for "permission denied"), so start errors use it.
 - Interim limits, each 501 with a reason: exec, cp, stats, `docker login`, custom
   networks, published ports; containers have no network yet (step 4).
 

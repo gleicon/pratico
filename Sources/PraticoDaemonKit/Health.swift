@@ -95,7 +95,7 @@ final class HealthMonitor: @unchecked Sendable {
                     isCurrent(rec.id, run)
                 else { return }
                 if service.isPaused(rec.id) { continue }
-                let probe = Self.probe(service.runtime, appleId: rec.appleId, check: check)
+                let probe = service.healthProbe(rec, check)
                 lock.lock()
                 guard runs[rec.id] == run else { lock.unlock(); return }
                 let changed = states[rec.id]?.record(probe, retries: check.retries,

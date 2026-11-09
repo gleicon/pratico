@@ -44,7 +44,7 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 
 - [x] Kernel and vminit assets pinned and verified; images (pull, list, inspect, tag, rm, save) on the ContainerizationOCI store (`PRATICO_RUNTIME=embedded`, `make e2e-embedded`)
 - [x] Per-container shim owns the VM: create/start/stop/kill/wait/logs/rm, VM-level pause; exit codes survive a daemon restart
-- [ ] `docker run -i/-it` and attach stdin through the shim; healthchecks on the agent
+- [x] `docker run -i/-it` and attach stdin through the shim, TTY resize; healthchecks on the agent; start errors in Docker's wording
 - [ ] Exec, cp, stats, pause through the guest agent; freezer agent and stats sampler removed
 - [ ] pratico-net: user-space switch, IPAM, embedded DNS (`.pratico.internal`, `host.docker.internal`), Swift uplink (ARP/ICMP/UDP/TCP), port publishing; `bridge` and `none`
 - [ ] Custom networks with hot connect/disconnect that cut traffic, not just names

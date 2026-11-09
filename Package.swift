@@ -22,6 +22,7 @@ let package = Package(
                 .product(name: "Containerization", package: "containerization"),
                 .product(name: "ContainerizationOCI", package: "containerization"),
                 .product(name: "ContainerizationExtras", package: "containerization"),
+                .product(name: "ContainerizationOS", package: "containerization"),
             ]),
         .executableTarget(name: "pratico-daemon", dependencies: ["PraticoCore", "PraticoDaemonKit"]),
         .executableTarget(name: "pratico-menubar", dependencies: ["PraticoCore"]),

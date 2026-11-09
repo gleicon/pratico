@@ -61,6 +61,25 @@ expect_eq "run --rm returns the exit code" "$rc" "7"
 check "image is listed" test "$(docker images --format '{{.Repository}}:{{.Tag}}' | grep -c '^alpine:latest$')" = 1
 check "kernel is pratico's" test "$(docker run --rm alpine uname -r)" = "6.18.15"
 
+# stdin and terminals
+expect_eq "run -i pipes stdin" "$(printf 'a\nb\nc\n' | docker run -i --rm alpine wc -l | tr -d ' ')" "3"
+PTY="python3 -I $(dirname "$0")/pty.py"
+expect_eq "run -it gets a sized tty" "$($PTY 33 111 "$DOCKER" run -it --rm alpine sh -c 'sleep 1; tty; stty size' | tr -d '\r' | xargs)" "/dev/pts/0 33 111"
+typed=$( (sleep 3; printf 'echo typed-$((6*7))\n'; sleep 1; printf 'exit 5\n') | $PTY 24 80 sh -c "$DOCKER run -it --rm alpine sh; echo rc=\$?" | tr -d '\r')
+check "an interactive shell runs what is typed" grep -q 'typed-42' <<<"$typed"
+expect_eq "it returns the shell's exit code" "$(tail -1 <<<"$typed")" "rc=5"
+docker run --rm alpine /nonexistent >/dev/null 2>&1
+expect_eq "a missing executable exits 127" "$?" "127"
+
+# healthchecks run through the shim's agent
+docker run -d --name e-hc --health-cmd 'test -f /tmp/ok' --health-interval 1s --health-retries 2 \
+    alpine sh -c 'sleep 4; touch /tmp/ok; sleep 300' >/dev/null
+sleep 3.5
+expect_eq "healthcheck reports unhealthy" "$(docker inspect e-hc --format '{{.State.Health.Status}}')" "unhealthy"
+sleep 3
+expect_eq "and recovers to healthy" "$(docker inspect e-hc --format '{{.State.Health.Status}}')" "healthy"
+docker rm -f e-hc >/dev/null
+
 docker run -d --name e-tick alpine sh -c 'for i in 1 2 3; do echo tick $i; sleep 1; done' >/dev/null
 expect_eq "logs -f follows to the end" "$(docker logs -f e-tick | xargs)" "tick 1 tick 2 tick 3"
 expect_eq "exit 0 recorded" "$(docker inspect e-tick --format '{{.State.Status}} {{.State.ExitCode}}')" "exited 0"

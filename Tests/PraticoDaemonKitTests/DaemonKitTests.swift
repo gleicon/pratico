@@ -247,3 +247,10 @@ private let grypeSample = Data(#"""
     let args = ContainerService.withNetworks(["create", "--name", "x", "-e", "A=1", "--", "img"], ["pratico-n", "default"])
     #expect(args == ["create", "--name", "x", "--network", "pratico-n", "--network", "default", "-e", "A=1", "--", "img"])
 }
+
+@Test func startErrorsUseDockerWording() {
+    let missing = ContainerService.startError("cannot start: failed to find target executable /x", executable: "/x")
+    #expect(missing.status == 400 && missing.message.contains("executable file not found"))
+    #expect(ContainerService.startError("permission denied", executable: "/x").message.contains("permission denied"))
+    #expect(ContainerService.startError("vm failed", executable: "/x").status == 500)
+}

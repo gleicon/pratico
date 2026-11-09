@@ -1,5 +1,6 @@
 import Containerization
 import ContainerizationOCI
+import ContainerizationOS
 import Foundation
 
 /// What a shim runs, written by the daemon to `containers/<id>/spec.json`
@@ -14,6 +15,8 @@ struct ShimSpec: Codable, Sendable {
     var workingDirectory: String
     var user: String
     var tty: Bool
+    /// Docker `OpenStdin`: the process reads what attached clients send to `/stdin`.
+    var openStdin: Bool
     var hostname: String
     var cpus: Int
     var memoryMiB: Int
@@ -61,6 +64,7 @@ public enum ShimHost {
         writeJSON(["pid": .int(Int64(getpid())), "status": "starting"], to: files.state)
 
         let log = LogStore(path: files.log)
+        let stdin = spec.openStdin ? StdinStream() : nil
         let vmm = VZVirtualMachineManager(
             kernel: Kernel(path: URL(filePath: spec.kernel), platform: .linuxArm),
             initialFilesystem: .block(format: "ext4", source: spec.initfs, destination: "/", options: ["ro"]))
@@ -79,7 +83,9 @@ public enum ShimHost {
                 config.process.user = Self.user(spec.user)
                 config.process.terminal = spec.tty
                 config.process.stdout = LogWriter(log: log, stream: 1)
-                config.process.stderr = LogWriter(log: log, stream: spec.tty ? 1 : 2)
+                // A terminal has one output stream; Containerization rejects a separate stderr.
+                config.process.stderr = spec.tty ? nil : LogWriter(log: log, stream: 2)
+                config.process.stdin = stdin
                 for m in spec.mounts {
                     config.mounts.append(.share(source: m.source, destination: m.destination, options: m.readOnly ? ["ro"] : []))
                 }
@@ -93,7 +99,7 @@ public enum ShimHost {
         writeJSON(["pid": .int(Int64(getpid())), "status": "running"], to: files.state)
 
         try? FileManager.default.createDirectory(at: files.socket.deletingLastPathComponent(), withIntermediateDirectories: true)
-        let control = ShimControl(container: container, files: files)
+        let control = ShimControl(container: container, files: files, spec: spec, stdin: stdin)
         let server = HTTPServer(path: files.socket.path) { req, conn in control.handle(req, conn) }
         try? server.start()
 
@@ -130,10 +136,14 @@ public enum ShimHost {
 final class ShimControl: Sendable {
     let container: LinuxContainer
     let files: ShimFiles
+    let spec: ShimSpec
+    let stdin: StdinStream?
 
-    init(container: LinuxContainer, files: ShimFiles) {
+    init(container: LinuxContainer, files: ShimFiles, spec: ShimSpec, stdin: StdinStream?) {
         self.container = container
         self.files = files
+        self.spec = spec
+        self.stdin = stdin
     }
 
     /// `state.json` tells a restarted daemon whether the VM is paused.
@@ -156,6 +166,23 @@ final class ShimControl: Sendable {
                 DispatchQueue.global().asyncAfter(deadline: .now() + grace) {
                     Task { try? await c.kill(Signal(rawValue: 9)) }
                 }
+            case ("POST", "stdin"):
+                // Raw bytes into the process's stdin until the client closes its side.
+                guard let stdin else { conn.error(409, "shim: container was created without OpenStdin"); return .close }
+                conn.hijack(contentType: "application/octet-stream")
+                Thread.detachNewThread {
+                    while let data = conn.readRaw() { stdin.feed(data) }
+                    stdin.finish()
+                    conn.close()
+                }
+                return .detached
+            case ("POST", "resize"):
+                let w = UInt16(req.query["w"] ?? "") ?? 0
+                let h = UInt16(req.query["h"] ?? "") ?? 0
+                if w > 0 && h > 0 { try blocking { try await c.resize(to: Terminal.Size(width: w, height: h)) } }
+            case ("POST", "exec"):
+                conn.json(200, try run(JSON.parse(req.body) ?? [:]))
+                return .close
             case ("POST", "pause"):
                 try blocking { try await c.withVirtualMachineInstance { try await $0.pause() } }
                 record("paused")
@@ -172,6 +199,52 @@ final class ShimControl: Sendable {
         }
         return .close  // one request per connection; the client reads to EOF
     }
+}
+
+extension ShimControl {
+    /// One-shot exec with captured output (Docker keeps 4 KiB), for healthchecks:
+    /// `{"args": [...], "timeout": seconds}` → `{"exitCode", "output"}`; -1 on timeout.
+    func run(_ body: JSON) throws -> JSON {
+        let args = body["args"]?.strings ?? []
+        guard !args.isEmpty else { throw APIError(400, "shim: exec needs args") }
+        let timeout = Int64(body["timeout"]?.int ?? 30)
+        let c = container
+        let spec = spec
+        let output = CollectingWriter()
+        let id = "exec-\(randomHexID().prefix(12))"
+        let code: Int32 = try blocking {
+            let p = try await c.exec(id) { cfg in
+                cfg.arguments = args
+                cfg.environmentVariables = spec.environment
+                cfg.workingDirectory = spec.workingDirectory.isEmpty ? "/" : spec.workingDirectory
+                cfg.user = ShimHost.user(spec.user)
+                cfg.stdout = output
+                cfg.stderr = output
+            }
+            try await p.start()
+            defer { Task { try? await p.delete() } }
+            do {
+                return try await p.wait(timeoutInSeconds: timeout).exitCode
+            } catch {
+                try? await p.kill(Signal(rawValue: 9))
+                return -1
+            }
+        }
+        let text = code == -1 ? "Health check exceeded timeout (\(timeout)s)" : String(decoding: output.data.prefix(4096), as: UTF8.self)
+        return ["exitCode": .int(Int64(code)), "output": .string(text)]
+    }
+}
+
+/// What attached clients type, as the process's stdin.
+final class StdinStream: ReaderStream, @unchecked Sendable {
+    private let stream_: AsyncStream<Data>
+    private let continuation: AsyncStream<Data>.Continuation
+
+    init() { (stream_, continuation) = AsyncStream.makeStream(of: Data.self) }
+
+    func stream() -> AsyncStream<Data> { stream_ }
+    func feed(_ data: Data) { continuation.yield(data) }
+    func finish() { continuation.finish() }
 }
 
 /// Container output into the log, line-framed by `LogStore`.
@@ -263,9 +336,50 @@ struct ShimClient: Sendable {
     /// One request on the shim's control socket.
     @discardableResult
     func call(_ files: ShimFiles, _ method: String, _ path: String) throws -> Int {
+        try request(files, method, path).status
+    }
+
+    /// One request with an optional JSON body; returns status and body.
+    func request(_ files: ShimFiles, _ method: String, _ path: String, body: Data = Data()) throws -> (status: Int, body: Data) {
+        let fd = try connectSocket(files)
+        defer { close(fd) }
+        var request = Data("\(method) \(path) HTTP/1.1\r\nHost: shim\r\nContent-Type: application/json\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n".utf8)
+        request.append(body)
+        _ = request.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
+        var buf = [UInt8](repeating: 0, count: 4096)
+        var response = Data()
+        while case let n = Darwin.read(fd, &buf, buf.count), n > 0 { response.append(contentsOf: buf[0..<n]) }
+        let headEnd = response.range(of: Data("\r\n\r\n".utf8))
+        let head = String(decoding: response[..<(headEnd?.lowerBound ?? response.endIndex)], as: UTF8.self)
+        let payload = headEnd.map { response[$0.upperBound...] } ?? Data()
+        let status = Int(head.split(separator: " ").dropFirst().first ?? "") ?? 500
+        guard status < 300 else {
+            throw APIError(status, JSON.parse(Data(payload))?["message"]?.string ?? String(decoding: payload, as: UTF8.self))
+        }
+        return (status, Data(payload))
+    }
+
+    /// A hijacked raw stream (`/stdin`): returns the socket once the shim switched protocols.
+    func openStream(_ files: ShimFiles, _ path: String) throws -> Int32 {
+        let fd = try connectSocket(files)
+        let request = "POST \(path) HTTP/1.1\r\nHost: shim\r\nContent-Length: 0\r\n\r\n"
+        _ = request.withCString { write(fd, $0, strlen($0)) }
+        var head = Data()
+        var byte: UInt8 = 0
+        while head.count < 4096, Darwin.read(fd, &byte, 1) == 1 {
+            head.append(byte)
+            if head.suffix(4) == Data("\r\n\r\n".utf8) { break }
+        }
+        guard String(decoding: head, as: UTF8.self).hasPrefix("HTTP/1.1 101") else {
+            close(fd)
+            throw APIError(409, "shim refused \(path)")
+        }
+        return fd
+    }
+
+    private func connectSocket(_ files: ShimFiles) throws -> Int32 {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw APIError(500, "shim: socket failed") }
-        defer { close(fd) }
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
         let sockPath = files.socket.path
@@ -277,18 +391,10 @@ struct ShimClient: Sendable {
         let ok = withUnsafePointer(to: &addr) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
         }
-        guard ok == 0 else { throw APIError(409, "container is not running (shim unreachable)") }
-        let request = "\(method) \(path) HTTP/1.1\r\nHost: shim\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-        _ = request.withCString { write(fd, $0, strlen($0)) }
-        var buf = [UInt8](repeating: 0, count: 4096)
-        var response = Data()
-        while case let n = Darwin.read(fd, &buf, buf.count), n > 0 { response.append(contentsOf: buf[0..<n]) }
-        let text = String(decoding: response, as: UTF8.self)
-        let status = Int(text.split(separator: " ").dropFirst().first ?? "") ?? 500
-        guard status < 300 else {
-            let body = text.components(separatedBy: "\r\n\r\n").dropFirst().joined()
-            throw APIError(status, JSON.parse(Data(body.utf8))?["message"]?.string ?? body)
+        guard ok == 0 else {
+            close(fd)
+            throw APIError(409, "container is not running (shim unreachable)")
         }
-        return status
+        return fd
     }
 }
