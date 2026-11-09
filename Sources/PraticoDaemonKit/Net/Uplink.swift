@@ -91,12 +91,13 @@ final class Uplink: @unchecked Sendable {
         guard let d = UDPDatagram(ip.payload) else { return }
         let key = FlowKey(path: port.path, srcIP: ip.src, srcPort: d.srcPort, dstIP: ip.dst, dstPort: d.dstPort)
         if let back = inboundUDP[key] {  // a reply to a published UDP port's client
+            guard back.listener.live else { inboundUDP[key] = nil; return }
             back.last = Date()
             var to = back.client
             _ = d.payload.withUnsafeBytes { buf in
                 withUnsafePointer(to: &to) {
                     $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                        sendto(back.listener, buf.baseAddress, buf.count, 0, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                        sendto(back.listener.fd, buf.baseAddress, buf.count, 0, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
                     }
                 }
             }
@@ -222,6 +223,7 @@ final class Uplink: @unchecked Sendable {
                 c.close(reset: false)
                 tcp[k] = nil
             }
+            inboundUDP = inboundUDP.filter { $0.key.path != path }
         }
     }
 
@@ -230,6 +232,7 @@ final class Uplink: @unchecked Sendable {
     final class Listener {
         let fd: Int32
         let source: DispatchSourceRead
+        var live = true  // false once cancelled: its fd number may belong to another socket
         init(fd: Int32, source: DispatchSourceRead) {
             self.fd = fd
             self.source = source
@@ -237,10 +240,10 @@ final class Uplink: @unchecked Sendable {
     }
 
     final class InboundUDP {
-        let listener: Int32
+        let listener: Listener
         let client: sockaddr_in
         var last = Date()
-        init(listener: Int32, client: sockaddr_in) {
+        init(listener: Listener, client: sockaddr_in) {
             self.listener = listener
             self.client = client
         }
@@ -272,24 +275,30 @@ final class Uplink: @unchecked Sendable {
                 $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &len) }
             }
             let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
-            source.setEventHandler { [weak self] in
-                guard let self else { return }
+            let listener = Listener(fd: fd, source: source)
+            source.setEventHandler { [weak self, unowned listener] in
+                guard let self, listener.live else { return }
                 if isUDP {
-                    self.inboundDatagram(fd, nic: nic, gateway: gateway, containerPort: containerPort)
+                    self.inboundDatagram(listener, nic: nic, gateway: gateway, containerPort: containerPort)
                 } else {
                     self.accept(fd, nic: nic, gateway: gateway, containerPort: containerPort)
                 }
             }
             source.setCancelHandler { close(fd) }
             source.resume()
-            listeners[id, default: []].append(Listener(fd: fd, source: source))
+            listeners[id, default: []].append(listener)
             return UInt16(bigEndian: actual.sin_port)
         }
     }
 
     func unpublish(container id: String) {
         queue.async { [self] in
-            for l in listeners.removeValue(forKey: id) ?? [] { l.source.cancel() }
+            let gone = listeners.removeValue(forKey: id) ?? []
+            for l in gone {
+                l.live = false
+                l.source.cancel()
+            }
+            inboundUDP = inboundUDP.filter { _, f in !gone.contains { $0 === f.listener } }
         }
     }
 
@@ -316,7 +325,8 @@ final class Uplink: @unchecked Sendable {
         }
     }
 
-    private func inboundDatagram(_ listener: Int32, nic: NetPort, gateway: UInt32, containerPort: UInt16) {
+    private func inboundDatagram(_ l: Listener, nic: NetPort, gateway: UInt32, containerPort: UInt16) {
+        let listener = l.fd
         var buf = [UInt8](repeating: 0, count: 65535)
         var client = sockaddr_in()
         var len = socklen_t(MemoryLayout<sockaddr_in>.size)
@@ -325,7 +335,7 @@ final class Uplink: @unchecked Sendable {
         }
         guard n > 0 else { return }
         let existing = inboundUDP.first {
-            $0.key.path == nic.path && $0.value.listener == listener
+            $0.key.path == nic.path && $0.value.listener === l
                 && $0.value.client.sin_addr.s_addr == client.sin_addr.s_addr && $0.value.client.sin_port == client.sin_port
         }
         let key: FlowKey
@@ -335,7 +345,7 @@ final class Uplink: @unchecked Sendable {
         } else {
             guard admits(nic.path) else { return }
             key = FlowKey(path: nic.path, srcIP: nic.ip, srcPort: containerPort, dstIP: gateway, dstPort: ephemeral(nic.path))
-            inboundUDP[key] = InboundUDP(listener: listener, client: client)
+            inboundUDP[key] = InboundUDP(listener: l, client: client)
         }
         let d = UDPDatagram(srcPort: key.dstPort, dstPort: containerPort, payload: Array(buf[0..<n]))
         sw.deliver(to: nic, src: gateway, proto: 17, d.bytes(src: gateway, dst: nic.ip))

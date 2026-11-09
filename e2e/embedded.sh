@@ -216,6 +216,31 @@ docker rm -f e-b1 e-b2 e-c1 e-c2 e-i1 e-i2 >/dev/null
 check "network rm" docker network rm e-n1
 docker network rm e-int >/dev/null
 
+# Published ports (pratico-net 4c)
+docker pull -q busybox >/dev/null 2>&1
+docker run -d --name e-web -p 18210:80 busybox sh -c 'mkdir /w; echo published > /w/index.html; httpd -f -p 80 -h /w' >/dev/null
+docker run -d --name e-web2 -p 80 busybox sh -c 'mkdir /w; echo random > /w/index.html; httpd -f -p 80 -h /w' >/dev/null
+docker run -d --name e-udp -p 18211:9000/udp busybox sh -c 'nc -u -l -p 9000 -e cat' >/dev/null
+docker run -d --name e-lo -p 127.0.0.1:18212:80 busybox sh -c 'mkdir /w; echo lo > /w/index.html; httpd -f -p 80 -h /w' >/dev/null
+sleep 1
+expect_eq "AC-13 -p host:container serves on the Mac" "$(curl -s -m5 http://127.0.0.1:18210/)" "published"
+random=$(docker port e-web2 80/tcp | head -1)
+expect_eq "-p container gets a free host port" "$(curl -s -m5 "http://$random/")" "random"
+expect_has "a taken host port fails the start" "$(docker run -d --name e-clash -p 18210:80 busybox sleep 60 2>&1)" "port is already allocated"
+expect_eq "UDP ports are published" "$(echo udp-echo | nc -u -w2 127.0.0.1 18211)" "udp-echo"
+check "a host IP binds only that address" sh -c "lsof -nP -iTCP:18212 -sTCP:LISTEN | grep -q 127.0.0.1:18212"
+leaked=0
+for p in $(pgrep -f "pratico-shim $HOME_DIR"); do
+    lsof -nP -a -p "$p" -iTCP -sTCP:LISTEN >/dev/null 2>&1 && leaked=1
+done
+expect_eq "shims inherit no daemon sockets" "$leaked" "0"
+stop_daemon
+start_daemon
+expect_eq "published ports survive a daemon restart" "$(curl -s -m5 http://127.0.0.1:18210/)" "published"
+docker stop -t1 e-web >/dev/null
+check "stopping a container releases its port" sh -c "! lsof -nP -iTCP:18210 -sTCP:LISTEN >/dev/null"
+docker rm -f e-web e-web2 e-udp e-lo e-clash >/dev/null 2>&1
+
 # SIGTERM to a shim (logout, shutdown) stops its container like `docker stop`.
 docker run -d --name e-term alpine sh -c 'trap "exit 9" TERM; while true; do sleep 0.1; done' >/dev/null
 sleep 1

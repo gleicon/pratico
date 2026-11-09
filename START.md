@@ -76,9 +76,10 @@ export DOCKER_HOST=unix:///tmp/pratico-try/docker.sock
 docker run --rm alpine uname -a
 ```
 
-It covers pull, images, run (`-d`, `-i`, `-it`), logs, exec, cp, stats, healthchecks,
-stop, kill, pause, rm, tag, save. Containers have no network yet, and `docker login`,
-custom networks and published ports answer 501. Progress:
+It covers pull, images, run (`-d`, `-i`, `-it`, `-p`), logs, exec, cp, stats,
+healthchecks, networks with DNS by name, internet and `host.docker.internal` access,
+stop, kill, pause, rm, tag, save. `docker login` answers 501, and connecting or
+disconnecting a running container answers 409, for now. Progress:
 [docs/design/runtime.md](docs/design/runtime.md).
 
 ## Troubleshooting

@@ -80,6 +80,7 @@ public final class ContainerService: @unchecked Sendable {
     private var attached: [String: [Connection]] = [:]
     private var pauseAgents: [String: PauseAgent] = [:]
     private var pausedVMs: Set<String> = []  // embedded: paused through the shim
+    private var published: [String: [String: [(ip: String, port: String)]]] = [:]  // embedded: bound host ports
 
     init(runtime: AppleContainer, images: ImageService, root: URL, networks: NetworkService, config: Config = Config(),
          events: EventBus = EventBus(), embedded: EmbeddedContainers? = nil) {
@@ -126,6 +127,8 @@ public final class ContainerService: @unchecked Sendable {
                 if let pid {
                     if let data = try? Data(contentsOf: files.spec), let spec = try? JSONDecoder().decode(ShimSpec.self, from: data) {
                         networks.attach(rec, spec.nics)
+                        // The daemon's listeners died with it; bind them again.
+                        if let ports = try? networks.publish(rec, spec.nics) { published[id] = ports }
                     }
                     if ShimClient.read(files.state)?["status"]?.string == "paused" { pausedVMs.insert(id) }
                     log.tailExternalWriter()
@@ -285,10 +288,6 @@ public final class ContainerService: @unchecked Sendable {
         }
 
         if let embedded {
-            // Published ports arrive with pratico-net step 4c; say so rather than drop them.
-            guard host["PortBindings"]?.object?.isEmpty ?? true else {
-                throw APIError(400, "pratico: published ports are not on the embedded runtime yet")
-            }
             try FileManager.default.createDirectory(at: dir(id), withIntermediateDirectories: true)
             do {
                 try embedded.prepareRootfs(image: ImageRef.normalize(imageRef), at: dir(id).appending(path: "rootfs.ext4"))
@@ -489,6 +488,17 @@ public final class ContainerService: @unchecked Sendable {
             throw error
         }
         networks.attach(rec, nics)
+        do {
+            let ports = try networks.publish(rec, nics)
+            lock.lock()
+            published[rec.id] = ports
+            lock.unlock()
+        } catch {
+            // Docker fails the start when a port cannot be bound; nothing keeps running.
+            try? embedded.shim.call(files, "POST", "/kill?signal=9")
+            networks.stopped(rec.id)
+            throw error
+        }
         update(rec.id) { $0.state = ContainerState(status: "running", startedAt: Date()) }
         track(rec.id, pid: pid, log: log, shim: embedded.shim)
         // The process never ran (bad image config, missing executable): fail the start, as
@@ -592,9 +602,11 @@ public final class ContainerService: @unchecked Sendable {
 
         log?.finish()
         health.stopped(id)
+        networks.unpublish(id)
         networks.stopped(id)
         lock.lock()
         pausedVMs.remove(id)
+        published[id] = nil
         lock.unlock()
         update(id) {
             $0.state.status = "exited"
@@ -1010,9 +1022,18 @@ public final class ContainerService: @unchecked Sendable {
         }
     }
 
+    /// Bound host ports (embedded runtime: `-p 80` gets a free port), else the request.
+    private func bindings(_ rec: ContainerRecord) -> [String: JSON] {
+        lock.lock()
+        let bound = published[rec.id]
+        lock.unlock()
+        guard let bound, rec.state.running else { return rec.hostConfig["PortBindings"]?.object ?? [:] }
+        return bound.mapValues { list in .array(list.map { ["HostIp": .string($0.ip), "HostPort": .string($0.port)] }) }
+    }
+
     func ports(_ rec: ContainerRecord) -> [JSON] {
         var out: [JSON] = []
-        for (port, list) in (rec.hostConfig["PortBindings"]?.object ?? [:]).sorted(by: { $0.key < $1.key }) {
+        for (port, list) in bindings(rec).sorted(by: { $0.key < $1.key }) {
             let (num, proto) = port.splitOnce("/")
             for b in list.array ?? [] {
                 let hp = b["HostPort"]?.string.flatMap { Int64($0) } ?? Int64(num) ?? 0
@@ -1045,7 +1066,7 @@ public final class ContainerService: @unchecked Sendable {
     func inspect(_ rec: ContainerRecord) -> JSON {
         let s = rec.state
         var portMap: [String: JSON] = [:]
-        for (port, list) in rec.hostConfig["PortBindings"]?.object ?? [:] { portMap[port] = list }
+        for (port, list) in bindings(rec) { portMap[port] = list }
         // Docker's top-level address fields describe the default bridge only.
         let bridge = s.running && networks.active(rec)[networks.bridge.id] != nil
             ? networks.address(rec.id, on: networks.bridge) : nil

@@ -477,7 +477,10 @@ struct ShimClient: Sendable {
         var attr: posix_spawnattr_t?
         posix_spawnattr_init(&attr)
         defer { posix_spawnattr_destroy(&attr) }
-        posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETSID))
+        // CLOEXEC_DEFAULT: the shim gets only the descriptors below. Without it, it would
+        // inherit the daemon's API connections and published-port listeners, which then
+        // outlive a daemon restart.
+        posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETSID | POSIX_SPAWN_CLOEXEC_DEFAULT))
         var actions: posix_spawn_file_actions_t?
         posix_spawn_file_actions_init(&actions)
         defer { posix_spawn_file_actions_destroy(&actions) }

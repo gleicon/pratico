@@ -1,6 +1,6 @@
 # Embedded runtime — design
 
-Status: in progress. Steps 1–3, 4a and 4b of the migration are done behind
+Status: in progress. Steps 1–4 of the migration are done behind
 `PRATICO_RUNTIME=embedded` (SPEC D-26–D-28). Replaces the `container` CLI backend.
 
 ## Why
@@ -163,7 +163,7 @@ The app gets an "Acknowledgements" file in the DMG and in About. Naming stays
    agent. The freezer agent and `container stats` sampler leave with the CLI backend.
 4. pratico-net: ✅ 4a switch, IPAM, gateway, embedded DNS (+ `.pratico.internal`,
    `host.docker.internal`), bridge/none/custom; ✅ 4b Swift uplink (UDP/ping/TCP);
-   4c ports.
+   ✅ 4c published ports.
 5. Custom networks with hot connect/disconnect (new e2e: disconnect cuts traffic by IP).
 6. Registry auth and push on the OCI client; scanning reads the store directly.
 7. Egress intercept: sandwich engine on container flows, per-container opt-in, menubar view.
@@ -234,8 +234,16 @@ Learned while building:
   loopback, multicast, and anything from `--internal` networks never leaves. Packets over
   the 1500-byte MTU are fragmented. Measured: internet at line rate; to the Mac,
   ~79 MB/s down and ~70 MB/s up; 300 sequential and 20 parallel connections clean.
-- Interim limits, each 501 with a reason: `docker login`, published ports (4c);
-  connect/disconnect of running containers (409, step 5).
+- Published ports (4c): the daemon binds each `-p` on the Mac (all interfaces unless a
+  host IP is given, as Docker) before the start completes, so a taken port fails it with
+  Docker's message. Each accepted connection is opened toward the container from the
+  gateway by the same TCP endpoint, actively; UDP keeps a per-client flow. Listeners
+  are rebound after a daemon restart and released when the container stops.
+- Shims are spawned with `POSIX_SPAWN_CLOEXEC_DEFAULT`: without it they inherited the
+  daemon's API connections and port listeners, which kept a published port captive
+  after a daemon restart.
+- Interim limits: `docker login` (501); IPv6 port binds; connect/disconnect of running
+  containers (409, step 5).
 
 ## Risks and costs
 

@@ -438,6 +438,37 @@ final class NetworkService: @unchecked Sendable {
         lock.unlock()
     }
 
+    /// Publishes the container's `PortBindings` on its primary NIC (Docker binds all
+    /// interfaces unless a host IP is given, D-8). Returns the bound host ports per
+    /// container port, or throws Docker's "port is already allocated" and unbinds all.
+    func publish(_ rec: ContainerRecord, _ nics: [ShimNIC]) throws -> [String: [(ip: String, port: String)]] {
+        guard let netSwitch, let nic = nics.first, let mac = MAC(nic.mac),
+            let ip = IPv4.parse(String(nic.address.split(separator: "/")[0])), let gw = IPv4.parse(nic.gateway)
+        else { return [:] }
+        let port = NetPort(path: nic.socket, containerId: rec.id, networkId: nic.networkId, mac: mac, ip: ip)
+        var out: [String: [(ip: String, port: String)]] = [:]
+        for (key, list) in (rec.hostConfig["PortBindings"]?.object ?? [:]).sorted(by: { $0.key < $1.key }) {
+            let (num, proto) = key.splitOnce("/")
+            guard let containerPort = UInt16(num) else { continue }
+            for b in list.array ?? [] {
+                let hostIP = b["HostIp"]?.string.flatMap { $0.isEmpty ? nil : $0 } ?? "0.0.0.0"
+                guard let hostAddr = IPv4.parse(hostIP) else { continue }  // IPv6 binds: not yet
+                let asked = UInt16(b["HostPort"]?.string ?? "") ?? 0
+                do {
+                    let bound = try netSwitch.uplink.publish(container: rec.id, nic: port, gateway: gw, hostIP: hostAddr,
+                                                             hostPort: asked, containerPort: containerPort, udp: proto == "udp")
+                    out[key, default: []].append((hostIP, String(bound)))
+                } catch {
+                    netSwitch.uplink.unpublish(container: rec.id)
+                    throw error
+                }
+            }
+        }
+        return out
+    }
+
+    func unpublish(_ id: String) { netSwitch?.uplink.unpublish(container: id) }
+
     /// DNS for a container (SPEC D-27): Docker's names on user networks, plus pratico's
     /// `<name>.pratico.internal` on every network the asker shares, and the host names.
     func resolve(_ port: NetPort, _ query: String) -> [UInt32]? {
