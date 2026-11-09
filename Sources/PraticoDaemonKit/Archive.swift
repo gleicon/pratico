@@ -60,7 +60,8 @@ final class ArchiveService: @unchecked Sendable {
         }
         let work = files.dir.appending(path: "cp-\(randomHexID().prefix(8))")
         defer { try? FileManager.default.removeItem(at: work) }
-        let copy = work.appending(path: Self.baseName(path))
+        guard let name = try? Self.hostName(path) else { return (false, Data()) }
+        let copy = work.appending(path: name)
         try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
         guard (try? copyOut(rec, path, to: copy, embedded)) != nil, let a = try? FileManager.default.attributesOfItem(atPath: copy.path) else {
             return (false, Data())
@@ -82,7 +83,7 @@ final class ArchiveService: @unchecked Sendable {
         let work = containers.shimFiles(rec.id).dir.appending(path: "cp-\(randomHexID().prefix(8))")
         defer { try? FileManager.default.removeItem(at: work) }
         try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
-        let name = Self.baseName(trimmed) == "/" ? "rootfs" : Self.baseName(trimmed)
+        let name = try Self.hostName(trimmed)
         do { try copyOut(rec, trimmed, to: work.appending(path: name), embedded) } catch {
             throw APIError(404, "Could not find the file \(path) in container \(rec.name)")
         }
@@ -125,8 +126,26 @@ final class ArchiveService: @unchecked Sendable {
         for entry in try FileManager.default.contentsOfDirectory(atPath: work.path) {
             let src = work.appending(path: entry)
             let dst = (path.hasSuffix("/") ? path : path + "/") + entry
-            let mode = (try? FileManager.default.attributesOfItem(atPath: src.path)[.posixPermissions] as? Int) ?? 0o644
-            try embedded.shim.call(files, "POST", "/copy-in?src=\(q(src.path))&dst=\(q(dst))&mode=\(String(mode, radix: 8))")
+            // lstat: a top-level symlink in the tar must never be followed on the host,
+            // or `x -> ~/.ssh/id_rsa` would copy a host file into the container.
+            var st = Darwin.stat()
+            guard lstat(src.path, &st) == 0 else { continue }
+            switch st.st_mode & S_IFMT {
+            case S_IFREG, S_IFDIR:
+                // Directory copies archive inner symlinks as links, and only those that stay
+                // inside the tree.
+                let mode = Int(st.st_mode & 0o7777)
+                try embedded.shim.call(files, "POST", "/copy-in?src=\(q(src.path))&dst=\(q(dst))&mode=\(String(mode, radix: 8))")
+            case S_IFLNK:
+                let target = try FileManager.default.destinationOfSymbolicLink(atPath: src.path)
+                let body: JSON = ["args": JSON(["ln", "-sfn", target, dst]), "timeout": 10]
+                let r = try embedded.shim.request(files, "POST", "/exec", body: body.encoded())
+                guard JSON.parse(r.body)?["exitCode"]?.int == 0 else {
+                    throw APIError(500, "cannot create symlink \(dst) in container \(rec.name) (the image needs ln)")
+                }
+            default:
+                throw APIError(400, "unsupported file type in archive: \(entry)")
+            }
             targets.append(dst)
         }
         if !targets.isEmpty {
@@ -165,6 +184,17 @@ final class ArchiveService: @unchecked Sendable {
             throw APIError(404, "Could not find the file \(path) in container \(rec.name)")
         }
         guard r.ok else { throw APIError(500, "cannot extract into \(path): \(r.errorText)") }
+    }
+
+    /// A base name that is safe as one host path component: never empty, `.`, or `..`
+    /// (`work/..` would land outside the temporary directory).
+    static func hostName(_ path: String) throws -> String {
+        let name = baseName(path)
+        if name == "/" { return "rootfs" }
+        guard !name.isEmpty, name != ".", name != "..", !name.contains("/") else {
+            throw APIError(400, "invalid path: \(path)")
+        }
+        return name
     }
 
     static func baseName(_ path: String) -> String {

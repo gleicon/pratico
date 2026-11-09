@@ -159,6 +159,16 @@ final class ShimControl: Sendable {
         self.stdin = stdin
     }
 
+    /// Whether a host path stays inside `dir` once `.`/`..` and symlinks are resolved (the
+    /// last component may not exist yet, so its parent is resolved).
+    static func inside(_ path: String, _ dir: URL) -> Bool {
+        let url = URL(filePath: path).standardizedFileURL
+        guard !["", ".", ".."].contains(url.lastPathComponent) else { return false }
+        let parent = url.deletingLastPathComponent().resolvingSymlinksInPath().path
+        let root = dir.resolvingSymlinksInPath().path
+        return parent == root || parent.hasPrefix(root + "/")
+    }
+
     /// `state.json` tells a restarted daemon whether the VM is paused.
     private func record(_ status: String) {
         ShimHost.writeJSON(["pid": .int(Int64(getpid())), "status": .string(status)], to: files.state)
@@ -198,13 +208,13 @@ final class ShimControl: Sendable {
                 return .close
             case ("POST", "copy-out"):
                 // Guest path → host path the daemon chose inside this container's directory.
-                guard let src = req.query["src"], let dst = req.query["dst"], dst.hasPrefix(files.dir.path + "/") else {
+                guard let src = req.query["src"], let dst = req.query["dst"], Self.inside(dst, files.dir) else {
                     conn.error(400, "shim: copy-out needs src and a dst in the container directory")
                     return .close
                 }
                 try blocking { try await c.copyOut(from: URL(filePath: src), to: URL(filePath: dst)) }
             case ("POST", "copy-in"):
-                guard let src = req.query["src"], src.hasPrefix(files.dir.path + "/"), let dst = req.query["dst"] else {
+                guard let src = req.query["src"], Self.inside(src, files.dir), let dst = req.query["dst"] else {
                     conn.error(400, "shim: copy-in needs a src in the container directory and dst")
                     return .close
                 }

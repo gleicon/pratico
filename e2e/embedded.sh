@@ -108,6 +108,19 @@ docker cp "$CP/in" e-box:/tmp/ >/dev/null
 expect_eq "cp copies a tree in, keeping modes" "$(docker exec e-box /tmp/in/x.sh)" "ran"
 expect_eq "copied files are owned by root" "$(docker exec e-box stat -c %U /tmp/in/sub/b.txt)" "root"
 if docker cp e-box:/nope "$CP/n" >/dev/null 2>&1; then bad "cp of a missing path is refused"; else ok "cp of a missing path is refused"; fi
+# A tar's top-level symlink to a host file arrives as a symlink, never as the host file.
+echo "host-secret-$$" >"$CP/secret"
+ln -s "$CP/secret" "$CP/leak"
+tar -cf "$CP/leak.tar" -C "$CP" leak
+docker cp - e-box:/tmp/ <"$CP/leak.tar" >/dev/null 2>&1
+check "cp in keeps a symlink as a symlink" test "$(docker exec e-box readlink /tmp/leak)" = "$CP/secret"
+if docker exec e-box cat /tmp/leak 2>/dev/null | grep -q "host-secret-$$"; then
+    bad "cp in never copies a host file through a symlink"
+else
+    ok "cp in never copies a host file through a symlink"
+fi
+code=$(curl -s -o /dev/null -w '%{http_code}' --unix-socket "$SOCK" "http://d/containers/e-box/archive?path=/tmp/..")
+expect_eq "cp of a .. path is refused" "$code" "400"
 docker run -d --name e-busy alpine sh -c 'while true; do :; done' >/dev/null
 sleep 2
 cpu=$(docker stats --no-stream --format '{{.CPUPerc}}' e-busy | tr -d '%' | cut -d. -f1)

@@ -262,3 +262,18 @@ private let grypeSample = Data(#"""
     try w.write(Data("ijk".utf8))
     #expect(w.data == Data("abcde".utf8))
 }
+
+@Test func hostNamesNeverEscapeTheWorkDirectory() throws {
+    #expect(try ArchiveService.hostName("/etc/hosts") == "hosts")
+    #expect(try ArchiveService.hostName("/") == "rootfs")
+    #expect(throws: APIError.self) { try ArchiveService.hostName("/tmp/..") }
+    #expect(throws: APIError.self) { try ArchiveService.hostName("/tmp/.") }
+}
+
+@Test func shimCopyPathsStayInsideTheContainerDirectory() {
+    let dir = FileManager.default.temporaryDirectory
+    #expect(ShimControl.inside(dir.appending(path: "cp-1/x").path, dir))
+    #expect(!ShimControl.inside(dir.appending(path: "cp-1/../../etc/passwd").path, dir))
+    #expect(!ShimControl.inside(dir.appending(path: "..").path, dir))
+    #expect(!ShimControl.inside("/etc/passwd", dir))
+}
