@@ -394,7 +394,7 @@ final class NetworkService: @unchecked Sendable {
         guard let netSwitch, !rec.builtin || rec.name == "bridge", let c = IPv4.cidr(rec.subnet),
             let gw = IPv4.parse(rec.gateway)
         else { return }
-        netSwitch.setSegment(rec.id, NetSegment(gateway: gw, prefix: c.prefix))
+        netSwitch.setSegment(rec.id, NetSegment(gateway: gw, prefix: c.prefix, isInternal: rec.isInternal))
     }
 
     /// Plans the container's NICs (primary network first) and takes an address on each.
@@ -444,7 +444,7 @@ final class NetworkService: @unchecked Sendable {
         let name = query.hasSuffix(".") ? String(query.dropLast()) : query
         guard let asker = try? resolve(port.networkId) else { return nil }
         if ["host.docker.internal", "host.pratico.internal", "gateway.docker.internal", "gateway.pratico.internal"].contains(name) {
-            return IPv4.parse(asker.gateway).map { [$0] }
+            return asker.isInternal ? nil : IPv4.parse(asker.gateway).map { [$0] }  // the Mac is outside
         }
         let suffix = ".pratico.internal"
         let scoped = name.hasSuffix(suffix)
@@ -518,6 +518,7 @@ final class NetworkService: @unchecked Sendable {
     /// Rewrites `/etc/hosts` in every running, unpaused member of these networks.
     /// `wait` blocks until done, so a started container's peers resolve it on return.
     func sync(_ networkIds: Set<String>, wait: Bool) {
+        guard apple else { return }  // pratico-net answers names over DNS instead
         let work: @Sendable () -> Void = { [self] in
             guard let containers else { return }
             let custom = Set(networkIds.filter { id in (try? resolve(id)).map { !$0.builtin } ?? false })

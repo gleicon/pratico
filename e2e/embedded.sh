@@ -180,8 +180,14 @@ if docker exec e-c1 ping -c1 -W2 "$b2" >/dev/null 2>&1; then bad "networks are i
 check "external names resolve through the Mac" docker exec e-c1 nslookup example.com
 expect_eq "host.docker.internal is the gateway" "$(docker exec e-c1 nslookup host.docker.internal 2>/dev/null | awk '/^Address/ {a=$2} END {print a}')" \
     "$(docker network inspect e-n1 --format '{{(index .IPAM.Config 0).Gateway}}')"
-docker rm -f e-b1 e-b2 e-c1 e-c2 >/dev/null
+docker network create --internal e-int >/dev/null
+docker run -d --name e-i1 --network e-int alpine sleep 600 >/dev/null
+docker run -d --name e-i2 --network e-int alpine sleep 600 >/dev/null
+check "internal networks resolve their containers" docker exec e-i1 ping -c1 -W2 e-i2
+if docker exec e-i1 nslookup example.com >/dev/null 2>&1; then bad "internal networks do no external DNS"; else ok "internal networks do no external DNS"; fi
+docker rm -f e-b1 e-b2 e-c1 e-c2 e-i1 e-i2 >/dev/null
 check "network rm" docker network rm e-n1
+docker network rm e-int >/dev/null
 
 # SIGTERM to a shim (logout, shutdown) stops its container like `docker stop`.
 docker run -d --name e-term alpine sh -c 'trap "exit 9" TERM; while true; do sleep 0.1; done' >/dev/null

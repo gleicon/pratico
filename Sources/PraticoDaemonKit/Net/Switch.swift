@@ -14,6 +14,8 @@ struct NetPort: Sendable, Equatable {
 struct NetSegment: Sendable {
     var gateway: UInt32
     var prefix: Int
+    /// `docker network create --internal`: nothing leaves the network, not even DNS.
+    var isInternal = false
     func contains(_ ip: UInt32) -> Bool { ip & IPv4.mask(prefix) == gateway & IPv4.mask(prefix) }
 }
 
@@ -166,6 +168,12 @@ final class NetSwitch: @unchecked Sendable {
         }
         if let local = resolveName?(port, q.name) {
             respond(q.qtype == 1 ? local : [])  // a container name has no AAAA/MX/…
+            return
+        }
+        // Internal networks: no lookups on the Mac, which would let a container exfiltrate
+        // through names it controls (Docker 26+ also stops forwarding there).
+        guard !segment.isInternal else {
+            respond(nil)
             return
         }
         guard q.qtype == 1 else {
