@@ -40,6 +40,16 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 - [x] Pull from an authenticated private registry; no password ever lands under `~/.pratico` (AC-9, AC-50)
 - [x] Push to a registry; fresh pull returns same digest (AC-25)
 
+## Embedded runtime (design: docs/design/runtime.md) — replaces the `container` CLI backend
+
+- [ ] Kernel and vminit assets pinned and verified; images (pull, list, inspect, tag, rm, save) on the ContainerizationOCI store
+- [ ] Per-container shim owns the VM: create/start/stop/kill/wait/logs/rm; exit codes survive a daemon restart
+- [ ] Exec, cp, stats, pause through the guest agent; freezer agent and stats sampler removed
+- [ ] pratico-net: user-space switch, IPAM, embedded DNS, uplink to the internet, port publishing; `bridge` and `none`
+- [ ] Custom networks with hot connect/disconnect that cut traffic, not just names
+- [ ] Registry auth and push on the OCI client, credentials in pratico's own Keychain item; scans read the store
+- [ ] `container` CLI adapter, `/etc/hosts` sync and default-network anchor removed; SPEC and docs updated; acknowledgements (licenses) in the app and DMG
+
 ## Networks and volumes
 
 - [x] Default `bridge` network present at start (AC-26); networking works without restricted entitlements such as `com.apple.vm.networking` (no paid Apple Developer account)
