@@ -19,12 +19,25 @@ final class Uplink: @unchecked Sendable {
     unowned let sw: NetSwitch
     private var udp: [FlowKey: UDPFlow] = [:]
     private var tcp: [FlowKey: TCPConn] = [:]
-    private var pings = 0
+    private var pings: [String: Int] = [:]  // by NIC
     private var timer: DispatchSourceTimer?
+    private var listeners: [String: [Listener]] = [:]  // by container ID
+    private var inboundUDP: [FlowKey: InboundUDP] = [:]  // container → client replies
 
-    static let maxFlowsPerNIC = 1024
+    // Each flow holds a socket: bounded per NIC and overall, well under the descriptor
+    // limit the daemon raises at start (`Uplink.raiseDescriptorLimit`).
+    static let maxFlowsPerNIC = 256
+    static let maxFlows = 4096
     static let udpIdle: TimeInterval = 60
-    static let maxPings = 64
+    static let maxPingsPerNIC = 16
+
+    /// launchd agents start with a soft limit of 256 descriptors.
+    static func raiseDescriptorLimit() {
+        var lim = rlimit()
+        guard getrlimit(RLIMIT_NOFILE, &lim) == 0 else { return }
+        lim.rlim_cur = min(lim.rlim_max, rlim_t(OPEN_MAX))
+        setrlimit(RLIMIT_NOFILE, &lim)
+    }
 
     init(switch sw: NetSwitch) {
         self.sw = sw
@@ -55,8 +68,11 @@ final class Uplink: @unchecked Sendable {
         }
     }
 
-    private func flows(for path: String) -> Int {
-        udp.keys.filter { $0.path == path }.count + tcp.keys.filter { $0.path == path }.count
+    /// Whether a NIC may open one more flow.
+    private func admits(_ path: String) -> Bool {
+        guard udp.count + tcp.count + inboundUDP.count < Self.maxFlows else { return false }
+        return udp.keys.filter { $0.path == path }.count + tcp.keys.filter { $0.path == path }.count
+            + inboundUDP.keys.filter { $0.path == path }.count < Self.maxFlowsPerNIC
     }
 
     // MARK: UDP
@@ -74,8 +90,20 @@ final class Uplink: @unchecked Sendable {
     private func udpOut(_ ip: IPv4Packet, _ port: NetPort, _ target: UInt32) {
         guard let d = UDPDatagram(ip.payload) else { return }
         let key = FlowKey(path: port.path, srcIP: ip.src, srcPort: d.srcPort, dstIP: ip.dst, dstPort: d.dstPort)
+        if let back = inboundUDP[key] {  // a reply to a published UDP port's client
+            back.last = Date()
+            var to = back.client
+            _ = d.payload.withUnsafeBytes { buf in
+                withUnsafePointer(to: &to) {
+                    $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                        sendto(back.listener, buf.baseAddress, buf.count, 0, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                    }
+                }
+            }
+            return
+        }
         if udp[key] == nil {
-            guard flows(for: port.path) < Self.maxFlowsPerNIC, let fd = Self.connected(SOCK_DGRAM, target, d.dstPort) else { return }
+            guard admits(port.path), let fd = Self.connected(SOCK_DGRAM, target, d.dstPort) else { return }
             let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
             let flow = UDPFlow(fd: fd, source: source)
             source.setEventHandler { [weak self] in
@@ -99,7 +127,7 @@ final class Uplink: @unchecked Sendable {
 
     private func ping(_ ip: IPv4Packet, _ port: NetPort, _ target: UInt32) {
         let p = ip.payload
-        guard p.count >= 8, p[0] == 8, pings < Self.maxPings else { return }
+        guard p.count >= 8, p[0] == 8, pings[port.path, default: 0] < Self.maxPingsPerNIC else { return }
         let fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP)
         guard fd >= 0 else { return }
         var sa = Self.sockaddr4(target, 0)
@@ -107,14 +135,14 @@ final class Uplink: @unchecked Sendable {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { sendto(fd, p, p.count, 0, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
         }
         guard sent == p.count else { close(fd); return }
-        pings += 1
+        pings[port.path, default: 0] += 1
         let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
         let done = Box(false)
         let finish: () -> Void = { [weak self] in
             guard !done.value else { return }
             done.value = true
             source.cancel()
-            self?.pings -= 1
+            self?.pings[port.path, default: 1] -= 1
         }
         source.setEventHandler { [weak self] in
             var buf = [UInt8](repeating: 0, count: 65535)
@@ -145,7 +173,7 @@ final class Uplink: @unchecked Sendable {
     private func tcpIn(_ ip: IPv4Packet, _ port: NetPort, _ target: UInt32) {
         guard let seg = TCPSegment(ip.payload, src: ip.src, dst: ip.dst) else { return }
         let key = FlowKey(path: port.path, srcIP: ip.src, srcPort: seg.srcPort, dstIP: ip.dst, dstPort: seg.dstPort)
-        if let conn = tcp[key] {
+        if let conn = tcp[key] {  // also replies on published-port connections (dst = gateway)
             conn.segment(seg)
             if conn.state == .closed { tcp[key] = nil }
             return
@@ -162,7 +190,7 @@ final class Uplink: @unchecked Sendable {
             }
             return
         }
-        guard flows(for: port.path) < Self.maxFlowsPerNIC else { return }
+        guard admits(port.path) else { return }
         let conn = TCPConn(key: key, port: port, syn: seg, uplink: self)
         tcp[key] = conn
         conn.connect(target)
@@ -172,6 +200,7 @@ final class Uplink: @unchecked Sendable {
 
     private func tick() {
         let now = Date()
+        for (k, f) in inboundUDP where now.timeIntervalSince(f.last) > Self.udpIdle { inboundUDP[k] = nil }
         for (k, f) in udp where now.timeIntervalSince(f.last) > Self.udpIdle {
             f.source.cancel()
             udp[k] = nil
@@ -194,6 +223,122 @@ final class Uplink: @unchecked Sendable {
                 tcp[k] = nil
             }
         }
+    }
+
+    // MARK: Published ports
+
+    final class Listener {
+        let fd: Int32
+        let source: DispatchSourceRead
+        init(fd: Int32, source: DispatchSourceRead) {
+            self.fd = fd
+            self.source = source
+        }
+    }
+
+    final class InboundUDP {
+        let listener: Int32
+        let client: sockaddr_in
+        var last = Date()
+        init(listener: Int32, client: sockaddr_in) {
+            self.listener = listener
+            self.client = client
+        }
+    }
+
+    /// One published port. Binds now, so a taken port fails the container's start, as
+    /// Docker does; returns the bound host port (`hostPort` 0 picks a free one).
+    func publish(container id: String, nic: NetPort, gateway: UInt32, hostIP: UInt32, hostPort: UInt16,
+                 containerPort: UInt16, udp isUDP: Bool) throws -> UInt16
+    {
+        try queue.sync {
+            let fd = socket(AF_INET, isUDP ? SOCK_DGRAM : SOCK_STREAM, 0)
+            guard fd >= 0 else { throw APIError(500, "cannot open a socket for port \(hostPort)") }
+            var on: Int32 = 1
+            setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, socklen_t(MemoryLayout<Int32>.size))
+            _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
+            var sa = Self.sockaddr4(hostIP, hostPort)
+            let bound = withUnsafePointer(to: &sa) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+            }
+            guard bound == 0, isUDP || listen(fd, 128) == 0 else {
+                let reason = errno == EADDRINUSE ? "port is already allocated" : String(cString: strerror(errno))
+                close(fd)
+                throw APIError(500, "Bind for \(IPv4.format(hostIP)):\(hostPort) failed: \(reason)")
+            }
+            var actual = sockaddr_in()
+            var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+            _ = withUnsafeMutablePointer(to: &actual) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &len) }
+            }
+            let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
+            source.setEventHandler { [weak self] in
+                guard let self else { return }
+                if isUDP {
+                    self.inboundDatagram(fd, nic: nic, gateway: gateway, containerPort: containerPort)
+                } else {
+                    self.accept(fd, nic: nic, gateway: gateway, containerPort: containerPort)
+                }
+            }
+            source.setCancelHandler { close(fd) }
+            source.resume()
+            listeners[id, default: []].append(Listener(fd: fd, source: source))
+            return UInt16(bigEndian: actual.sin_port)
+        }
+    }
+
+    func unpublish(container id: String) {
+        queue.async { [self] in
+            for l in listeners.removeValue(forKey: id) ?? [] { l.source.cancel() }
+        }
+    }
+
+    private func ephemeral(_ path: String) -> UInt16 {
+        while true {
+            let p = UInt16.random(in: 32768...60999)
+            if !tcp.keys.contains(where: { $0.path == path && $0.dstPort == p })
+                && !inboundUDP.keys.contains(where: { $0.path == path && $0.dstPort == p })
+            { return p }
+        }
+    }
+
+    private func accept(_ listener: Int32, nic: NetPort, gateway: UInt32, containerPort: UInt16) {
+        while true {
+            let fd = Darwin.accept(listener, nil, nil)
+            guard fd >= 0 else { return }
+            guard admits(nic.path) else { close(fd); continue }
+            _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
+            var on: Int32 = 1
+            setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
+            setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &on, socklen_t(MemoryLayout<Int32>.size))
+            let key = FlowKey(path: nic.path, srcIP: nic.ip, srcPort: containerPort, dstIP: gateway, dstPort: ephemeral(nic.path))
+            tcp[key] = TCPConn(inbound: key, port: nic, fd: fd, uplink: self)
+        }
+    }
+
+    private func inboundDatagram(_ listener: Int32, nic: NetPort, gateway: UInt32, containerPort: UInt16) {
+        var buf = [UInt8](repeating: 0, count: 65535)
+        var client = sockaddr_in()
+        var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let n = withUnsafeMutablePointer(to: &client) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { recvfrom(listener, &buf, buf.count, 0, $0, &len) }
+        }
+        guard n > 0 else { return }
+        let existing = inboundUDP.first {
+            $0.key.path == nic.path && $0.value.listener == listener
+                && $0.value.client.sin_addr.s_addr == client.sin_addr.s_addr && $0.value.client.sin_port == client.sin_port
+        }
+        let key: FlowKey
+        if let existing {
+            key = existing.key
+            existing.value.last = Date()
+        } else {
+            guard admits(nic.path) else { return }
+            key = FlowKey(path: nic.path, srcIP: nic.ip, srcPort: containerPort, dstIP: gateway, dstPort: ephemeral(nic.path))
+            inboundUDP[key] = InboundUDP(listener: listener, client: client)
+        }
+        let d = UDPDatagram(srcPort: key.dstPort, dstPort: containerPort, payload: Array(buf[0..<n]))
+        sw.deliver(to: nic, src: gateway, proto: 17, d.bytes(src: gateway, dst: nic.ip))
     }
 
     fileprivate func send(_ seg: TCPSegment, for conn: TCPConn) {
@@ -236,7 +381,7 @@ final class Uplink: @unchecked Sendable {
 /// succeeds (so "connection refused" stays a refusal), flow control works both ways,
 /// and lost segments are retransmitted.
 final class TCPConn {
-    enum State { case connecting, synAckSent, established, closed }
+    enum State { case connecting, synSent, synAckSent, established, closed }
 
     let key: Uplink.FlowKey
     let port: NetPort
@@ -255,9 +400,9 @@ final class TCPConn {
     private var rcvNxt: UInt32
     private var unacked: [UInt8] = []  // bytes from sndUna
     private var guestWindow: UInt32
-    private let guestScale: UInt8
-    private let ourScale: UInt8
-    private let mss: Int
+    private var guestScale: UInt8
+    private var ourScale: UInt8
+    private var mss: Int
     private var toHost: [UInt8] = []
     private var guestFin = false
     private var hostEOF = false
@@ -269,6 +414,14 @@ final class TCPConn {
     private let started = Date()
 
     static let receiveCapacity = 1 << 20
+    /// Bytes in flight to the guest, whatever window it advertises.
+    static let sendCapacity = 4 << 20
+
+    /// The guest picks its MSS: 0 or tiny values would loop or flood, so 64…1460.
+    static func clampMSS(_ v: UInt16?) -> Int {
+        guard let v, v > 0 else { return 536 }
+        return Int(min(max(v, 64), 1460))
+    }
 
     init(key: Uplink.FlowKey, port: NetPort, syn: TCPSegment, uplink: Uplink) {
         self.key = key
@@ -279,8 +432,40 @@ final class TCPConn {
         sndNxt = iss
         guestScale = syn.windowScale ?? 0
         ourScale = syn.windowScale == nil ? 0 : 5  // 1 MiB / 32 fits the 16-bit field
-        mss = Int(min(syn.mss ?? 536, 1460))
+        mss = Self.clampMSS(syn.mss)
         guestWindow = UInt32(syn.window)  // a SYN's window is never scaled
+    }
+
+    /// A published port: `fd` is the accepted client; pratico opens the connection to the
+    /// container from the gateway (`key.dstIP:key.dstPort`).
+    init(inbound key: Uplink.FlowKey, port: NetPort, fd: Int32, uplink: Uplink) {
+        self.key = key
+        self.port = port
+        self.uplink = uplink
+        self.fd = fd
+        rcvNxt = 0
+        sndUna = iss
+        sndNxt = iss &+ 1
+        guestScale = 0
+        ourScale = 5
+        mss = 536
+        guestWindow = 0
+        state = .synSent
+        let r = DispatchSource.makeReadSource(fileDescriptor: fd, queue: uplink.queue)
+        r.setEventHandler { [weak self] in self?.readable() }
+        r.setCancelHandler { Darwin.close(fd) }
+        readSource = r  // resumed once established
+        let w = DispatchSource.makeWriteSource(fileDescriptor: fd, queue: uplink.queue)
+        w.setEventHandler { [weak self] in self?.writable() }
+        writeSource = w  // suspended until there is data the client cannot take yet
+        syn()
+    }
+
+    private func syn() {
+        let s = TCPSegment(srcPort: key.dstPort, dstPort: key.srcPort, seq: iss, ack: 0, flags: TCPSegment.syn,
+                           window: 65535, mss: 1460, windowScale: ourScale)
+        uplink.send(s, for: self)
+        lastProgress = Date()
     }
 
     func connect(_ target: UInt32) {
@@ -335,7 +520,7 @@ final class TCPConn {
 
     private func readable() {
         let inFlight = Int(sndNxt &- sndUna) - (finSent ? 1 : 0)
-        let room = Int(guestWindow) - inFlight
+        let room = min(Int(guestWindow), Self.sendCapacity) - inFlight
         guard room > 0 else { return pauseReads() }
         var buf = [UInt8](repeating: 0, count: min(room, 256 * 1024))
         let n = read(fd, &buf, buf.count)
@@ -358,6 +543,7 @@ final class TCPConn {
         if unacked.isEmpty { lastProgress = Date() }
         unacked += data
         var i = 0
+        precondition(mss > 0)
         while i < data.count {
             let chunk = Array(data[i..<min(i + mss, data.count)])
             i += chunk.count
@@ -389,6 +575,19 @@ final class TCPConn {
     func segment(_ s: TCPSegment) {
         lastActivity = Date()
         if s.has(TCPSegment.rst) { return close(reset: false) }
+        if state == .synSent {
+            guard s.has(TCPSegment.syn), s.has(TCPSegment.ack), s.ack == iss &+ 1 else { return }
+            rcvNxt = s.seq &+ 1
+            guestScale = s.windowScale ?? 0
+            if s.windowScale == nil { ourScale = 0 }  // scaling only when both sides offer it
+            mss = Self.clampMSS(s.mss)
+            guestWindow = UInt32(s.window)
+            sndUna = s.ack
+            state = .established
+            uplink.send(seg(TCPSegment.ack), for: self)
+            resumeReads()
+            return
+        }
         if s.has(TCPSegment.syn) {
             if state == .synAckSent { synAck() }  // our SYN-ACK was lost
             return
@@ -432,7 +631,7 @@ final class TCPConn {
         switch state {
         case .connecting:
             if now.timeIntervalSince(started) > 30 { refuse() }
-        case .synAckSent:
+        case .synAckSent, .synSent:
             if now.timeIntervalSince(lastProgress) > rto { retransmit(now) }
         case .established:
             if sndUna != sndNxt && now.timeIntervalSince(lastProgress) > rto { retransmit(now) }
@@ -449,9 +648,11 @@ final class TCPConn {
         rto = min(rto * 2, 5)
         lastProgress = now
         if state == .synAckSent { return synAck() }
+        if state == .synSent { return retries > 6 ? close(reset: false) : syn() }
         var seq = sndUna
         var i = 0
-        let limit = min(unacked.count, max(Int(guestWindow), mss))
+        let limit = min(unacked.count, max(min(Int(guestWindow), Self.sendCapacity), mss))
+        precondition(mss > 0)
         while i < limit {
             let chunk = Array(unacked[i..<min(i + mss, limit)])
             uplink.send(seg(TCPSegment.ack, seq: seq, payload: chunk), for: self)
@@ -470,7 +671,7 @@ final class TCPConn {
 
     func close(reset: Bool) {
         guard state != .closed else { return }
-        if reset && state != .connecting { uplink.send(seg(TCPSegment.rst | TCPSegment.ack), for: self) }
+        if reset && state != .connecting && state != .synSent { uplink.send(seg(TCPSegment.rst | TCPSegment.ack), for: self) }
         state = .closed
         if let w = writeSource {
             if writeSuspended { w.resume() }

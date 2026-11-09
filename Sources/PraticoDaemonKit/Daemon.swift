@@ -63,6 +63,7 @@ public final class Daemon: @unchecked Sendable {
             values.isExcludedFromBackup = true
             try dir.setResourceValues(values)
         }
+        Uplink.raiseDescriptorLimit()  // pratico-net holds a socket per container connection
         try networks.startSwitch()  // pratico-net, embedded runtime only
         let s = HTTPServer(path: socketPath) { [self] req, conn in handle(req, conn) }
         try s.start()

@@ -327,3 +327,10 @@ private let grypeSample = Data(#"""
     #expect(TCPSegment(tcp.bytes(src: 10, dst: 20), src: 10, dst: 21) == nil)  // wrong pseudo-header
     #expect(seqLT(0xffff_fff0, 0x10) && !seqLT(0x10, 0xffff_fff0))
 }
+
+@Test func guestMSSIsClamped() {
+    #expect(TCPConn.clampMSS(0) == 536)
+    #expect(TCPConn.clampMSS(nil) == 536)
+    #expect(TCPConn.clampMSS(1) == 64)
+    #expect(TCPConn.clampMSS(9000) == 1460)
+}
