@@ -12,6 +12,7 @@ public final class Daemon: @unchecked Sendable {
     let archives: ArchiveService
     let stats: StatsService
     let events = EventBus()
+    let scans: ScanService
     private var server: HTTPServer?
 
     public init(home: URL, config: Config = Config(), socketPath: String? = nil, runtime: AppleContainer = AppleContainer()) {
@@ -25,6 +26,8 @@ public final class Daemon: @unchecked Sendable {
         self.execs = ExecService(runtime: runtime, containers: containers)
         self.archives = ArchiveService(runtime: runtime, containers: containers)
         self.stats = StatsService(runtime: runtime, containers: containers)
+        self.scans = ScanService(home: home, images: images, containers: containers, config: config)
+        containers.startGate = { [scans] rec in scans.blockReason(imageId: rec.imageId) }
     }
 
     public func start() throws {
@@ -40,6 +43,7 @@ public final class Daemon: @unchecked Sendable {
         let s = HTTPServer(path: socketPath) { [self] req, conn in handle(req, conn) }
         try s.start()
         server = s
+        scans.startBackground()
     }
 
     public func stop() { server?.stop() }
@@ -192,8 +196,9 @@ public final class Daemon: @unchecked Sendable {
             guard let from = req.query["fromImage"], !from.isEmpty else {
                 throw APIError(400, "image import is not supported; use fromImage")
             }
-            images.pull(ImageRef.join(from, tag: req.query["tag"]), platform: req.query["platform"],
-                        auth: RegistryAuth.header(req.headers["x-registry-auth"]), conn: conn)
+            let ref = ImageRef.join(from, tag: req.query["tag"])
+            images.pull(ref, platform: req.query["platform"], auth: RegistryAuth.header(req.headers["x-registry-auth"]), conn: conn)
+            scans.enqueue(ref)  // background; the pull reply is already complete
         case "GET" where p == ["get"]:
             // `docker save` of one image; several at once are not supported yet.
             guard let names = req.query["names"], !names.isEmpty else { throw APIError(400, "names is required") }

@@ -53,6 +53,9 @@ public enum DaemonProbe {
 
 extension Pratico {
     /// Where the daemon records why it refused to start, for the menubar to show (SPEC FR-3, FR-38).
+    /// Scan alerts the daemon writes for the menubar (SPEC D-24).
+    public static func alertsPath(home: URL = home()) -> URL { home.appending(path: "alerts.json") }
+
     public static func startupErrorPath(home: URL = home()) -> URL {
         home.appending(path: "daemon.err", directoryHint: .notDirectory)
     }

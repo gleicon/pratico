@@ -59,6 +59,8 @@ public final class ContainerService: @unchecked Sendable {
     let config: Config
     let events: EventBus
     let health = HealthMonitor()
+    /// Returns why a container may not start (pratico's image scan, D-24), if it may not.
+    var startGate: (@Sendable (ContainerRecord) -> String?)?
 
     private let lock = NSLock()
     private var records: [String: ContainerRecord] = [:]
@@ -322,6 +324,7 @@ public final class ContainerService: @unchecked Sendable {
     func start(_ ref: String) throws -> Bool {
         let rec = try resolve(ref)
         if rec.state.running { return false }
+        if let reason = startGate?(rec) { throw APIError(409, reason) }
         try launch(rec)
         return true
     }
@@ -508,6 +511,7 @@ public final class ContainerService: @unchecked Sendable {
 
     func restart(_ ref: String, timeout: Int?) throws {
         let rec = try resolve(ref)
+        if let reason = startGate?(rec) { throw APIError(409, reason) }
         _ = try stop(rec.id, timeout: timeout)
         try launch(try resolve(rec.id))
         emit(rec, "restart")

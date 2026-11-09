@@ -1,0 +1,15 @@
+#!/bin/sh
+# Fake osv-scanner for e2e: clean for every image except busybox:musl, which gets a
+# malicious-package advisory once $PRATICO_FAKE_SCAN_GATE exists (the test controls timing).
+archive=""
+while [ $# -gt 0 ]; do [ "$1" = "--archive" ] && archive="$2"; shift; done
+if tar -xOf "$archive" manifest.json 2>/dev/null | grep -q '"busybox:musl"'; then
+    while [ ! -e "$PRATICO_FAKE_SCAN_GATE" ]; do sleep 0.2; done
+    cat <<'JSON'
+{"results":[{"packages":[{"package":{"name":"evil-pkg","version":"6.6.6","ecosystem":"npm"},
+"groups":[{"ids":["MAL-0000-0001"],"aliases":[],"max_severity":""}]},
+{"package":{"name":"busybox","version":"1.37.0","ecosystem":"Alpine:v3.24"}}]}]}
+JSON
+    exit 1
+fi
+echo '{"results":[]}'

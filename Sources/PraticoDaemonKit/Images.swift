@@ -252,18 +252,33 @@ public final class ImageService: Sendable {
         emit(["progressDetail": [:], "aux": ["Tag": .string(tag), "Digest": .string(digest), "Size": .int(size)]])
     }
 
-    /// `GET /images/{name}/get` (`docker save`), D-23. Apple saves an OCI layout; Docker's
+    /// `GET /images/{name}/get` (`docker save`), D-23.
+    func save(_ nameOrId: String, conn: Connection) throws {
+        let fm = FileManager.default
+        let file = fm.temporaryDirectory.appending(path: "pratico-save-\(UUID().uuidString).tar")
+        defer { try? fm.removeItem(at: file) }
+        _ = try exportArchive(nameOrId, to: file)
+        let h = try FileHandle(forReadingFrom: file)
+        defer { try? h.close() }
+        conn.beginChunked(contentType: "application/x-tar")
+        while case let data = h.readData(ofLength: 1 << 20), !data.isEmpty {
+            if !conn.chunk(data) { break }
+        }
+        conn.endChunked()
+    }
+
+    /// Writes a Docker archive of the image to `file`. Apple saves an OCI layout; Docker's
     /// archive is that layout plus a `manifest.json`, which scanners (osv-scanner, grype,
     /// trivy, snyk) need. Entries are written without a `./` prefix, which some reject.
-    func save(_ nameOrId: String, conn: Connection) throws {
+    @discardableResult
+    func exportArchive(_ nameOrId: String, to file: URL) throws -> LocalImage {
         guard let (img, matched) = resolve(nameOrId) else { throw APIError(404, "No such image: \(nameOrId)") }
         let ref = matched ?? img.refs[0]
         let fm = FileManager.default
-        let work = fm.temporaryDirectory.appending(path: "pratico-save-\(UUID().uuidString)")
+        let work = fm.temporaryDirectory.appending(path: "pratico-export-\(UUID().uuidString)")
         let dir = work.appending(path: "image")
         try fm.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: work) }
-
         let platform = Self.variant(img.record)?["platform"]
         let arch = platform?["architecture"]?.string ?? "arm64"
         let os = platform?["os"]?.string ?? "linux"
@@ -298,19 +313,10 @@ public final class ImageService: Sendable {
         ]]
         try docker.encoded().write(to: dir.appending(path: "manifest.json"))
 
-        let p = Process()
-        p.executableURL = URL(filePath: "/usr/bin/tar")
-        p.arguments = ["-cf", "-", "-C", dir.path, "manifest.json", "index.json", "oci-layout", "blobs"]
-        let out = Pipe()
-        p.standardOutput = out
-        p.standardError = FileHandle.nullDevice
-        try p.run()
-        conn.beginChunked(contentType: "application/x-tar")
-        while case let data = out.fileHandleForReading.availableData, !data.isEmpty {
-            if !conn.chunk(data) { p.terminate(); break }
+        guard Self.tar(["-cf", file.path, "-C", dir.path, "manifest.json", "index.json", "oci-layout", "blobs"]) else {
+            throw APIError(500, "cannot write image archive")
         }
-        p.waitUntilExit()
-        conn.endChunked()
+        return img
     }
 
     static func isDigest(_ s: String) -> Bool {

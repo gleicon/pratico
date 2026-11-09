@@ -55,6 +55,15 @@ public enum JSON: Sendable, Equatable, Codable {
     public var bool: Bool? { if case .bool(let v) = self { return v }; return nil }
     public var array: [JSON]? { if case .array(let v) = self { return v }; return nil }
     public var object: [String: JSON]? { if case .object(let v) = self { return v }; return nil }
+    /// Any number; integers widen.
+    public var double: Double? {
+        switch self {
+        case .double(let v): v
+        case .int(let v): Double(v)
+        default: nil
+        }
+    }
+
     public var int: Int64? {
         switch self {
         case .int(let v): return v

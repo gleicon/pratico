@@ -9,7 +9,8 @@ struct PraticoMenubarApp: App {
         MenuBarExtra {
             StatusMenu(daemon: daemon)
         } label: {
-            Image(systemName: daemon.isRunning ? "shippingbox.fill" : "shippingbox")
+            Image(systemName: daemon.hasUnseenSerious ? "exclamationmark.shield.fill"
+                  : daemon.isRunning ? "shippingbox.fill" : "shippingbox")
         }
     }
 }
@@ -30,6 +31,16 @@ struct StatusMenu: View {
         if daemon.needsApproval {
             Button("Open Login Items…") { daemon.openLoginItems() }
         }
+        // D-24: image scan alerts, newest first.
+        if !daemon.alerts.isEmpty {
+            Divider()
+            Text("Image scan alerts")
+            ForEach(daemon.alerts.suffix(5).reversed()) { a in
+                Button((a.level == "serious" ? "⛔︎ " : "⚠︎ ") + a.title) {}
+                    .help(a.detail)
+            }
+            Button("Clear Alerts") { daemon.clearAlerts() }
+        }
         Divider()
         switch daemon.state {
         case .running:
@@ -42,6 +53,7 @@ struct StatusMenu: View {
         Divider()
         Button("Quit Pratico") { NSApplication.shared.terminate(nil) }
             .keyboardShortcut("q")
+            .onAppear { daemon.markAlertsSeen() }
     }
 
     private var statusLine: String {

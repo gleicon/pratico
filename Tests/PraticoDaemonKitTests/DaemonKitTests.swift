@@ -158,3 +158,49 @@ func normalizesImageRefs(input: String, expected: String) {
     #expect(!ImageService.isDigest("sha256:" + String(repeating: "A", count: 64)))
     #expect(!ImageService.isDigest("sha512:" + String(repeating: "a", count: 64)))
 }
+
+private let osvSample = Data(#"""
+{"results":[{"packages":[
+ {"package":{"name":"zlib","version":"1.3.2-r1","ecosystem":"Alpine:v3.24"},
+  "vulnerabilities":[{"id":"ALPINE-CVE-2026-4738"}],
+  "groups":[{"ids":["ALPINE-CVE-2026-4738"],"aliases":["ALPINE-CVE-2026-4738","CVE-2026-4738"],"max_severity":"9.4"}]},
+ {"package":{"name":"evil-pkg","version":"1.0.0","ecosystem":"npm"},
+  "groups":[{"ids":["MAL-2026-1"],"aliases":[],"max_severity":""}]},
+ {"package":{"name":"musl","version":"1.2.5-r9","ecosystem":"Alpine:v3.24"}}]}]}
+"""#.utf8)
+
+private let grypeSample = Data(#"""
+{"matches":[{"vulnerability":{"id":"CVE-2026-4738","severity":"Critical","fix":{"state":"fixed","versions":["1.4-r0"]},
+  "cvss":[{"metrics":{"baseScore":9.4}}]},"relatedVulnerabilities":[],"artifact":{"name":"zlib","version":"1.3.2-r1"}}]}
+"""#.utf8)
+
+@Test func osvParserReadsFindingsAndBOM() {
+    let (findings, packages) = ScanParsers.osv(osvSample)
+    #expect(packages.count == 3)
+    #expect(findings.count == 2)
+    #expect(findings[0].severity == "critical" && findings[0].cves == ["CVE-2026-4738"])
+    #expect(findings[1].malicious)
+}
+
+@Test func mergeJoinsScannersByAlias() {
+    let merged = ScanParsers.merge([ScanParsers.osv(osvSample).findings, ScanParsers.grype(grypeSample)])
+    #expect(merged.count == 2)
+    let zlib = merged.first { $0.package == "zlib" }
+    #expect(zlib?.sources == ["grype", "osv"])
+    #expect(zlib?.fixed == ["1.4-r0"])
+}
+
+@Test func verdictFollowsScanBlockLevel() {
+    var findings = ScanParsers.merge([ScanParsers.osv(osvSample).findings])
+    let critOnly = findings.filter { !$0.malicious }
+    #expect(ScanVerdict.judge(critOnly, ran: true, block: "kev").0 == .warning)  // default: Critical warns
+    #expect(ScanVerdict.judge(critOnly, ran: true, block: "critical").0 == .serious)
+    #expect(ScanVerdict.judge(findings, ran: true, block: "malware").0 == .serious)
+    #expect(ScanVerdict.judge(findings, ran: true, block: "off").0 == .warning)
+    findings = critOnly
+    findings[0].kev = true
+    #expect(ScanVerdict.judge(findings, ran: true, block: "kev").0 == .serious)
+    #expect(ScanVerdict.judge(findings, ran: true, block: "malware").0 == .warning)
+    #expect(ScanVerdict.judge([], ran: false, block: "kev").0 == .unknown)
+    #expect(ScanVerdict.judge([], ran: true, block: "kev").0 == .ok)
+}

@@ -46,3 +46,16 @@ import Testing
     let e = Config.ParseError(line: 3, key: "bogus_key", message: "unknown key")
     #expect(e.description == "config.toml line 3: `bogus_key`: unknown key")
 }
+
+@Test func scanKeysDefaultAndParse() throws {
+    let d = try Config.parse("")
+    #expect(d.scan && d.scanBlock == "kev" && d.scanAllow.isEmpty)
+    let c = try Config.parse("""
+        scan_block = "critical"
+        scan_allow = ["sha256:abc", "sha256:d,e"]  # trailing comment
+        """)
+    #expect(c.scanBlock == "critical")
+    #expect(c.scanAllow == ["sha256:abc", "sha256:d,e"])
+    #expect(throws: Config.ParseError.self) { try Config.parse(#"scan_block = "sometimes""#) }
+    #expect(throws: Config.ParseError.self) { try Config.parse(#"scan_allow = "sha256:abc""#) }
+}

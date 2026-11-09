@@ -23,6 +23,12 @@ export DOCKER_CONFIG="$HOME_DIR/docker-config"
 mkdir -p "$DOCKER_CONFIG"
 echo '{"auths":{"pratico.invalid":{}}}' >"$DOCKER_CONFIG/config.json"
 DAEMON_PID=""
+# Hermetic scanning: fake scanners and a local KEV feed, never the network (D-24).
+FAKES="$(cd "$(dirname "$0")" && pwd)/fakes"
+export PRATICO_OSV_BIN="$FAKES/osv-scanner" PRATICO_GRYPE_BIN="$FAKES/grype"
+export PRATICO_KEV_URL="file://$FAKES/kev.json" PRATICO_FAKE_SCAN_GATE="$HOME_DIR/scan-gate"
+MUSL_PRESENT=0
+container image inspect busybox:musl >/dev/null 2>&1 && MUSL_PRESENT=1
 APPLE_ONLY="pratico-e2e-apple-$$"
 BUSYBOX_PRESENT=0
 container image inspect busybox >/dev/null 2>&1 && BUSYBOX_PRESENT=1
@@ -56,6 +62,7 @@ cleanup() {
     container rm -f "$APPLE_ONLY" >/dev/null 2>&1
     container image delete docker.io/pratico-e2e/a:1 >/dev/null 2>&1
     [ "$BUSYBOX_PRESENT" = 0 ] && container image delete busybox >/dev/null 2>&1
+    [ "$MUSL_PRESENT" = 0 ] && container image delete busybox:musl >/dev/null 2>&1
     rm -rf "$HOME_DIR"
 }
 trap cleanup EXIT
@@ -348,6 +355,25 @@ disk=$(cat "$HOME_DIR/containers/$big"/log* | wc -c | tr -d ' ')
 if [ "$disk" -le 104857600 ] && [ "$disk" -gt 0 ]; then ok "AC-51 on-disk log capped at 100 MiB ($disk bytes)"; else bad "AC-51 on-disk log capped at 100 MiB" "$disk bytes"; fi
 expect_eq "AC-51 logs --tail 1 returns the latest line" "$(docker logs --tail 1 "$big")" "LAST-LINE"
 docker rm "$big" >/dev/null
+
+# D-24: a serious scan finding stops the image's containers and blocks new starts.
+docker pull busybox:musl >/dev/null 2>&1
+docker run -d --name e2e-evil busybox:musl sleep 300 >/dev/null
+touch "$PRATICO_FAKE_SCAN_GATE"
+for _ in $(seq 100); do [ "$(docker inspect e2e-evil --format '{{.State.Running}}')" = false ] && break; sleep 0.1; done
+expect_eq "D-24 serious finding stops the image's container" "$(docker inspect e2e-evil --format '{{.State.Running}}')" "false"
+expect_has "D-24 start is blocked, naming the finding" "$(docker start e2e-evil 2>&1)" "MAL-0000-0001"
+expect_has "D-24 alert written for the menubar" "$(cat "$HOME_DIR/alerts.json" 2>/dev/null)" "busybox:musl blocked"
+musl_id=$(docker image inspect busybox:musl --format '{{.Id}}')
+report="$HOME_DIR/scans/${musl_id#sha256:}.json"
+expect_has "D-24 report keeps the bill of materials" "$(cat "$report" 2>/dev/null)" "busybox@1.37.0"
+check "other images are not blocked" docker run --rm alpine true
+stop_daemon
+printf 'scan_allow = ["%s"]\n' "$musl_id" >"$HOME_DIR/config.toml"
+start_daemon
+check "D-24 scan_allow lets the image run" docker start e2e-evil
+docker rm -f e2e-evil >/dev/null
+rm -f "$HOME_DIR/config.toml"
 
 docker rm -f $(docker ps -aq) >/dev/null 2>&1
 pid="$DAEMON_PID"

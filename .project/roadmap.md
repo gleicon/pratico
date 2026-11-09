@@ -87,5 +87,6 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 ## Backlog
 
 - [x] Image scanners work against pratico unchanged via `docker save` (osv-scanner, grype verified; trivy, snyk use the same path) (D-23)
-- [ ] Automatic image scanning: scan pulled and built images (OSV for vulnerabilities and OpenSSF `MAL-` malicious-package advisories, plus a Snyk-like check), keep results per image, surface findings in menubar alerts — design pending
+- [x] Automatic image scanning: osv-scanner + grype + CISA KEV after each pull and daily; `scan_block` levels; serious findings stop and block the image's containers; menubar alerts and notifications (D-24)
+- [ ] Scanning follow-ups: spotter on image filesystems (needs an all-files hash mode upstream), EPSS, Artifact Hub, syft SBOMs, menubar "allow image" action
 - [ ] Discuss and design a container manager geared towards agents: not just an MCP server, but a way for developers to use containers for tests, agents, and builds from Claude Code

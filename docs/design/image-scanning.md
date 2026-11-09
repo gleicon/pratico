@@ -1,6 +1,6 @@
 # Image scanning — design
 
-Status: draft for review. Backlog item "Automatic image scanning".
+Status: implemented (SPEC D-24) except where marked follow-up. Backlog item "Automatic image scanning".
 
 ## Goal
 
@@ -30,6 +30,9 @@ pull completes
   → verdict → store → enforce → warn
 ```
 
+Implemented today: export → osv-scanner → grype → KEV → verdict → store → enforce → warn.
+SBOM via syft, spotter, and EPSS are follow-ups.
+
 Each step is optional: a scanner that is not installed is skipped and the report says so.
 No scanner means no verdict, never a false "clean".
 
@@ -52,37 +55,60 @@ is identified by the SBOM (packages) and per-file hashes (spotter).
 
 ## Verdict
 
-- **serious**: any `MAL-*` advisory; any malware hit from spotter/ClamAV; any CVE in CISA
-  KEV; any CVE rated Critical (CVSS ≥ 9.0).
-- **warning**: High severity, or EPSS ≥ 0.1.
-- **ok**: nothing above. **unknown**: no scanner ran.
+Configurable with `scan_block` (default `kev`):
+
+| `scan_block` | serious (stop + block) |
+|---|---|
+| `off` | nothing; everything warns |
+| `malware` | `MAL-*` advisories, malware hits |
+| `kev` (default) | the above + CVEs in CISA KEV |
+| `critical` | the above + Critical CVEs (CVSS ≥ 9.0) |
+
+Anything found below the threshold, plus High CVEs, is a **warning**. The default does not
+block on Critical alone: at the time of writing `alpine:latest` carries a Critical zlib CVE
+(fix released upstream, not yet in the image, not in KEV), and blocking it would stop most
+containers. **ok**: nothing found above Medium. **unknown**: no scanner ran.
 
 ## Storage
 
-`~/.pratico/scans/<image-id>.json`: verdict, findings (id, package, version, fixed
-version, severity, source), scanner versions, database dates, time. Scans are keyed by
+`~/.pratico/scans/<image-id>.json`: findings (id, aliases, package, version, fixed
+versions, severity, CVSS, sources, malicious, KEV), the package list (BOM), which scanners
+ran (or why not), the KEV feed date, and the scan time. The verdict is not stored: it is
+recomputed from findings under the current `scan_block`. Scans are keyed by
 image ID, so a re-tag reuses the result; a new digest gets a new scan. Excluded from Time
 Machine like the rest of the store. No credentials are involved.
 
-## Enforcement (needs sign-off)
+## Enforcement (agreed)
 
 On a **serious** verdict:
 
 1. Stop running Docker containers created from that image ID (`docker stop` semantics,
-   10 s grace), emitting a pratico event.
+   10 s grace; Docker's own `kill`/`die`/`stop` events follow).
 2. Refuse to start containers from it (`409`, message names the finding), until the user
    allows the image.
 3. Warn: menubar alert naming image, finding, and affected containers.
 
-Allowing an image: a menubar action, or `config.toml` `scan_allow = ["<image-id>"]`.
-Kill switch: `scan_enforce = false` (scan and warn only).
+Allowing an image: `config.toml` `scan_allow = ["<image-id>"]` (applied at daemon start);
+a menubar action is a follow-up. Kill switch: `scan_block = "off"`; `scan = false` disables
+scanning.
 
 Containers from `container` CLI are never touched (FR-28).
 
 ## Rescans
 
-Advisories change after the pull. Rescan stored SBOMs daily (cheap: no re-export), so an
-image that becomes serious later is caught.
+Advisories change after the pull. Every image is rescanned once its report is a day old
+(checked hourly), so an image that becomes serious later is caught. Rescanning stored SBOMs
+without re-exporting is a possible optimization.
+
+## Follow-ups
+
+- spotter: v0.1.0 scans only documents and archives (PDF, Office, ZIP), so on an image it
+  sees `.jar`s but not ELF binaries. Needed: an all-files, hash-only mode (MalwareBazaar)
+  and a documented JSON schema. Also, its `.gitignore` entry `spotter` hides `cmd/spotter/`,
+  so the CLI source is not in the repository and `go install` fails.
+- EPSS for warnings; Artifact Hub enrichment; syft SBOMs in CycloneDX/SPDX (today the BOM
+  is osv-scanner's package list).
+- Menubar action to allow a blocked image.
 
 ## Not in scope yet
 
