@@ -277,3 +277,16 @@ private let grypeSample = Data(#"""
     #expect(!ShimControl.inside(dir.appending(path: "..").path, dir))
     #expect(!ShimControl.inside("/etc/passwd", dir))
 }
+
+@Test func escapingLinksAreFoundWithoutFollowingThem() throws {
+    let root = FileManager.default.temporaryDirectory.appending(path: "pratico-links-\(UUID().uuidString)")
+    let fm = FileManager.default
+    try fm.createDirectory(at: root.appending(path: "d"), withIntermediateDirectories: true)
+    try Data("x".utf8).write(to: root.appending(path: "d/f"))
+    try fm.createSymbolicLink(atPath: root.appending(path: "d/in").path, withDestinationPath: "f")
+    try fm.createSymbolicLink(atPath: root.appending(path: "d/out").path, withDestinationPath: "/etc/passwd")
+    try fm.createSymbolicLink(atPath: root.appending(path: "up").path, withDestinationPath: "../x")
+    defer { try? fm.removeItem(at: root) }
+    let links = try ArchiveService.escapingLinks(in: root).map(\.0).sorted()
+    #expect(links == ["d/out", "up"])
+}

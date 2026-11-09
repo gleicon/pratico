@@ -132,10 +132,15 @@ final class ArchiveService: @unchecked Sendable {
             guard lstat(src.path, &st) == 0 else { continue }
             switch st.st_mode & S_IFMT {
             case S_IFREG, S_IFDIR:
-                // Directory copies archive inner symlinks as links, and only those that stay
-                // inside the tree.
+                // The agent's directory copy lstat()s every entry and keeps only symlinks
+                // whose target stays inside the tree; the rest are recreated below, as links.
+                let outer = (st.st_mode & S_IFMT) == S_IFDIR ? try Self.escapingLinks(in: src) : []
                 let mode = Int(st.st_mode & 0o7777)
                 try embedded.shim.call(files, "POST", "/copy-in?src=\(q(src.path))&dst=\(q(dst))&mode=\(String(mode, radix: 8))")
+                for (rel, target) in outer {
+                    let body: JSON = ["args": JSON(["ln", "-sfn", target, dst + "/" + rel]), "timeout": 10]
+                    _ = try? embedded.shim.request(files, "POST", "/exec", body: body.encoded())
+                }
             case S_IFLNK:
                 let target = try FileManager.default.destinationOfSymbolicLink(atPath: src.path)
                 let body: JSON = ["args": JSON(["ln", "-sfn", target, dst]), "timeout": 10]
@@ -152,6 +157,32 @@ final class ArchiveService: @unchecked Sendable {
             let body: JSON = ["args": JSON(["chown", "-R", "0:0"] + targets), "timeout": 30]
             _ = try? embedded.shim.request(files, "POST", "/exec", body: body.encoded())
         }
+    }
+
+    /// Walks an extracted tree without following links. Returns symlinks whose target
+    /// leaves the tree (relative path, target text); refuses devices, sockets, and fifos.
+    static func escapingLinks(in root: URL) throws -> [(String, String)] {
+        let base = root.standardizedFileURL.path
+        var out: [(String, String)] = []
+        guard let walk = FileManager.default.enumerator(atPath: base) else { return [] }
+        for case let rel as String in walk {
+            let full = base + "/" + rel
+            var st = Darwin.stat()
+            guard lstat(full, &st) == 0 else { continue }
+            switch st.st_mode & S_IFMT {
+            case S_IFREG, S_IFDIR:
+                continue
+            case S_IFLNK:
+                let target = try FileManager.default.destinationOfSymbolicLink(atPath: full)
+                let parent = (full as NSString).deletingLastPathComponent
+                let resolved = (target.hasPrefix("/") ? target : parent + "/" + target) as NSString
+                let normalized = resolved.standardizingPath
+                if !(normalized == base || normalized.hasPrefix(base + "/")) { out.append((rel, target)) }
+            default:
+                throw APIError(400, "unsupported file type in archive: \(rel)")
+            }
+        }
+        return out
     }
 
     /// `GET`: a tar whose single top entry is the path's base name.

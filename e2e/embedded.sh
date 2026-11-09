@@ -119,6 +119,10 @@ if docker exec e-box cat /tmp/leak 2>/dev/null | grep -q "host-secret-$$"; then
 else
     ok "cp in never copies a host file through a symlink"
 fi
+mkdir -p "$CP/tree"
+ln -s /etc/os-release "$CP/tree/outer"
+docker cp "$CP/tree" e-box:/tmp/ >/dev/null 2>&1
+check "inner symlinks leaving the tree arrive as links" test "$(docker exec e-box readlink /tmp/tree/outer)" = "/etc/os-release"
 code=$(curl -s -o /dev/null -w '%{http_code}' --unix-socket "$SOCK" "http://d/containers/e-box/archive?path=/tmp/..")
 expect_eq "cp of a .. path is refused" "$code" "400"
 docker run -d --name e-busy alpine sh -c 'while true; do :; done' >/dev/null
