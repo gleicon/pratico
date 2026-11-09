@@ -36,6 +36,7 @@ struct DockerEvent: Sendable {
                 case "event": return action == v || action.hasPrefix(v + ":")
                 case "container": return type == "container" && (id.hasPrefix(v) || attributes["name"] == v)
                 case "image": return attributes["image"] == v || (type == "image" && id == v)
+                case "network": return type == "network" && (id.hasPrefix(v) || attributes["name"] == v)
                 case "label":
                     let (k, val) = v.splitOnce("=")
                     guard let have = attributes[k] else { return false }

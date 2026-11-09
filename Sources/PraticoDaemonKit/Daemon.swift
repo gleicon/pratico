@@ -12,6 +12,7 @@ public final class Daemon: @unchecked Sendable {
     let archives: ArchiveService
     let stats: StatsService
     let events = EventBus()
+    let networks: NetworkService
     let scans: ScanService
     private var server: HTTPServer?
 
@@ -20,9 +21,11 @@ public final class Daemon: @unchecked Sendable {
         self.socketPath = socketPath ?? home.appending(path: "docker.sock").path
         self.runtime = runtime
         self.images = ImageService(runtime: runtime)
+        self.networks = NetworkService(runtime: runtime, root: home.appending(path: "networks", directoryHint: .isDirectory),
+                                       events: events)
         self.containers = ContainerService(
             runtime: runtime, images: images, root: home.appending(path: "containers", directoryHint: .isDirectory),
-            config: config, events: events)
+            networks: networks, config: config, events: events)
         self.execs = ExecService(runtime: runtime, containers: containers)
         self.archives = ArchiveService(runtime: runtime, containers: containers)
         self.stats = StatsService(runtime: runtime, containers: containers)
@@ -95,8 +98,8 @@ public final class Daemon: @unchecked Sendable {
             if let d = try routeExec(m, parts[1], parts[2], req, conn) { return d }
         case (_, "images"):
             if let d = try routeImages(m, Array(parts.dropFirst()), req, conn) { return d }
-        case ("GET", "networks") where parts.count == 2:
-            throw APIError(404, "network \(parts[1]) not found")
+        case (_, "networks"):
+            if let d = try routeNetworks(m, Array(parts.dropFirst()), req, conn) { return d }
         case ("GET", "volumes") where parts.count == 2:
             throw APIError(404, "get \(parts[1]): no such volume")
         case ("GET", "plugins") where parts.count == 3 && parts[2] == "json":
@@ -164,6 +167,38 @@ public final class Daemon: @unchecked Sendable {
             try containers.logs(p[0], query: req, conn: conn)
         case ("POST", 2, "resize"):
             _ = try containers.resolve(p[0])
+            conn.respond(200, body: Data())
+        default:
+            return nil
+        }
+        return .keepAlive
+    }
+
+    private func routeNetworks(_ m: String, _ p: [String], _ req: Request, _ conn: Connection) throws -> Disposition? {
+        let filters = ContainerService.parseFilters(req.query["filters"])
+        switch (m, p.count, p.last) {
+        case ("GET", 0, _):
+            conn.json(200, .array(networks.list(filters: filters)))
+        case ("POST", 1, "create"):
+            guard let body = JSON.parse(req.body) else { throw APIError(400, "invalid JSON body") }
+            conn.json(201, ["Id": .string(try networks.create(body).id), "Warning": ""])
+        case ("POST", 1, "prune"):
+            conn.json(200, networks.prune(filters: filters))
+        case ("GET", 1, _):
+            conn.json(200, networks.json(try networks.resolve(p[0]), withContainers: true))
+        case ("DELETE", 1, _):
+            try networks.remove(p[0])
+            conn.respond(204)
+        case ("POST", 2, "connect"), ("POST", 2, "disconnect"):
+            let net = try networks.resolve(p[0])
+            guard let body = JSON.parse(req.body), let ref = body["Container"]?.string, !ref.isEmpty else {
+                throw APIError(400, "container is required")
+            }
+            if p[1] == "connect" {
+                try containers.connect(ref, to: net, aliases: body["EndpointConfig"]?["Aliases"]?.strings ?? [])
+            } else {
+                try containers.disconnect(ref, from: net)
+            }
             conn.respond(200, body: Data())
         default:
             return nil

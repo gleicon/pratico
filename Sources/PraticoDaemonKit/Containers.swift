@@ -20,6 +20,11 @@ struct ContainerRecord: Codable, Sendable {
     var config: JSON
     var hostConfig: JSON
     var state = ContainerState()
+    /// Network ID → endpoint; nil for records older than networks (on `bridge`).
+    var endpoints: [String: Endpoint]?
+    /// `container create` arguments without `--network`, kept so a container that never
+    /// ran can be recreated with other networks (D-25). nil for older records.
+    var createArgs: [String]?
 
     var tty: Bool { config["Tty"]?.bool ?? false }
     var autoRemove: Bool { hostConfig["AutoRemove"]?.bool ?? false }
@@ -58,6 +63,7 @@ public final class ContainerService: @unchecked Sendable {
     let root: URL
     let config: Config
     let events: EventBus
+    let networks: NetworkService
     let health = HealthMonitor()
     /// Returns why a container may not start (pratico's image scan, D-24), if it may not.
     var startGate: (@Sendable (ContainerRecord) -> String?)?
@@ -71,14 +77,17 @@ public final class ContainerService: @unchecked Sendable {
     private var attached: [String: [Connection]] = [:]
     private var pauseAgents: [String: PauseAgent] = [:]
 
-    init(runtime: AppleContainer, images: ImageService, root: URL, config: Config = Config(), events: EventBus = EventBus()) {
+    init(runtime: AppleContainer, images: ImageService, root: URL, networks: NetworkService, config: Config = Config(),
+         events: EventBus = EventBus()) {
         self.runtime = runtime
         self.events = events
+        self.networks = networks
         self.config = config
         self.images = images
         self.root = root
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         health.service = self
+        networks.containers = self
         load()
     }
 
@@ -111,6 +120,7 @@ public final class ContainerService: @unchecked Sendable {
             if rec.state.running {
                 watch(id)
                 health.started(rec)
+                networks.started(rec)
             }
         }
     }
@@ -172,7 +182,10 @@ public final class ContainerService: @unchecked Sendable {
         let id = randomHexID()
         let appleId = String(id.prefix(12))
         let imageConfig = ImageService.config(img)
-        let host = body["HostConfig"] ?? [:]
+        let attach = try networks.attachments(host: body["HostConfig"] ?? [:], networking: body["NetworkingConfig"])
+        var hostFields = body["HostConfig"]?.object ?? [:]
+        if ["", "default"].contains(hostFields["NetworkMode"]?.string ?? "") { hostFields["NetworkMode"] = "bridge" }
+        let host = JSON.object(hostFields)
 
         // Docker merges image defaults into the container config; an explicit
         // Entrypoint resets the image Cmd.
@@ -235,13 +248,14 @@ public final class ContainerService: @unchecked Sendable {
             args += cmd
         }
 
-        let r = runtime.run(args)
+        let r = runtime.run(Self.withNetworks(args, attach.map(\.0.appleName)))
         guard r.ok else { throw APIError(500, "container create failed: \(r.errorText)") }
 
         let rec = ContainerRecord(
             id: id, name: shortName, appleId: appleId, image: imageRef, imageId: ImageService.id(img),
             created: Date(), path: full.first ?? "", args: Array(full.dropFirst()),
-            config: .object(config), hostConfig: host)
+            config: .object(config), hostConfig: host,
+            endpoints: Dictionary(attach.map { ($0.0.id, $0.1) }, uniquingKeysWith: { a, _ in a }), createArgs: args)
         lock.lock()
         records[id] = rec
         lock.unlock()
@@ -249,6 +263,13 @@ public final class ContainerService: @unchecked Sendable {
         logs[id] = LogStore(path: dir(id).appending(path: "log"))
         emit(rec, "create")
         return rec
+    }
+
+    /// Apple fixes networks at create; `--network` goes right after the name.
+    static func withNetworks(_ args: [String], _ appleNames: [String]) -> [String] {
+        var a = args
+        a.insert(contentsOf: appleNames.flatMap { ["--network", $0] }, at: min(3, a.count))
+        return a
     }
 
     private func uniqueName() -> String {
@@ -330,6 +351,8 @@ public final class ContainerService: @unchecked Sendable {
     }
 
     private func launch(_ rec: ContainerRecord) throws {
+        let anchored = networks.raiseDefaultIfNeeded(rec)
+        defer { if anchored { networks.dropAnchor() } }
         let p = runtime.process(["start", "--attach", rec.appleId])
         let out = Pipe()
         let err = Pipe()
@@ -372,6 +395,10 @@ public final class ContainerService: @unchecked Sendable {
         let deadline = Date().addingTimeInterval(30)
         while Date() < deadline && p.isRunning && runtime.state(rec.appleId) != "running" {
             Thread.sleep(forTimeInterval: 0.1)
+        }
+        if p.isRunning {
+            networks.started(rec)
+            networks.sync(Set(networks.active(rec).keys), wait: true)
         }
         emit(rec, "start")
         health.started(rec)
@@ -426,11 +453,13 @@ public final class ContainerService: @unchecked Sendable {
 
         log?.finish()
         health.stopped(id)
+        networks.stopped(id)
         update(id) {
             $0.state.status = "exited"
             $0.state.exitCode = code
             $0.state.finishedAt = Date()
         }
+        if let rec = try? resolve(id) { networks.sync(Set(networks.active(rec).keys), wait: false) }
         if let rec = try? resolve(id) { emit(rec, "die", ["exitCode": "\(code)"]) }
         for c in conns { c.close() }
         if auto { removeNow(id, code: code) }
@@ -472,6 +501,7 @@ public final class ContainerService: @unchecked Sendable {
         lock.unlock()
         guard let agent else { throw APIError(409, "Container \(rec.id) is not paused") }
         agent.thaw()
+        networks.sync(Set(networks.active(rec).keys), wait: false)  // skipped while frozen
         emit(rec, "unpause")
     }
 
@@ -632,6 +662,77 @@ public final class ContainerService: @unchecked Sendable {
         conn.endChunked()
     }
 
+    // MARK: Networks
+
+    /// `POST /networks/{id}/connect`. Apple fixes a container's networks at create, so a
+    /// container that never ran is recreated on the new set; one that has run can only
+    /// rejoin a network it was disconnected from, whose interface it still has (D-25).
+    func connect(_ ref: String, to net: NetworkRecord, aliases: [String]) throws {
+        let rec = try resolve(ref)
+        var eps = networks.endpoints(rec)
+        if let ep = eps[net.id], !ep.detached {
+            throw APIError(403, "endpoint with name \(rec.name) already exists in network \(net.name)")
+        }
+        let onNone = networks.active(rec).keys.contains { (try? networks.resolve($0))?.name == "none" }
+        if net.name == "none" || onNone {
+            throw APIError(400, "container cannot be connected to network none and other networks")
+        }
+        if let ep = eps[net.id] {
+            eps[net.id] = Endpoint(aliases: aliases.isEmpty ? ep.aliases : aliases)
+            update(rec.id) { $0.endpoints = eps }
+        } else if rec.state.startedAt == nil {
+            eps[net.id] = Endpoint(aliases: aliases)
+            try recreate(rec, eps)
+        } else {
+            throw APIError(409, "pratico: cannot connect \(rec.name) to \(net.name): the Apple runtime fixes a container's networks when it is created, and this container has already run; recreate it with --network \(net.name)")
+        }
+        networks.emit(net, "connect", container: rec.id)
+        networks.sync([net.id], wait: true)
+    }
+
+    /// `POST /networks/{id}/disconnect`. A container that has run keeps its interface
+    /// (the guest cannot bring it down), but leaves Docker's view and name resolution.
+    func disconnect(_ ref: String, from net: NetworkRecord) throws {
+        let rec = try resolve(ref)
+        var eps = networks.endpoints(rec)
+        guard let ep = eps[net.id], !ep.detached else {
+            throw APIError(403, "container \(rec.id) is not connected to network \(net.name)")
+        }
+        if rec.state.startedAt == nil {
+            eps[net.id] = nil
+            try recreate(rec, eps)
+        } else {
+            eps[net.id] = Endpoint(aliases: ep.aliases, detached: true)
+            update(rec.id) { $0.endpoints = eps }
+        }
+        networks.emit(net, "disconnect", container: rec.id)
+        networks.sync([net.id], wait: true)
+    }
+
+    /// Replaces a never-started Apple container with one on other networks. Nothing is
+    /// lost: its filesystem is still the image's.
+    private func recreate(_ rec: ContainerRecord, _ eps: [String: Endpoint]) throws {
+        guard let base = rec.createArgs else {
+            throw APIError(409, "pratico: container \(rec.name) predates network support; recreate it")
+        }
+        _ = runtime.run(["delete", "--force", rec.appleId])
+        let r = runtime.run(Self.withNetworks(base, appleNetworks(rec, eps)))
+        guard r.ok else {
+            _ = runtime.run(Self.withNetworks(base, appleNetworks(rec, networks.endpoints(rec))))
+            throw APIError(500, "cannot change the networks of \(rec.name): \(r.errorText)")
+        }
+        update(rec.id) { $0.endpoints = eps }
+    }
+
+    /// Apple network names, `NetworkMode` first; no networks at all means Apple's `none`.
+    private func appleNetworks(_ rec: ContainerRecord, _ eps: [String: Endpoint]) -> [String] {
+        let nets = eps.keys.compactMap { try? networks.resolve($0) }
+        guard !nets.isEmpty else { return ["none"] }
+        let mode = rec.hostConfig["NetworkMode"]?.string ?? ""
+        func primary(_ n: NetworkRecord) -> Bool { n.name == mode || n.id == mode }
+        return nets.sorted { primary($0) != primary($1) ? primary($0) : $0.name < $1.name }.map(\.appleName)
+    }
+
     // MARK: Views
 
     func dockerState(_ rec: ContainerRecord) -> String {
@@ -679,8 +780,8 @@ public final class ContainerService: @unchecked Sendable {
             "Labels": JSON(rec.labels),
             "State": .string(dockerState(rec)),
             "Status": .string(statusText(rec)),
-            "HostConfig": ["NetworkMode": "bridge"],
-            "NetworkSettings": ["Networks": [:]],
+            "HostConfig": ["NetworkMode": rec.hostConfig["NetworkMode"] ?? "bridge"],
+            "NetworkSettings": ["Networks": networks.containerNetworks(rec)],
             "Mounts": mountsJSON(rec),
         ]
     }
@@ -689,12 +790,9 @@ public final class ContainerService: @unchecked Sendable {
         let s = rec.state
         var portMap: [String: JSON] = [:]
         for (port, list) in rec.hostConfig["PortBindings"]?.object ?? [:] { portMap[port] = list }
-        var ip = ""
-        if s.running, let nets = runtime.container(rec.appleId)?["status"]?["networks"]?.array,
-            let addr = nets.first?["ipv4Address"]?.string
-        {
-            ip = addr.splitOnce("/").0
-        }
+        // Docker's top-level address fields describe the default bridge only.
+        let bridge = s.running && networks.active(rec)[networks.bridge.id] != nil
+            ? networks.address(rec.id, on: networks.bridge) : nil
         return [
             "Id": .string(rec.id),
             "Created": .string(Timestamp.format(rec.created)),
@@ -723,9 +821,12 @@ public final class ContainerService: @unchecked Sendable {
             "Config": rec.config,
             "Mounts": mountsJSON(rec),
             "NetworkSettings": [
-                "IPAddress": .string(ip),
+                "IPAddress": .string(bridge?.ip ?? ""),
+                "IPPrefixLen": .int(Int64(bridge?.prefix ?? 0)),
+                "Gateway": .string(bridge?.gateway ?? ""),
+                "MacAddress": .string(bridge?.mac ?? ""),
                 "Ports": .object(portMap),
-                "Networks": ["bridge": ["IPAddress": .string(ip)]],
+                "Networks": networks.containerNetworks(rec),
             ],
         ]
     }
@@ -751,6 +852,10 @@ public final class ContainerService: @unchecked Sendable {
                     case "status": return dockerState(rec) == v
                     case "health": return (health.state(rec.id)?.status ?? "none") == v
                     case "ancestor": return ImageRef.normalize(rec.image) == ImageRef.normalize(v)
+                    case "network":
+                        return networks.active(rec).keys.contains { id in
+                            id.hasPrefix(v) || (try? networks.resolve(id))?.name == v
+                        }
                     default: return true
                     }
                 }

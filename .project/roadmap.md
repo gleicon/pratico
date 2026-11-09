@@ -42,8 +42,8 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 
 ## Networks and volumes
 
-- [ ] Default `bridge` network present at start (AC-26); networking works without restricted entitlements such as `com.apple.vm.networking` (no paid Apple Developer account)
-- [ ] Custom networks: create/connect/disconnect/rm, containers resolve each other by name (AC-27)
+- [x] Default `bridge` network present at start (AC-26); networking works without restricted entitlements such as `com.apple.vm.networking` (no paid Apple Developer account)
+- [x] Custom networks: create/connect/disconnect/rm, containers resolve each other by name (AC-27)
 - [ ] Named volumes shared between containers; create/ls/rm (AC-28)
 
 ## Login

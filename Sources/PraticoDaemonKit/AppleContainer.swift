@@ -36,7 +36,8 @@ public final class AppleContainer: Sendable {
     }
 
     /// Runs `container <args>` to completion, collecting both streams; `input` feeds stdin.
-    public func run(_ args: [String], input: Data? = nil) -> ProcessResult {
+    /// After `timeout` seconds the process is terminated.
+    public func run(_ args: [String], input: Data? = nil, timeout: TimeInterval? = nil) -> ProcessResult {
         let p = process(args)
         let out = Pipe()
         let err = Pipe()
@@ -46,6 +47,9 @@ public final class AppleContainer: Sendable {
         p.standardError = err
         do { try p.run() } catch {
             return ProcessResult(status: 127, stdout: Data(), stderr: Data("\(error)".utf8))
+        }
+        if let timeout {
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { if p.isRunning { p.terminate() } }
         }
         if let inPipe, let input {
             DispatchQueue.global().async {

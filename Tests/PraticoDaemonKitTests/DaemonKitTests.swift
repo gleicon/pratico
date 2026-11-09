@@ -218,3 +218,32 @@ private let grypeSample = Data(#"""
     let merged = ScanParsers.merge([[weaker], ScanParsers.carryOver([both], failed: ["osv"])])
     #expect(merged.count == 1 && merged[0].severity == "critical")
 }
+
+@Test func subnetsSkipOverlapsWithNetworksAndHost() {
+    #expect(IPv4.overlaps("172.18.0.0/24", "172.18.0.77/32"))
+    #expect(IPv4.overlaps("172.16.0.0/12", "172.18.5.0/24"))
+    #expect(!IPv4.overlaps("172.18.0.0/24", "172.18.1.0/24"))
+    #expect(IPv4.freeSubnet(avoiding: []) == "172.18.0.0/24")
+    #expect(IPv4.freeSubnet(avoiding: ["172.18.0.0/24", "172.18.1.9/16"]) == nil)
+    #expect(IPv4.freeSubnet(avoiding: ["172.18.0.0/23", "192.168.64.0/24"]) == "172.18.2.0/24")
+}
+
+@Test func hostsFileListsPeersOnceWithAliases() {
+    let text = NetworkService.hostsFile(
+        hostname: "abc123", ownIP: "172.18.0.2",
+        peers: [("172.18.0.2", ["a", "abc123"]), ("172.18.0.3", ["b", "db", "def456"]), ("172.18.0.3", ["b"])])
+    #expect(text == """
+        127.0.0.1\tlocalhost
+        ::1\tlocalhost ip6-localhost ip6-loopback
+        172.18.0.2\tabc123
+        # pratico: containers on shared networks
+        172.18.0.2\ta abc123
+        172.18.0.3\tb db def456
+
+        """)
+}
+
+@Test func networkFlagsFollowTheContainerName() {
+    let args = ContainerService.withNetworks(["create", "--name", "x", "-e", "A=1", "--", "img"], ["pratico-n", "default"])
+    #expect(args == ["create", "--name", "x", "--network", "pratico-n", "--network", "default", "-e", "A=1", "--", "img"])
+}

@@ -33,6 +33,8 @@ container image inspect busybox:musl >/dev/null 2>&1 && MUSL_PRESENT=1
 APPLE_ONLY="pratico-e2e-apple-$$"
 BUSYBOX_PRESENT=0
 container image inspect busybox >/dev/null 2>&1 && BUSYBOX_PRESENT=1
+PAUSE_PRESENT=0  # the default-network anchor's image (D-25)
+container image inspect registry.k8s.io/pause:3.10 >/dev/null 2>&1 && PAUSE_PRESENT=1
 
 pass=0
 fail=0
@@ -58,12 +60,14 @@ cleanup() {
     if [ -S "$SOCK" ]; then
         ids=$(docker ps -aq 2>/dev/null)
         [ -n "$ids" ] && docker rm -f $ids >/dev/null 2>&1
+        docker network prune -f >/dev/null 2>&1
     fi
     stop_daemon
     container rm -f "$APPLE_ONLY" >/dev/null 2>&1
     container image delete docker.io/pratico-e2e/a:1 >/dev/null 2>&1
     [ "$BUSYBOX_PRESENT" = 0 ] && container image delete busybox >/dev/null 2>&1
     [ "$MUSL_PRESENT" = 0 ] && container image delete busybox:musl >/dev/null 2>&1
+    [ "$PAUSE_PRESENT" = 0 ] && container image delete registry.k8s.io/pause:3.10 >/dev/null 2>&1
     rm -rf "$HOME_DIR"
 }
 trap cleanup EXIT
@@ -356,6 +360,44 @@ disk=$(cat "$HOME_DIR/containers/$big"/log* | wc -c | tr -d ' ')
 if [ "$disk" -le 104857600 ] && [ "$disk" -gt 0 ]; then ok "AC-51 on-disk log capped at 100 MiB ($disk bytes)"; else bad "AC-51 on-disk log capped at 100 MiB" "$disk bytes"; fi
 expect_eq "AC-51 logs --tail 1 returns the latest line" "$(docker logs --tail 1 "$big")" "LAST-LINE"
 docker rm "$big" >/dev/null
+
+# --- Networks (D-25) ----------------------------------------------------------
+t0=$(date +%s)
+expect_eq "AC-26 bridge and none are listed" "$(docker network ls --format '{{.Name}}' | tr '\n' ' ')" "bridge none "
+check "network create" docker network create e2e-n
+expect_has "duplicate network name is refused" "$(docker network create e2e-n 2>&1)" "already exists"
+docker run -d --name e2e-na --network e2e-n busybox sleep 300 >/dev/null
+docker run -d --name e2e-nb --network e2e-n --network-alias db busybox sleep 300 >/dev/null
+check "AC-27 a reaches b by name" docker exec e2e-na ping -c1 -W2 e2e-nb
+check "network alias resolves" docker exec e2e-na ping -c1 -W2 db
+expect_eq "network inspect lists members" \
+    "$(docker network inspect e2e-n --format '{{range .Containers}}{{.Name}} {{end}}' | tr ' ' '\n' | sort | xargs)" "e2e-na e2e-nb"
+nb_ip=$(docker inspect e2e-nb --format '{{(index .NetworkSettings.Networks "e2e-n").IPAddress}}')
+expect_has "container inspect reports its address on the network" "$nb_ip" "172.18."
+expect_eq "ps filters by network" "$(docker ps --filter network=e2e-n -q | wc -l | tr -d ' ')" "2"
+if docker run --rm busybox ping -c1 -W1 "$nb_ip" >/dev/null 2>&1; then
+    bad "bridge containers cannot reach a custom network"
+else
+    ok "bridge containers cannot reach a custom network"
+fi
+check "custom network reaches the internet" docker exec e2e-na wget -qO- -T5 http://1.1.1.1
+docker run -d --name e2e-nbr busybox sleep 300 >/dev/null
+expect_has "connecting a container that has run explains why not" "$(docker network connect e2e-n e2e-nbr 2>&1)" "already run"
+docker create --name e2e-nc busybox sleep 300 >/dev/null
+check "connect a created container with an alias" docker network connect --alias cache e2e-n e2e-nc
+docker start e2e-nc >/dev/null
+check "the connected container is reachable by its alias" docker exec e2e-na ping -c1 -W2 cache
+check "it is on both networks" test "$(docker inspect e2e-nc --format '{{len .NetworkSettings.Networks}}')" = 2
+docker network disconnect e2e-n e2e-nb
+if docker exec e2e-na ping -c1 -W2 e2e-nb >/dev/null 2>&1; then bad "AC-27 after disconnect b is unreachable by name"; else ok "AC-27 after disconnect b is unreachable by name"; fi
+expect_has "network rm refuses while containers use it" "$(docker network rm e2e-n 2>&1)" "active endpoints"
+expect_has "bridge cannot be removed" "$(docker network rm bridge 2>&1)" "pre-defined"
+docker rm -f e2e-na e2e-nb e2e-nc e2e-nbr >/dev/null
+check "AC-27 network rm succeeds once its containers are removed" docker network rm e2e-n
+expect_eq "network events" \
+    "$(docker events --since "$t0" --until "$(($(date +%s) + 1))" --filter type=network --filter network=e2e-n --format '{{.Action}}' | xargs)" \
+    "create connect disconnect destroy"
+if container ls -a | grep -q pratico-anchor; then bad "no default-network anchor left behind"; else ok "no default-network anchor left behind"; fi
 
 # D-24: a serious scan finding stops the image's containers and blocks new starts.
 docker pull busybox:musl >/dev/null 2>&1
