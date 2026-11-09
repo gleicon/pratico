@@ -1,37 +1,44 @@
 # Pratico Roadmap
 
-## Version 0.1.0 — Docker Daemon + Menubar MVP (3 months)
-**Goal**: Docker Remote API daemon + macOS menubar app with dual compatibility
+Version-level plan. The task checklist being worked is
+[`.project/roadmap.md`](.project/roadmap.md); requirements and acceptance criteria are in
+[`SPEC.md`](SPEC.md).
 
-### Core Deliverable
-- [ ] **pratico-daemon** — Docker Remote API daemon listening on `unix://~/.pratico/docker.sock`
-- [ ] **Docker API compliance** — Implement core Docker API endpoints (containers, images, volumes, networks)
-- [ ] **pratico-menubar** — macOS menubar app (SwiftUI) with status menu
-- [ ] **Container lifecycle** — create, start, stop, restart, kill, remove via Apple Virtualization
-- [ ] **Image management** — pull, push, inspect, prune via OCI store
-- [ ] **Basic virtualization** — Lightweight VM per container using macOS Virtualization framework
-- [ ] **Config file** — `~/.pratico/config.toml` with daemon socket path, menubar defaults
-- [ ] **DOCKER_HOST setup** — `pratico system start` configures socket for client connection
+## Version 0.1.0 — Docker Daemon + Menubar MVP
+**Goal**: Docker Remote API daemon + macOS menubar app, one VM per container, nothing
+else to install.
 
-### Dual Compatibility
-- [ ] **Docker CLI**: `docker version` reports client/server; `docker pull && docker run` works
-- [ ] **Apple container CLI**: `container system status` integrates with pratico menubar
-- [ ] **Menubar status** shows both Docker and Apple container state
+### Done (v0.1.0-alpha.1 and since)
+- [x] **pratico-daemon** serving Docker API 1.55 (min 1.44) on `unix://~/.pratico/docker.sock`
+- [x] **Container lifecycle**: create, start, stop, restart, kill, pause/unpause, wait, rm, list, inspect, attach
+- [x] **exec** (TTY and pipes), **cp**, **logs** (tail/follow/timestamps, 100 MiB cap), **stats**, **events**, **healthchecks**
+- [x] **Images**: pull (with progress), list, inspect, tag, rm, prune, save, push, private registries
+- [x] **Networks**: `bridge`, `none`, custom networks with name resolution ([SPEC D-25](SPEC.md))
+- [x] **Image scanning**: osv-scanner, grype, CISA KEV; serious findings stop and block the image
+- [x] **Config file** `~/.pratico/config.toml` (overrides only)
+- [x] **Release pipeline**: `make dmg`, `make release` with semver tags and GitHub releases
+- [x] **Embedded runtime, steps 1–2**: bundled kernel and init, own image store, per-container shim ([design](docs/design/runtime.md))
+
+### Remaining
+- [ ] **Embedded runtime** becomes the only runtime: stdin/attach, exec/cp/stats on the guest agent, pratico-net (switch, DNS, Swift uplink, ports), hot connect/disconnect, registry auth, egress intercept; then the Apple `container` CLI backend is removed
+- [ ] **Volumes**
+- [ ] **Menubar**: container list, usage, alerts, preferences, start at login
+- [ ] **Snapshot / restore** of container, network, and volume definitions
+- [ ] **Bounds and performance** targets (SPEC AC-44–AC-49)
 
 ### Acceptance Criteria
-- Standard `docker` CLI (v20.10+) can connect to `unix://~/.pratico/docker.sock`
-- `docker pull alpine && docker run --rm alpine echo hello` works end-to-end
-- `pratico-menubar` appears in macOS menu bar on login
-- Menubar click shows container state overview
-- `pratico system start` is stable across restarts
+- Standard `docker` CLI connects to `unix://~/.pratico/docker.sock` (API 1.44 or later)
+- `docker pull alpine && docker run --rm alpine echo hello` works end-to-end with nothing but Pratico.app installed
+- `pratico-menubar` starts the daemon and shows container state
+- Daemon start/stop from the menubar is reliable across restarts
 
 ### Risks & Mitigations
-- **Risk**: Docker API implementation gaps prevent client compatibility
-  - **Mitigation**: Start with subset of v1.25 API; test against `docker` CLI regularly
-- **Risk**: Menubar app complexity on different macOS versions
-  - **Mitigation**: SwiftUI StatusBar; target macOS 13+ (Ventura)+
-- **Risk**: Dual compatibility (Docker + Apple CLI) creates confusion
-  - **Mitigation**: Clear separation; menubar shows both; config toggles
+- **Risk**: Docker API gaps break clients
+  - **Mitigation**: every acceptance criterion is an e2e check driving the real `docker` CLI
+- **Risk**: apple/containerization is pre-1.0 and changes
+  - **Mitigation**: pinned version (0.54.0); upgrades are deliberate and run both e2e suites
+- **Risk**: user-space networking (Swift TCP endpoint) is new code on the hot path
+  - **Mitigation**: soak tests (bulk, many short connections, loss) before it replaces anything
 
 ---
 
@@ -42,11 +49,11 @@
 - [ ] **Container API v1.36+** — Full create/start/stop/restart/kill/remove
 - [ ] **Image API v1.30+** — Full pull/push/inspect/remove
 - [ ] **Volume API v1.32+** — Create, inspect, remove volumes
-- [ ] **Network API v1.34+** — Create custom networks, connect/disconnect containers
-- [ ] **Stats API** — `docker stats` with CPU, memory, network, disk I/O
-- [ ] **Events API** — Container state change events
-- [ ] **Container exec API** — `docker exec` command execution
-- [ ] **Logs API** — `docker logs` with tail/follow support
+- [x] **Network API** — custom networks, connect/disconnect (in v0.1.0)
+- [x] **Stats API** — `docker stats` (in v0.1.0)
+- [x] **Events API** — container, image, network events (in v0.1.0)
+- [x] **Container exec API** — `docker exec` (in v0.1.0)
+- [x] **Logs API** — `docker logs` with tail/follow (in v0.1.0)
 
 ### Menubar Enhancements
 - [ ] **Container state overview** — Running count, resource usage summary
@@ -65,11 +72,11 @@
 
 ### Workflow Improvements
 - [ ] `docker build -t .` builds images via BuildKit (Apple silicon optimized)
-- [ ] `docker cp` copies files to/from containers
-- [ ] `docker exec -it <container> bash` drops into shell
-- [ ] Resource limits `--cpu`, `--memory` actually enforced
+- [x] `docker cp` copies files to/from containers (in v0.1.0)
+- [x] `docker exec -it <container> bash` drops into shell (in v0.1.0)
+- [x] Resource limits `--cpus`, `--memory` enforced as VM size (in v0.1.0)
 - [ ] Restart policies `--restart` supported
-- [ ] Environment variables `-e` passed through to containers
+- [x] Environment variables `-e` passed through to containers (in v0.1.0)
 
 ### Acceptance Criteria
 - `docker build`, `docker pull`, `docker run`, `docker ps`, `docker rm` all work
@@ -80,7 +87,7 @@
 
 ### Risks & Mitigations
 - **Risk**: BuildKit integration complexity on Apple silicon
-  - **Mitigation**: Use apple/containerization BuildKit fork; internet access via vmnet
+  - **Mitigation**: Use apple/containerization's builder; internet access via pratico-net
 - **Risk**: API version skew causes client failures
   - **Mitigation**: Document supported Docker API version; semver the daemon
 
@@ -101,10 +108,10 @@
 ### Acceptance Criteria
 - **Functional**: Standard Docker CLI (v20.10+) fully works with pratico daemon
 - **Performance**: Container startup < 1s from cold start; < 200ms from warm
-- **Reliability**: `pratico system start/stop` works across restarts; no socket leaks
+- **Reliability**: daemon start/stop from the menubar works across restarts; no socket leaks
 - **Security**: Per-container VM isolation; no host kernel sharing; Keychain auth
-- **Usability**: Migration from Docker/Colima: `pratico system start`; menubar auto-starts
-- **Dual compat**: Both `docker` CLI and `container` CLI workflows work
+- **Usability**: Migration from Docker/Colima: install the app, set `DOCKER_HOST` or a docker context; menubar auto-starts
+- **Coexistence**: Apple `container` CLI workflows keep working next to pratico
 
 ### Release Criteria
 - Zero critical bugs in 2-week beta with real-world Docker workflows
@@ -115,7 +122,7 @@
 ### Stretch: 1.1
 - Full docker-compose.yaml v2 support (via daemon-level orchestration)
 - Kubernetes-like network model (custom bridge networks)
-- Registry authentication via Keychain (login/logout/status)
+- Registry authentication in pratico's own Keychain item (embedded runtime)
 - Menubar deep linking to specific containers
 
 ---

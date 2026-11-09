@@ -1,6 +1,7 @@
 # Embedded runtime — design
 
-Status: proposed (2026-11-09). Replaces the `container` CLI backend (D-10/D-11 era).
+Status: in progress. Steps 1–2 of the migration are done behind
+`PRATICO_RUNTIME=embedded` (SPEC D-26–D-28). Replaces the `container` CLI backend.
 
 ## Why
 
@@ -155,9 +156,10 @@ The app gets an "Acknowledgements" file in the DMG and in About. Naming stays
 
 ## Migration (vertical slices, e2e green after each)
 
-1. Assets and image store: pull, list, inspect, tag, rm, save on `ContainerizationOCI`.
-2. Shim and lifecycle: create/start/stop/kill/wait/logs/rm; exit codes survive daemon
-   restart (new e2e check).
+1. ✅ Assets and image store: pull, list, inspect, tag, rm, save on `ContainerizationOCI`.
+2. ✅ Shim and lifecycle: create/start/stop/kill/wait/logs/rm and VM pause; exit codes
+   survive daemon restart. Next within it: stdin (`run -i`, `-it`, attach) and
+   healthchecks through the shim.
 3. Exec, cp, stats, pause on the agent; remove the freezer agent and the stats sampler.
 4. pratico-net: switch, IPAM, embedded DNS (+ `.pratico.internal`, `host.docker.internal`),
    Swift uplink (ARP/ICMP/UDP/TCP), port publishing; bridge and none.
@@ -167,8 +169,38 @@ The app gets an "Acknowledgements" file in the DMG and in About. Naming stays
 8. Remove `AppleContainer`, the `/etc/hosts` sync, and the anchor; update SPEC
    (D-10/D-11/D-15/D-21/D-25) and docs.
 
-Each slice keeps the Docker API unchanged; the CLI backend stays until slice 7, so a
+Each slice keeps the Docker API unchanged; the CLI backend stays until slice 8, so a
 slice can switch over per operation group.
+
+## As built (steps 1–2)
+
+| Piece | Where |
+|---|---|
+| Asset fetch, pinned digests | `scripts/fetch-runtime-assets.sh`, `make assets` → `.build/runtime-assets/{vmlinux,vminit/}` (app: `Contents/Resources/runtime`) |
+| Runtime bootstrap (store, `vminit` load, `initfs.ext4`) | `EmbeddedRuntime` in `Sources/PraticoDaemonKit/Embedded.swift` |
+| Images on the store | `EmbeddedImageBackend` in `ImageBackend.swift`; `ImageService` is backend-agnostic |
+| Shim (VM owner) | `ShimHost`, `ShimControl` in `Shim.swift`; executable `Sources/pratico-shim` |
+| Daemon side | `ShimClient` (spawn in its own session, control socket, exit watch via `DispatchSource` on the pid); `ContainerService` branches on `embedded` |
+| Tests | `make e2e-embedded` (`e2e/embedded.sh`): fake `container` binary that fails the suite if called |
+
+Per-container files in `<home>/containers/<id>/`: `config.json` (Docker record),
+`rootfs.ext4`, `spec.json` (what the shim runs), `state.json` (pid, running/paused),
+`log` (+ `log.1`), `exit.json` (code, time, error), `shim.log`. The control socket is
+`<home>/run/<short id>.sock`.
+
+Shim control API (HTTP over the socket, one request per connection): `POST /kill?signal=N`,
+`POST /stop?t=S` (SIGTERM, SIGKILL after S seconds), `POST /pause`, `POST /resume`.
+
+Learned while building:
+- Virtualization.framework needs the `com.apple.security.virtualization` entitlement on
+  the process that runs VMs: the shim, not the daemon. `swift build` relinks and drops the
+  signature, so `make build` re-signs `pratico-shim` every time.
+- Logs flow through the file: the shim is the only writer; the daemon tails it (50 ms)
+  for `logs -f` and attach, and flushes it before closing attached clients on exit.
+- Async Containerization calls are bridged into the daemon's thread-per-connection
+  model with `blocking { }`; it must never run on a Swift concurrency thread.
+- Interim limits, each 501 with a reason: exec, cp, stats, `docker login`, custom
+  networks, published ports; containers have no network yet (step 4).
 
 ## Risks and costs
 

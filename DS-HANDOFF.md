@@ -1,5 +1,7 @@
 # Pratico Handoff Document
 
+> Historical (2026-11-07). Current state: `README.md`, `SPEC.md`, `.project/roadmap.md`.
+
 **Generated**: Sat Nov 07 2026
 **Session**: Pratico specification and design grind
 

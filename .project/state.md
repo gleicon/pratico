@@ -4,15 +4,20 @@
 - No restricted entitlements (e.g. `com.apple.vm.networking`): macOS kills binaries carrying them without a provisioning profile, and user approval cannot override that. Networking must work without them. See `SPEC.md` D-11.
 - Users approve downloaded builds through Gatekeeper ("Open Anyway" or `xattr -dr com.apple.quarantine`); the app cannot prompt for this itself because Gatekeeper blocks before any code runs. A helper script inside the DMG does not help: it is quarantined too.
 - v0.1.0 is built via Makefiles and shipped as a `.dmg` (`SPEC.md` D-9).
-
-- No pratico CLI (SPEC D-12). Pratico is a Mac app: menubar item, config window, listeners. `docker` and Apple `container` are the CLIs. Daemon control lives in the menubar.
+- No pratico CLI (SPEC D-12). Pratico is a Mac app: menubar item, config window, listeners. `docker` is the CLI. Daemon control lives in the menubar.
 - Listeners run in `pratico-daemon`, a background helper bundled in `Pratico.app` and registered via `SMAppService` (SPEC D-13).
+- Users must not need Apple's `container` installed (2026-11-09). The embedded runtime (SPEC D-26, `docs/design/runtime.md`) replaces the CLI backend; limitations of the CLI are bugs to remove, not documented behavior.
+- Behave like Docker by default and go beyond it where that helps (agents especially); never ship a weaker approximation because an acceptance criterion is literally met.
+- Embedded networking is pure Swift with no extra binaries (SPEC D-27). Kernel and `vminit` are bundled, not downloaded by users.
 
 # hazards
 
-- Unverified whether Apple `Containerization` networking on macOS 26 needs `com.apple.vm.networking`. Check at the first networking task (roadmap: default `bridge` network). If it does, networking must route through the Apple-signed `container` runtime or another unrestricted path.
-- Daemon backend shells out to the `container` CLI (`AppleContainer.swift`). Each running container is supervised by a `container start --attach` child: the Apple runtime reports no exit codes, but that process exits with the container's code and carries separate stdout/stderr.
-- After a daemon restart, containers still running have no supervisor; a poller marks them exited with exit code 0 (real code unknown). Fixing it needs a runtime source of exit codes.
-- `container start --attach` refuses already-running containers, and `container stop` during VM boot is a no-op. `start` therefore blocks until the runtime reports `running` (30 s bound); keep that or restart races return.
-- `START.md` and `ROADMAP.md` (top-level) still describe `pratico system ...` commands; superseded by SPEC D-12.
-- Never leave an Apple container frozen without the daemon's pause agent (D-15). `container stop`, `kill`, and `rm -f` all hang on a frozen VM. The only recovery found is killing its `container-runtime-linux` process. Pause does not survive a daemon restart, unlike Docker: the container thaws instead.
+- Two runtimes coexist until migration step 8: `ContainerService` branches on `embedded`. A change to container behavior must be made, or explicitly 501'd, on both paths; run `make e2e` and `make e2e-embedded`.
+- `pratico-shim` needs `com.apple.security.virtualization`. A plain `swift build` drops it; use `make build`, which re-signs. Symptom: `exit.json` says the process lacks the entitlement, exit 127.
+- Shim sockets live in `<home>/run/<short id>.sock`; anything under `containers/<64-hex id>/` exceeds the 104-byte Unix socket limit.
+- `blocking { }` (ImageBackend.swift) waits on a semaphore; call it only from the daemon's connection threads or plain threads, never from a Swift concurrency context.
+- Swift `case A, B where cond:` applies `where` to `B` only. A route written that way matched `A` unconditionally and sent no response, hanging `docker cp`.
+- `make probe` and an embedded daemon without `--home` use `~/.pratico`, which the installed app also uses. Test with a temporary `--home`.
+- CLI backend: each running container is supervised by a `container start --attach` child; after a daemon restart a poller marks survivors exited with code 0 (real code unknown). `start` blocks until the runtime reports `running` (30 s bound), or stop-during-boot races return.
+- CLI backend: never leave an Apple container frozen without the daemon's pause agent (D-15). `container stop`, `kill`, and `rm -f` hang on a frozen VM; recovery is killing its `container-runtime-linux` process.
+- CLI backend: Apple vmnet's `default` network reclaims `bridge100`, breaking a custom network that activated while `default` was idle; the `pratico-anchor` pause container works around it (D-25). Gone with pratico-net.
