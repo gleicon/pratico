@@ -62,9 +62,13 @@ pratico-menubar ──► pratico-daemon ──(unix socket per container)──
 3. **pratico-net**: a user-space Ethernet switch in the daemon. VM NICs are
    `VZFileHandleNetworkDeviceAttachment` datagram socket pairs whose other end the
    daemon holds. It has no vmnet, no host bridges, and no `bridge100`.
-4. **Assets**: Linux kernel and the `vminit` init filesystem, at pinned versions and
-   digests. They are bundled in the app (kernel ~16 MB) or fetched on first run and
-   verified. pratico checks for them in `~/.pratico/runtime/`.
+4. **Assets**: Linux kernel (~16 MB, built from Containerization's `kernel/config-arm64`)
+   and the `vminit` init filesystem (built from `vminitd` source), at pinned versions
+   and SHA-256 digests, **bundled in the app** (decided 2026-11-09). A download would
+   need pratico-hosted artifacts (the only upstream kernel is inside a multi-hundred-MB
+   Kata tarball), so the bundle is the source of truth: first `docker run` works offline,
+   with no setup step. Newer assets arrive with app releases; the GPL source offer for
+   the kernel ships alongside (see Licenses).
 
 ## Networking
 
@@ -77,6 +81,17 @@ networks cannot exchange a frame, because the switch never forwards one.
   address (Docker uses `127.0.0.11`). Container names, aliases, and short IDs on that
   network resolve; everything else forwards to the host's resolvers. Nothing is written
   into containers, so distroless images work.
+- **Default `bridge` matches Docker** (decided 2026-11-09): bare container names do not
+  resolve there. That hurts agents, which mostly `docker run` ad hoc without creating a
+  network: a database plus a test runner on `bridge` cannot find each other by name,
+  and the agent falls back to scraping IPs from `docker inspect` (which change on every
+  restart) or to the deprecated `--link`. pratico goes beyond Docker without changing
+  Docker's behavior:
+  - `<name>.pratico.internal` resolves on every network, `bridge` included, scoped to
+    containers that share a network with the asker (no cross-network discovery).
+  - `host.docker.internal` / `host.pratico.internal` reach the Mac, and
+    `gateway.docker.internal` the network gateway, as Docker Desktop provides.
+  - `docker inspect`, events, and the menubar show each container's DNS names.
 - **Hot connect/disconnect on running containers**: Virtualization.framework cannot
   hot-add NICs. So each VM gets a fixed number of NIC slots (config
   `network_slots`, default 4) at boot.
@@ -84,11 +99,24 @@ networks cannot exchange a frame, because the switch never forwards one.
     address and brings it up.
   - Disconnect: the agent takes the slot down, and the switch unbinds it. Frames are
     dropped at the switch, so isolation holds even against a hostile guest.
-- **Internet (uplink)**: the switch routes off-network traffic to an uplink port. The
-  uplink does NAT through a user-space TCP/IP stack. Proposed first version: bundled
-  [gvproxy](https://github.com/containers/gvisor-tap-vsock) (Apache-2.0, used by Podman)
-  attached as the uplink port. A Swift stack can replace it later without touching the
-  rest.
+- **Internet (uplink)**, in Swift, no extra binaries (decided 2026-11-09): the switch
+  routes off-network traffic to pratico's own user-space stack, in the style of slirp.
+  - It answers ARP, ICMP echo, and DNS.
+  - It relays UDP flows over host sockets.
+  - It terminates guest TCP with a minimal TCP endpoint: handshake, sequence numbers and
+    ACKs, window, retransmission, FIN and RST. Each flow becomes a SwiftNIO channel to a
+    host socket.
+- **Egress intercept** (new, from [sandwich-proxy](https://github.com/gleicon/sandwich-proxy),
+  MIT, same author): since every container connection is a NIO channel inside pratico,
+  HTTP and HTTPS flows can pass through sandwich's engine transparently. The container
+  needs no `HTTP_PROXY` setting.
+  - Per container: log, replay, breakpoint, and filter requests, and export HAR.
+  - Threat feeds (URLhaus, PhishTank, OpenPhish) can block malicious destinations.
+  - HTTPS inspection mints certificates per SNI, and is opt-in per container: pratico
+    injects its CA into that container's trust store only when asked.
+  - Agents get a record of everything a container fetched or sent.
+  - The parts embedded are sandwich's proxy pipeline, certificate manager, threat
+    feeds, and HAR code, as a library target.
 - **`--internal` networks** have no uplink port: real isolation from the internet.
 - **Port publishing**: the daemon listens on the host address and port, and relays
   each connection through the uplink to the container's address. Loopback-only
@@ -118,7 +146,8 @@ networks cannot exchange a frame, because the switch never forwards one.
 | apple/containerization (incl. vminitd) | Apache-2.0 | ship LICENSE + NOTICE text, mark modified files, no Apple trademarks/logos |
 | SwiftNIO, grpc-swift, swift-protobuf, swift-crypto, … (its dependencies) | Apache-2.0 | same |
 | zstd | BSD-3 (dual BSD/GPLv2; use BSD) | keep copyright notice |
-| gvproxy / gvisor-tap-vsock | Apache-2.0 | same as above |
+| sandwich-proxy (embedded parts) | MIT | keep copyright notice |
+| SQLite.swift (sandwich's dependency) | MIT | keep copyright notice |
 | Linux kernel binary | GPL-2.0 | offer the exact source + config for the shipped binary (link to the tagged source and our config in the release) |
 
 The app gets an "Acknowledgements" file in the DMG and in About. Naming stays
@@ -130,10 +159,12 @@ The app gets an "Acknowledgements" file in the DMG and in About. Naming stays
 2. Shim and lifecycle: create/start/stop/kill/wait/logs/rm; exit codes survive daemon
    restart (new e2e check).
 3. Exec, cp, stats, pause on the agent; remove the freezer agent and the stats sampler.
-4. pratico-net: switch, IPAM, embedded DNS, uplink, port publishing; bridge and none.
+4. pratico-net: switch, IPAM, embedded DNS (+ `.pratico.internal`, `host.docker.internal`),
+   Swift uplink (ARP/ICMP/UDP/TCP), port publishing; bridge and none.
 5. Custom networks with hot connect/disconnect (new e2e: disconnect cuts traffic by IP).
 6. Registry auth and push on the OCI client; scanning reads the store directly.
-7. Remove `AppleContainer`, the `/etc/hosts` sync, and the anchor; update SPEC
+7. Egress intercept: sandwich engine on container flows, per-container opt-in, menubar view.
+8. Remove `AppleContainer`, the `/etc/hosts` sync, and the anchor; update SPEC
    (D-10/D-11/D-15/D-21/D-25) and docs.
 
 Each slice keeps the Docker API unchanged; the CLI backend stays until slice 7, so a
@@ -144,13 +175,14 @@ slice can switch over per operation group.
 - Each shim process holds a VM; memory per idle container is the VM's (as today).
 - macOS 26 only (unchanged).
 - The Containerization API is pre-1.0 and changes; pin a version and track releases.
-- gvproxy is a foreign (Go) binary in the bundle until a Swift uplink exists.
+- The Swift TCP endpoint is the largest new piece; it needs a soak test (bulk
+  transfers, many short connections, packet loss) before it replaces anything.
 - Kernel updates are pratico's responsibility (security fixes ship with app releases).
 
-## Open questions
+## Decisions (2026-11-09)
 
-1. DNS on the default `bridge` network: Docker resolves names only on user networks.
-   Resolve on `bridge` too (better) or match Docker?
-2. Bundle the kernel and `vminit` in the DMG (+~30 MB, works offline) or fetch on first
-   run?
-3. Uplink: gvproxy first (recommended), or a Swift user-space stack from the start?
+1. Default `bridge` matches Docker; pratico adds `.pratico.internal` names and
+   `host.docker.internal` (see Networking).
+2. Kernel and `vminit` are bundled; no pratico download infrastructure.
+3. The uplink is pure Swift; no extra binaries. sandwich-proxy parts are embedded for
+   egress intercept.

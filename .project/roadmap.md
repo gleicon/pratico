@@ -45,9 +45,10 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 - [ ] Kernel and vminit assets pinned and verified; images (pull, list, inspect, tag, rm, save) on the ContainerizationOCI store
 - [ ] Per-container shim owns the VM: create/start/stop/kill/wait/logs/rm; exit codes survive a daemon restart
 - [ ] Exec, cp, stats, pause through the guest agent; freezer agent and stats sampler removed
-- [ ] pratico-net: user-space switch, IPAM, embedded DNS, uplink to the internet, port publishing; `bridge` and `none`
+- [ ] pratico-net: user-space switch, IPAM, embedded DNS (`.pratico.internal`, `host.docker.internal`), Swift uplink (ARP/ICMP/UDP/TCP), port publishing; `bridge` and `none`
 - [ ] Custom networks with hot connect/disconnect that cut traffic, not just names
 - [ ] Registry auth and push on the OCI client, credentials in pratico's own Keychain item; scans read the store
+- [ ] Egress intercept: sandwich-proxy engine on container HTTP/HTTPS flows, per-container opt-in, log/replay/HAR/threat feeds
 - [ ] `container` CLI adapter, `/etc/hosts` sync and default-network anchor removed; SPEC and docs updated; acknowledgements (licenses) in the app and DMG
 
 ## Networks and volumes
