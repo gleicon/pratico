@@ -1,6 +1,6 @@
 # Embedded runtime — design
 
-Status: in progress. Steps 1–3 of the migration are done behind
+Status: in progress. Steps 1–3 and 4a of the migration are done behind
 `PRATICO_RUNTIME=embedded` (SPEC D-26–D-28). Replaces the `container` CLI backend.
 
 ## Why
@@ -161,8 +161,8 @@ The app gets an "Acknowledgements" file in the DMG and in About. Naming stays
    survive daemon restart; stdin (`run -i`, `-it`, attach), TTY resize, healthchecks.
 3. ✅ Exec (TTY, stdin, detach, env/workdir/user), cp both ways, stats, pause on the
    agent. The freezer agent and `container stats` sampler leave with the CLI backend.
-4. pratico-net: switch, IPAM, embedded DNS (+ `.pratico.internal`, `host.docker.internal`),
-   Swift uplink (ARP/ICMP/UDP/TCP), port publishing; bridge and none.
+4. pratico-net: ✅ 4a switch, IPAM, gateway, embedded DNS (+ `.pratico.internal`,
+   `host.docker.internal`), bridge/none/custom; 4b Swift uplink (UDP/TCP); 4c ports.
 5. Custom networks with hot connect/disconnect (new e2e: disconnect cuts traffic by IP).
 6. Registry auth and push on the OCI client; scanning reads the store directly.
 7. Egress intercept: sandwich engine on container flows, per-container opt-in, menubar view.
@@ -216,8 +216,16 @@ Learned while building:
   a copy-out for images without a shell.
 - `StatsService.epoch` is a lazy `static let`; it is pinned at init, or the first CPU
   totals come out negative and the Docker CLI reports `EOF`.
-- Interim limits, each 501 with a reason: `docker login`, custom networks, published
-  ports; containers have no network yet (step 4).
+- pratico-net as built (4a): `Net/Packets.swift` (bounds-checked Ethernet/ARP/IPv4/UDP/
+  ICMP/DNS), `Net/Switch.swift` (daemon; `<home>/run/net.sock`), `Net/NIC.swift` (shim:
+  socket pair to Virtualization.framework, relay bound at `<home>/run/<short id>.<n>`).
+  The switch knows ports by their socket path and drops frames whose source MAC or IP is
+  not the port's. Addresses come from the network's subnet (`bridge`: 172.17.0.0/16,
+  gateway .1) and are recorded in the shim's spec, so a restarted daemon re-registers
+  them. External A queries use `getaddrinfo` (VPN and split DNS apply), at most 32 at a
+  time; AAAA and other types get empty answers until IPv6 routing exists.
+- Interim limits, each 501 with a reason: `docker login`, published ports (4c);
+  no internet yet (4b), connect/disconnect of running containers (409, step 5).
 
 ## Risks and costs
 

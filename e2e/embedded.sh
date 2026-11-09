@@ -162,6 +162,27 @@ expect_eq "its output was kept" "$(docker logs e-late)" "late"
 docker stop -t 1 e-clock >/dev/null
 check "a restarted daemon still controls it" test "$(docker inspect e-clock --format '{{.State.Running}}')" = false
 
+# pratico-net (SPEC D-27): switch, addresses, gateway, DNS, isolation
+docker run -d --name e-b1 alpine sleep 600 >/dev/null
+docker run -d --name e-b2 alpine sleep 600 >/dev/null
+b2=$(docker inspect e-b2 --format '{{.NetworkSettings.IPAddress}}')
+check "bridge containers get 172.17.0.0/16 addresses" grep -q '^172\.17\.' <<<"$b2"
+check "the gateway answers ping" docker exec e-b1 ping -c1 -W2 172.17.0.1
+check "bridge containers reach each other" docker exec e-b1 ping -c1 -W2 "$b2"
+if docker exec e-b1 nslookup e-b2 172.17.0.1 >/dev/null 2>&1; then bad "bare names do not resolve on bridge (Docker)"; else ok "bare names do not resolve on bridge (Docker)"; fi
+check "<name>.pratico.internal resolves on bridge" docker exec e-b1 ping -c1 -W2 e-b2.pratico.internal
+docker network create e-n1 >/dev/null
+docker run -d --name e-c1 --network e-n1 alpine sleep 600 >/dev/null
+docker run -d --name e-c2 --network e-n1 --network-alias db alpine sleep 600 >/dev/null
+check "names resolve on a user network" docker exec e-c1 ping -c1 -W2 e-c2
+check "aliases resolve on a user network" docker exec e-c1 ping -c1 -W2 db
+if docker exec e-c1 ping -c1 -W2 "$b2" >/dev/null 2>&1; then bad "networks are isolated"; else ok "networks are isolated"; fi
+check "external names resolve through the Mac" docker exec e-c1 nslookup example.com
+expect_eq "host.docker.internal is the gateway" "$(docker exec e-c1 nslookup host.docker.internal 2>/dev/null | awk '/^Address/ {a=$2} END {print a}')" \
+    "$(docker network inspect e-n1 --format '{{(index .IPAM.Config 0).Gateway}}')"
+docker rm -f e-b1 e-b2 e-c1 e-c2 >/dev/null
+check "network rm" docker network rm e-n1
+
 # SIGTERM to a shim (logout, shutdown) stops its container like `docker stop`.
 docker run -d --name e-term alpine sh -c 'trap "exit 9" TERM; while true; do sleep 0.1; done' >/dev/null
 sleep 1

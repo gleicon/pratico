@@ -290,3 +290,27 @@ private let grypeSample = Data(#"""
     let links = try ArchiveService.escapingLinks(in: root).map(\.0).sorted()
     #expect(links == ["d/out", "up"])
 }
+
+@Test func dnsQueriesParseAndAnswer() throws {
+    // id 0x1234, RD, one question: db.example A IN
+    let q: [UInt8] = [0x12, 0x34, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0,
+                      2, 0x64, 0x62, 7] + Array("example".utf8) + [0, 0, 1, 0, 1]
+    let query = try #require(DNSQuery(q))
+    #expect(query.name == "db.example" && query.qtype == 1)
+    let a = query.answer(q, addresses: [0xac11_0002])
+    #expect(a[3] & 0x0f == 0 && a[7] == 1)  // NOERROR, one answer
+    #expect(Array(a.suffix(4)) == [172, 17, 0, 2])
+    #expect(query.answer(q, addresses: nil)[3] & 0x0f == 3)  // NXDOMAIN
+    #expect(DNSQuery(Array(q.prefix(14))) == nil)  // truncated
+}
+
+@Test func ipv4HeadersChecksumAndRoundTrip() throws {
+    let p = IPv4Packet(src: 0xac11_0002, dst: 0xac11_0001, proto: 17, payload: [1, 2, 3])
+    let parsed = try #require(IPv4Packet(p.bytes))
+    #expect(parsed.src == p.src && parsed.dst == p.dst && parsed.payload == [1, 2, 3])
+    var bad = p.bytes
+    bad[8] ^= 0xff  // corrupt TTL: checksum no longer matches
+    #expect(IPv4Packet(bad) == nil)
+    let arp = ARP(op: 1, senderMAC: .gateway, senderIP: 1, targetMAC: .broadcast, targetIP: 2)
+    #expect(ARP(arp.bytes)?.targetIP == 2)
+}

@@ -21,6 +21,9 @@ struct ShimSpec: Codable, Sendable {
     var cpus: Int
     var memoryMiB: Int
     var mounts: [ShimMount]
+    /// pratico-net NICs, primary first; empty for `--network none`.
+    var nics: [ShimNIC] = []
+    var switchSocket: String = ""
 }
 
 struct ShimMount: Codable, Sendable, Equatable {
@@ -69,6 +72,14 @@ public enum ShimHost {
             kernel: Kernel(path: URL(filePath: spec.kernel), platform: .linuxArm),
             initialFilesystem: .block(format: "ext4", source: spec.initfs, destination: "/", options: ["ro"]))
         let container: LinuxContainer
+        let interfaces: [SwitchNIC]
+        do {
+            interfaces = try spec.nics.enumerated().map { i, nic in
+                try NICRelay.start(nic, switchSocket: spec.switchSocket, first: i == 0)
+            }
+        } catch {
+            return fail("cannot set up networking: \(error)")
+        }
         do {
             container = try LinuxContainer(
                 spec.id, rootfs: .block(format: "ext4", source: spec.rootfs, destination: "/"), vmm: vmm,
@@ -86,6 +97,14 @@ public enum ShimHost {
                 // A terminal has one output stream; Containerization rejects a separate stderr.
                 config.process.stderr = spec.tty ? nil : LogWriter(log: log, stream: 2)
                 config.process.stdin = stdin
+                config.interfaces = interfaces
+                if let first = spec.nics.first {
+                    // pratico-net answers DNS at the gateway: container names, then the Mac's resolver.
+                    config.dns = DNS(nameservers: [first.gateway])
+                    var hosts = Hosts.default
+                    hosts.entries.append(Hosts.Entry(ipAddress: String(first.address.split(separator: "/")[0]), hostnames: [spec.hostname]))
+                    config.hosts = hosts
+                }
                 for m in spec.mounts {
                     config.mounts.append(.share(source: m.source, destination: m.destination, options: m.readOnly ? ["ro"] : []))
                 }

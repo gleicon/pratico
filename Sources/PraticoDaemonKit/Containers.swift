@@ -124,6 +124,9 @@ public final class ContainerService: @unchecked Sendable {
                 let log = LogStore(path: files.log)
                 logs[id] = log
                 if let pid {
+                    if let data = try? Data(contentsOf: files.spec), let spec = try? JSONDecoder().decode(ShimSpec.self, from: data) {
+                        networks.attach(rec, spec.nics)
+                    }
                     if ShimClient.read(files.state)?["status"]?.string == "paused" { pausedVMs.insert(id) }
                     log.tailExternalWriter()
                     track(id, pid: pid, log: log, shim: embedded.shim)
@@ -282,10 +285,7 @@ public final class ContainerService: @unchecked Sendable {
         }
 
         if let embedded {
-            // No network until pratico-net (docs/design/runtime.md); say so rather than drop it.
-            guard attach.allSatisfy({ $0.0.builtin }) else {
-                throw APIError(400, "pratico: custom networks are not on the embedded runtime yet")
-            }
+            // Published ports arrive with pratico-net step 4c; say so rather than drop them.
             guard host["PortBindings"]?.object?.isEmpty ?? true else {
                 throw APIError(400, "pratico: published ports are not on the embedded runtime yet")
             }
@@ -468,11 +468,14 @@ public final class ContainerService: @unchecked Sendable {
         let user: String = rec.config["User"]?.string ?? ""
         let hostname: String = rec.config["Hostname"]?.string ?? rec.appleId
         let openStdin: Bool = rec.config["OpenStdin"]?.bool ?? false
-        let spec = ShimSpec(
+        let nics = networks.allocateNICs(rec, runDir: files.socket.deletingLastPathComponent())
+        var spec = ShimSpec(
             id: rec.appleId, kernel: embedded.kernel, initfs: embedded.initfs, rootfs: rootfs,
             arguments: [rec.path] + rec.args, environment: env, workingDirectory: workdir, user: user,
             tty: rec.tty, openStdin: openStdin, hostname: hostname, cpus: max(cpus, 1), memoryMiB: max(mem, 64),
             mounts: mounts)
+        spec.nics = nics
+        spec.switchSocket = networks.netSwitch?.socketPath ?? ""
         try JSONEncoder().encode(spec).write(to: files.spec, options: .atomic)
 
         lock.lock()
@@ -480,7 +483,12 @@ public final class ContainerService: @unchecked Sendable {
         logs[rec.id] = log
         lock.unlock()
         log.tailExternalWriter()
-        let pid = try embedded.shim.spawn(files)
+        let pid: pid_t
+        do { pid = try embedded.shim.spawn(files) } catch {
+            networks.stopped(rec.id)
+            throw error
+        }
+        networks.attach(rec, nics)
         update(rec.id) { $0.state = ContainerState(status: "running", startedAt: Date()) }
         track(rec.id, pid: pid, log: log, shim: embedded.shim)
         // The process never ran (bad image config, missing executable): fail the start, as
@@ -896,6 +904,20 @@ public final class ContainerService: @unchecked Sendable {
     func connect(_ ref: String, to net: NetworkRecord, aliases: [String]) throws {
         let rec = try resolve(ref)
         var eps = networks.endpoints(rec)
+        if embedded != nil {
+            // pratico-net plans NICs at each start; a running container needs hot connect (4d).
+            guard !rec.state.running else { throw APIError(409, "pratico: connecting a running container arrives with pratico-net hot connect") }
+            guard eps[net.id] == nil || eps[net.id]?.detached == true else {
+                throw APIError(403, "endpoint with name \(rec.name) already exists in network \(net.name)")
+            }
+            if net.name == "none" || networks.active(rec).keys.contains(where: { (try? networks.resolve($0))?.name == "none" }) {
+                throw APIError(400, "container cannot be connected to network none and other networks")
+            }
+            eps[net.id] = Endpoint(aliases: aliases)
+            update(rec.id) { $0.endpoints = eps }
+            networks.emit(net, "connect", container: rec.id)
+            return
+        }
         if let ep = eps[net.id], !ep.detached {
             throw APIError(403, "endpoint with name \(rec.name) already exists in network \(net.name)")
         }
@@ -921,6 +943,14 @@ public final class ContainerService: @unchecked Sendable {
     func disconnect(_ ref: String, from net: NetworkRecord) throws {
         let rec = try resolve(ref)
         var eps = networks.endpoints(rec)
+        if embedded != nil {
+            guard eps[net.id] != nil else { throw APIError(403, "container \(rec.id) is not connected to network \(net.name)") }
+            guard !rec.state.running else { throw APIError(409, "pratico: disconnecting a running container arrives with pratico-net hot disconnect") }
+            eps[net.id] = nil
+            update(rec.id) { $0.endpoints = eps }
+            networks.emit(net, "disconnect", container: rec.id)
+            return
+        }
         guard let ep = eps[net.id], !ep.detached else {
             throw APIError(403, "container \(rec.id) is not connected to network \(net.name)")
         }

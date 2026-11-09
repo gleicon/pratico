@@ -122,10 +122,13 @@ final class NetworkService: @unchecked Sendable {
     /// `apple` false: the embedded runtime, where no Apple networks exist (pratico-net
     /// replaces them, docs/design/runtime.md).
     let apple: Bool
+    /// pratico-net's switch (embedded runtime only).
+    let netSwitch: NetSwitch?
 
     init(runtime: AppleContainer, root: URL, events: EventBus, apple: Bool = true) {
         self.runtime = runtime
         self.apple = apple
+        netSwitch = apple ? nil : NetSwitch(socketPath: root.deletingLastPathComponent().appending(path: "run/net.sock").path)
         self.root = root
         self.events = events
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -150,8 +153,14 @@ final class NetworkService: @unchecked Sendable {
                 n["id"]?.string.map { ($0, n) }
             }, uniquingKeysWith: { a, _ in a })
         var bridge = records.values.first { $0.name == "bridge" } ?? Self.builtin("bridge", "default")
-        bridge.subnet = apple["default"]?["status"]?["ipv4Subnet"]?.string ?? bridge.subnet
-        bridge.gateway = apple["default"]?["status"]?["ipv4Gateway"]?.string ?? bridge.gateway
+        if self.apple {
+            bridge.subnet = apple["default"]?["status"]?["ipv4Subnet"]?.string ?? bridge.subnet
+            bridge.gateway = apple["default"]?["status"]?["ipv4Gateway"]?.string ?? bridge.gateway
+        } else {
+            // pratico-net: Docker's default bridge addressing.
+            bridge.subnet = "172.17.0.0/16"
+            bridge.gateway = "172.17.0.1"
+        }
         records[bridge.id] = bridge
         save(bridge)
         if !records.values.contains(where: { $0.name == "none" }) {
@@ -224,7 +233,6 @@ final class NetworkService: @unchecked Sendable {
     // MARK: Create, remove
 
     func create(_ body: JSON) throws -> NetworkRecord {
-        guard apple else { throw APIError(501, "pratico: custom networks are not on the embedded runtime yet") }
         guard let name = body["Name"]?.string, !name.isEmpty else { throw APIError(400, "network name is required") }
         // Container-name rules, but one character is allowed.
         guard Names.valid(name) || (name.count == 1 && (name.first!.isLetter || name.first!.isNumber)) else {
@@ -238,6 +246,8 @@ final class NetworkService: @unchecked Sendable {
         guard driver == "bridge" else { throw APIError(400, "pratico: only the bridge network driver is supported, not \(driver)") }
         if body["EnableIPv6"]?.bool == true { throw APIError(400, "pratico: IPv6 networks are not supported") }
 
+        // Host subnets stay excluded on pratico-net too: a container could not reach a LAN
+        // or VPN that its own network shadows.
         let used = all().map(\.subnet).filter { !$0.isEmpty } + IPv4.hostSubnets()
         var subnet: String
         if let asked = body["IPAM"]?["Config"]?.array?.first?["Subnet"]?.string, !asked.isEmpty {
@@ -260,9 +270,14 @@ final class NetworkService: @unchecked Sendable {
             id: id, name: name, appleName: "pratico-\(id.prefix(12))", created: Date(), driver: driver,
             subnet: subnet, gateway: "", isInternal: body["Internal"]?.bool ?? false,
             attachable: body["Attachable"]?.bool ?? false, labels: labels, options: options)
-        let r = runtime.run(Self.appleCreateArgs(rec))
-        guard r.ok else { throw APIError(500, "cannot create network: \(r.errorText)") }
-        rec.gateway = runtime.runJSON(["network", "inspect", rec.appleName])?.array?.first?["status"]?["ipv4Gateway"]?.string ?? ""
+        if apple {
+            let r = runtime.run(Self.appleCreateArgs(rec))
+            guard r.ok else { throw APIError(500, "cannot create network: \(r.errorText)") }
+            rec.gateway = runtime.runJSON(["network", "inspect", rec.appleName])?.array?.first?["status"]?["ipv4Gateway"]?.string ?? ""
+        } else if let c = IPv4.cidr(subnet) {
+            rec.gateway = IPv4.format(c.base + 1)
+        }
+        segment(rec)
         lock.lock()
         records[id] = rec
         lock.unlock()
@@ -277,10 +292,12 @@ final class NetworkService: @unchecked Sendable {
         guard members(rec).isEmpty else {
             throw APIError(403, "error while removing network: network \(rec.name) id \(rec.id) has active endpoints")
         }
-        let r = runtime.run(["network", "delete", rec.appleName])
-        // Already gone from the Apple side counts as removed.
-        guard r.ok || runtime.runJSON(["network", "inspect", rec.appleName]) == nil else {
-            throw APIError(500, "cannot remove network \(rec.name): \(r.errorText)")
+        if apple {
+            let r = runtime.run(["network", "delete", rec.appleName])
+            // Already gone from the Apple side counts as removed.
+            guard r.ok || runtime.runJSON(["network", "inspect", rec.appleName]) == nil else {
+                throw APIError(500, "cannot remove network \(rec.name): \(r.errorText)")
+            }
         }
         lock.lock()
         records[rec.id] = nil
@@ -358,6 +375,96 @@ final class NetworkService: @unchecked Sendable {
         lock.lock()
         addresses[id] = nil
         lock.unlock()
+        netSwitch?.unregister(container: id)
+    }
+
+    // MARK: pratico-net (embedded runtime)
+
+    /// Starts the switch with every network's segment and its name resolver.
+    func startSwitch() throws {
+        guard let netSwitch else { return }
+        try FileManager.default.createDirectory(atPath: (netSwitch.socketPath as NSString).deletingLastPathComponent,
+                                                withIntermediateDirectories: true)
+        netSwitch.resolveName = { [weak self] port, name in self?.resolve(port, name) }
+        for rec in all() { segment(rec) }
+        try netSwitch.start()
+    }
+
+    private func segment(_ rec: NetworkRecord) {
+        guard let netSwitch, !rec.builtin || rec.name == "bridge", let c = IPv4.cidr(rec.subnet),
+            let gw = IPv4.parse(rec.gateway)
+        else { return }
+        netSwitch.setSegment(rec.id, NetSegment(gateway: gw, prefix: c.prefix))
+    }
+
+    /// Plans the container's NICs (primary network first) and takes an address on each.
+    func allocateNICs(_ rec: ContainerRecord, runDir: URL) -> [ShimNIC] {
+        guard netSwitch != nil else { return [] }
+        let mode = rec.hostConfig["NetworkMode"]?.string ?? ""
+        let nets = active(rec).keys.compactMap { try? resolve($0) }.filter { $0.name != "none" }
+            .sorted { a, b in
+                let pa = a.name == mode || a.id == mode, pb = b.name == mode || b.id == mode
+                return pa != pb ? pa : a.name < b.name
+            }
+        var nics: [ShimNIC] = []
+        lock.lock()
+        defer { lock.unlock() }
+        for (i, net) in nets.enumerated() {
+            guard let c = IPv4.cidr(net.subnet), let gw = IPv4.parse(net.gateway) else { continue }
+            let used = Set(addresses.values.compactMap { $0[net.appleName].flatMap { IPv4.parse($0.ip) } } + [gw])
+            let size = UInt32(1) << UInt32(32 - c.prefix)
+            guard let ip = (UInt32(1)..<(size - 1)).lazy.map({ c.base + $0 }).first(where: { !used.contains($0) }) else { continue }
+            let mac = MAC.derive(rec.id + net.id)
+            let nic = ShimNIC(networkId: net.id, mac: mac.description, address: "\(IPv4.format(ip))/\(c.prefix)",
+                              gateway: net.gateway, socket: runDir.appending(path: "\(rec.appleId).\(i)").path)
+            addresses[rec.id, default: [:]][net.appleName] = NetworkAddress(ip: IPv4.format(ip), prefix: c.prefix,
+                                                                            gateway: net.gateway, mac: mac.description)
+            nics.append(nic)
+        }
+        return nics
+    }
+
+    /// The shim is up with these NICs (also after a daemon restart, from its spec).
+    func attach(_ rec: ContainerRecord, _ nics: [ShimNIC]) {
+        guard let netSwitch else { return }
+        lock.lock()
+        for nic in nics {
+            guard let net = records[nic.networkId], let mac = MAC(nic.mac), let c = IPv4.cidr(nic.address) else { continue }
+            let ip = IPv4.parse(String(nic.address.split(separator: "/")[0])) ?? c.base
+            addresses[rec.id, default: [:]][net.appleName] = NetworkAddress(ip: IPv4.format(ip), prefix: c.prefix,
+                                                                            gateway: nic.gateway, mac: nic.mac)
+            netSwitch.register(NetPort(path: nic.socket, containerId: rec.id, networkId: net.id, mac: mac, ip: ip))
+        }
+        lock.unlock()
+    }
+
+    /// DNS for a container (SPEC D-27): Docker's names on user networks, plus pratico's
+    /// `<name>.pratico.internal` on every network the asker shares, and the host names.
+    func resolve(_ port: NetPort, _ query: String) -> [UInt32]? {
+        let name = query.hasSuffix(".") ? String(query.dropLast()) : query
+        guard let asker = try? resolve(port.networkId) else { return nil }
+        if ["host.docker.internal", "host.pratico.internal", "gateway.docker.internal", "gateway.pratico.internal"].contains(name) {
+            return IPv4.parse(asker.gateway).map { [$0] }
+        }
+        let suffix = ".pratico.internal"
+        let scoped = name.hasSuffix(suffix)
+        let bare = scoped ? String(name.dropLast(suffix.count)) : name
+        guard scoped || asker.name != "bridge" else { return nil }  // Docker: no names on bridge
+        guard let containers, !bare.isEmpty else { return nil }
+        guard let me = containers.all().first(where: { $0.id == port.containerId }) else { return nil }
+        // Bare names: the asker's network only. Scoped names: any network the asker is on.
+        let nets = scoped ? Set(active(me).keys) : [asker.id]
+        var out: [UInt32] = []
+        for c in containers.all() where c.state.running {
+            for (netId, ep) in active(c) where nets.contains(netId) {
+                let names = [c.name, String(c.id.prefix(12))] + ep.aliases
+                guard names.contains(where: { $0.lowercased() == bare }), let net = try? resolve(netId),
+                    let a = address(c.id, on: net), let ip = IPv4.parse(a.ip), !out.contains(ip)
+                else { continue }
+                out.append(ip)
+            }
+        }
+        return out.isEmpty ? nil : out
     }
 
     func address(_ containerId: String, on net: NetworkRecord) -> NetworkAddress? {
