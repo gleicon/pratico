@@ -115,10 +115,11 @@ enum ScanParsers {
         }
     }
 
-    /// Previous findings only a now-failed scanner reported; kept so a scanner outage
-    /// (osv-scanner offline, say) cannot drop a malicious-package finding and lift a block.
+    /// Previous findings a now-failed scanner contributed to; kept so a scanner outage
+    /// (osv-scanner offline, say) cannot drop a malicious flag or a higher severity and
+    /// lift a block. `merge` keeps the strictest values when the other scanner re-reports.
     static func carryOver(_ prior: [ScanFinding], failed: Set<String>) -> [ScanFinding] {
-        prior.filter { !$0.sources.isEmpty && Set($0.sources).isSubset(of: failed) }
+        prior.filter { !failed.isDisjoint(with: $0.sources) }
     }
 
     /// Joins findings that name the same advisory (by ID or alias) for the same package.

@@ -207,8 +207,14 @@ private let grypeSample = Data(#"""
 
 @Test func failedScannerKeepsItsPriorFindings() {
     let mal = ScanFinding(id: "MAL-1", sources: ["osv"], package: "p", version: "1", severity: "unknown", malicious: true)
-    let both = ScanFinding(id: "CVE-1", sources: ["grype", "osv"], package: "q", version: "1", severity: "high")
-    #expect(ScanParsers.carryOver([mal, both], failed: ["osv"]) == [mal])  // grype re-reports CVE-1
-    #expect(ScanParsers.carryOver([mal, both], failed: ["osv", "grype"]).count == 2)
-    #expect(ScanParsers.carryOver([mal, both], failed: []).isEmpty)
+    let both = ScanFinding(id: "CVE-1", sources: ["grype", "osv"], package: "q", version: "1", severity: "critical")
+    let grypeOnly = ScanFinding(id: "CVE-2", sources: ["grype"], package: "r", version: "1", severity: "low")
+    #expect(ScanParsers.carryOver([mal, both, grypeOnly], failed: ["osv"]) == [mal, both])
+    #expect(ScanParsers.carryOver([mal, both, grypeOnly], failed: []).isEmpty)
+    // osv offline, grype re-reports CVE-1 as only High: the merged finding stays Critical.
+    var weaker = both
+    weaker.sources = ["grype"]
+    weaker.severity = "high"
+    let merged = ScanParsers.merge([[weaker], ScanParsers.carryOver([both], failed: ["osv"])])
+    #expect(merged.count == 1 && merged[0].severity == "critical")
 }
