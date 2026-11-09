@@ -1,6 +1,6 @@
 # Embedded runtime — design
 
-Status: in progress. Steps 1–3 and 4a of the migration are done behind
+Status: in progress. Steps 1–3, 4a and 4b of the migration are done behind
 `PRATICO_RUNTIME=embedded` (SPEC D-26–D-28). Replaces the `container` CLI backend.
 
 ## Why
@@ -162,7 +162,8 @@ The app gets an "Acknowledgements" file in the DMG and in About. Naming stays
 3. ✅ Exec (TTY, stdin, detach, env/workdir/user), cp both ways, stats, pause on the
    agent. The freezer agent and `container stats` sampler leave with the CLI backend.
 4. pratico-net: ✅ 4a switch, IPAM, gateway, embedded DNS (+ `.pratico.internal`,
-   `host.docker.internal`), bridge/none/custom; 4b Swift uplink (UDP/TCP); 4c ports.
+   `host.docker.internal`), bridge/none/custom; ✅ 4b Swift uplink (UDP/ping/TCP);
+   4c ports.
 5. Custom networks with hot connect/disconnect (new e2e: disconnect cuts traffic by IP).
 6. Registry auth and push on the OCI client; scanning reads the store directly.
 7. Egress intercept: sandwich engine on container flows, per-container opt-in, menubar view.
@@ -224,8 +225,17 @@ Learned while building:
   gateway .1) and are recorded in the shim's spec, so a restarted daemon re-registers
   them. External A queries use `getaddrinfo` (VPN and split DNS apply), at most 32 at a
   time; AAAA and other types get empty answers until IPv6 routing exists.
+- The uplink as built (4b, `Net/Uplink.swift`, `Net/TCPSegment.swift`): one serial
+  queue runs every flow. UDP flows use connected host sockets (60 s idle). Ping uses
+  unprivileged ICMP datagram sockets. TCP is terminated per connection: the SYN-ACK
+  goes out only after the Mac's connect succeeds (refusals stay refusals), 1 MiB receive
+  buffer with window scaling, go-back-N retransmission with backoff, FIN/RST both ways.
+  The gateway address maps to the Mac's 127.0.0.1. Traffic to other pratico subnets,
+  loopback, multicast, and anything from `--internal` networks never leaves. Packets over
+  the 1500-byte MTU are fragmented. Measured: internet at line rate; to the Mac,
+  ~79 MB/s down and ~70 MB/s up; 300 sequential and 20 parallel connections clean.
 - Interim limits, each 501 with a reason: `docker login`, published ports (4c);
-  no internet yet (4b), connect/disconnect of running containers (409, step 5).
+  connect/disconnect of running containers (409, step 5).
 
 ## Risks and costs
 

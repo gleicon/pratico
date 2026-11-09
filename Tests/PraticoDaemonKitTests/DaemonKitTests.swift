@@ -314,3 +314,16 @@ private let grypeSample = Data(#"""
     let arp = ARP(op: 1, senderMAC: .gateway, senderIP: 1, targetMAC: .broadcast, targetIP: 2)
     #expect(ARP(arp.bytes)?.targetIP == 2)
 }
+
+@Test func largePacketsAreFragmentedToTheMTU() throws {
+    let payload = [UInt8](repeating: 7, count: 4000)
+    let frags = IPv4Packet.fragments(src: 1, dst: 2, proto: 17, payload: payload, mtu: 1500)
+    #expect(frags.count == 3 && frags.allSatisfy { $0.count <= 1500 })
+    #expect(frags.map { $0.count - 20 }.reduce(0, +) == 4000)
+    #expect(frags[0][6] & 0x20 != 0 && frags[2][6] & 0x20 == 0)  // MF on all but the last
+    #expect(inetChecksum(Array(frags[1][0..<20])) == 0)
+    let tcp = TCPSegment(srcPort: 80, dstPort: 5000, seq: 1, ack: 2, flags: TCPSegment.ack, window: 100, payload: [1, 2, 3])
+    #expect(TCPSegment(tcp.bytes(src: 10, dst: 20), src: 10, dst: 20)?.payload == [1, 2, 3])
+    #expect(TCPSegment(tcp.bytes(src: 10, dst: 20), src: 10, dst: 21) == nil)  // wrong pseudo-header
+    #expect(seqLT(0xffff_fff0, 0x10) && !seqLT(0x10, 0xffff_fff0))
+}

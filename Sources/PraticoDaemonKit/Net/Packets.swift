@@ -169,6 +169,28 @@ struct IPv4Packet {
         return h + payload
     }
 
+    /// The packet as wire bytes, split into fragments when it exceeds `mtu` (RFC 791).
+    static func fragments(src: UInt32, dst: UInt32, proto: UInt8, payload: [UInt8], mtu: Int) -> [[UInt8]] {
+        guard 20 + payload.count > mtu else { return [IPv4Packet(src: src, dst: dst, proto: proto, payload: payload).bytes] }
+        let step = (mtu - 20) & ~7
+        let id = UInt16.random(in: 1...UInt16.max)
+        var out: [[UInt8]] = []
+        var offset = 0
+        while offset < payload.count {
+            let chunk = Array(payload[offset..<min(offset + step, payload.count)])
+            let more = offset + chunk.count < payload.count
+            let flagsOffset = (more ? UInt16(0x2000) : 0) | UInt16(offset / 8)
+            var h: [UInt8] = [0x45, 0] + be16(UInt16(20 + chunk.count)) + be16(id) + be16(flagsOffset)
+                + [64, proto, 0, 0] + be32(src) + be32(dst)
+            let c = inetChecksum(h)
+            h[10] = UInt8(c >> 8)
+            h[11] = UInt8(c & 0xff)
+            out.append(h + chunk)
+            offset += chunk.count
+        }
+        return out
+    }
+
     /// Pseudo-header sum for TCP/UDP checksums.
     static func pseudo(_ src: UInt32, _ dst: UInt32, _ proto: UInt8, _ length: Int) -> UInt32 {
         var s: UInt32 = (src >> 16) + (src & 0xffff) + (dst >> 16) + (dst & 0xffff)

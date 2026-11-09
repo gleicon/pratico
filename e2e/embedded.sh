@@ -180,11 +180,38 @@ if docker exec e-c1 ping -c1 -W2 "$b2" >/dev/null 2>&1; then bad "networks are i
 check "external names resolve through the Mac" docker exec e-c1 nslookup example.com
 expect_eq "host.docker.internal is the gateway" "$(docker exec e-c1 nslookup host.docker.internal 2>/dev/null | awk '/^Address/ {a=$2} END {print a}')" \
     "$(docker network inspect e-n1 --format '{{(index .IPAM.Config 0).Gateway}}')"
+# The uplink: UDP, ping, TCP to the internet and to the Mac (host.docker.internal).
+WWW="$HOME_DIR/www"
+mkdir -p "$WWW"
+echo hello-from-mac >"$WWW/index.html"
+head -c 20000000 /dev/urandom >"$WWW/big.bin"
+big_sum=$(shasum -a 256 "$WWW/big.bin" | cut -d' ' -f1)
+WWW_PORT=18093
+(cd "$WWW" && exec python3 -m http.server "$WWW_PORT" --bind 127.0.0.1 >/dev/null 2>&1) &
+WWW_PID=$!
+sleep 1
+check "UDP leaves the network (DNS to 1.1.1.1)" docker exec e-c1 nslookup example.com 1.1.1.1
+check "ping leaves the network" docker exec e-c1 ping -c1 -W3 1.1.1.1
+check "HTTPS to the internet" docker exec e-c1 wget -qO /dev/null -T10 https://example.com
+expect_eq "host.docker.internal reaches the Mac" "$(docker exec e-c1 wget -qO- -T5 "http://host.docker.internal:$WWW_PORT/")" "hello-from-mac"
+if docker exec e-c1 wget -qO- -T5 http://host.docker.internal:1 >/dev/null 2>&1; then bad "a closed port is refused"; else ok "a closed port is refused"; fi
+expect_eq "20 MB download arrives intact" \
+    "$(docker exec e-c1 sh -c "wget -qO /tmp/big.bin http://host.docker.internal:$WWW_PORT/big.bin && sha256sum /tmp/big.bin" | cut -d' ' -f1)" "$big_sum"
+(nc -l 127.0.0.1 18094 >"$HOME_DIR/up.bin" &)
+sleep 0.5
+docker exec e-c1 sh -c 'nc host.docker.internal 18094 < /tmp/big.bin'
+sleep 1
+expect_eq "20 MB upload arrives intact" "$(shasum -a 256 "$HOME_DIR/up.bin" | cut -d' ' -f1)" "$big_sum"
+kill "$WWW_PID" 2>/dev/null
+
 docker network create --internal e-int >/dev/null
 docker run -d --name e-i1 --network e-int alpine sleep 600 >/dev/null
 docker run -d --name e-i2 --network e-int alpine sleep 600 >/dev/null
 check "internal networks resolve their containers" docker exec e-i1 ping -c1 -W2 e-i2
 if docker exec e-i1 nslookup example.com >/dev/null 2>&1; then bad "internal networks do no external DNS"; else ok "internal networks do no external DNS"; fi
+if docker exec e-i1 ping -c1 -W2 1.1.1.1 >/dev/null 2>&1; then bad "internal networks do not reach the internet"; else ok "internal networks do not reach the internet"; fi
+gw=$(docker network inspect e-int --format '{{(index .IPAM.Config 0).Gateway}}')
+if docker exec e-i1 wget -qO- -T3 "http://$gw:18093/" >/dev/null 2>&1; then bad "internal networks do not reach the Mac"; else ok "internal networks do not reach the Mac"; fi
 docker rm -f e-b1 e-b2 e-c1 e-c2 e-i1 e-i2 >/dev/null
 check "network rm" docker network rm e-n1
 docker network rm e-int >/dev/null

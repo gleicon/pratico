@@ -38,7 +38,8 @@ Pratico has no CLI of its own: `docker` is the CLI, the menubar is the control p
 | stdin (`-i`, `-it`), healthchecks, exec, cp, stats | yes | yes (guest agent; no tools needed in the image) |
 | `docker login` | yes | not yet (HTTP 501 with a reason) |
 | Networks, DNS by name | yes ([D-25](SPEC.md), `/etc/hosts`) | yes: pratico-net switch and DNS, isolated networks |
-| Internet access, published ports | yes | next (pratico-net 4b, 4c) |
+| Internet and Mac access (`host.docker.internal`) | yes | yes: pure-Swift uplink, no extra binaries |
+| Published ports | yes | next (pratico-net 4c) |
 
 The embedded runtime is the target: once it covers every operation it becomes the
 default and the CLI backend is removed. Design and progress:

@@ -35,7 +35,9 @@ final class NetSwitch: @unchecked Sendable {
     private var ports: [String: NetPort] = [:]  // by socket path
     private var segments: [String: NetSegment] = [:]  // by network ID
     private let lookups = DispatchSemaphore(value: 32)  // bounds concurrent host DNS lookups
+    private(set) lazy var uplink = Uplink(switch: self)
     static let maxFrame = 65536
+    static let mtu = 1500
 
     init(socketPath: String) { self.socketPath = socketPath }
 
@@ -71,8 +73,10 @@ final class NetSwitch: @unchecked Sendable {
 
     func unregister(container id: String) {
         lock.lock()
+        let gone = ports.values.filter { $0.containerId == id }.map(\.path)
         ports = ports.filter { $0.value.containerId != id }
         lock.unlock()
+        for path in gone { uplink.drop(path: path) }
     }
 
     func unregister(path: String) {
@@ -146,16 +150,17 @@ final class NetSwitch: @unchecked Sendable {
     }
 
     private func toGateway(_ ip: IPv4Packet, from port: NetPort, segment: NetSegment) {
-        switch ip.proto {
-        case 1 where ip.dst == segment.gateway:
+        if ip.dst == segment.gateway && ip.proto == 1 {
             if let echo = icmpEchoReply(ip.payload) { reply(port, from: segment.gateway, proto: 1, echo) }
-        case 17:
-            guard let udp = UDPDatagram(ip.payload) else { return }
-            if ip.dst == segment.gateway && udp.dstPort == 53 { dns(udp, from: port, segment: segment) }
-            // Other UDP and all TCP: the uplink (runtime step 4b).
-        default:
             return
         }
+        if ip.dst == segment.gateway && ip.proto == 17, let udp = UDPDatagram(ip.payload), udp.dstPort == 53 {
+            return dns(udp, from: port, segment: segment)
+        }
+        lock.lock()
+        let all = Array(segments.values)
+        lock.unlock()
+        uplink.handle(ip, from: port, segment: segment, pratico: all)
     }
 
     // MARK: DNS
@@ -212,8 +217,14 @@ final class NetSwitch: @unchecked Sendable {
     // MARK: Sending
 
     private func reply(_ port: NetPort, from src: UInt32, proto: UInt8, _ payload: [UInt8]) {
-        let ip = IPv4Packet(src: src, dst: port.ip, proto: proto, payload: payload)
-        send(Ethernet(dst: port.mac, src: .gateway, type: EtherType.ipv4.rawValue, payload: ip.bytes).bytes, to: port)
+        deliver(to: port, src: src, proto: proto, payload)
+    }
+
+    /// An IPv4 packet from beyond the network to a container, fragmented to the MTU.
+    func deliver(to port: NetPort, src: UInt32, proto: UInt8, _ payload: [UInt8]) {
+        for packet in IPv4Packet.fragments(src: src, dst: port.ip, proto: proto, payload: payload, mtu: Self.mtu) {
+            send(Ethernet(dst: port.mac, src: .gateway, type: EtherType.ipv4.rawValue, payload: packet).bytes, to: port)
+        }
     }
 
     func send(_ frame: [UInt8], to port: NetPort) {

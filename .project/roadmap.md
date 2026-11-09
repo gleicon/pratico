@@ -47,7 +47,7 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 - [x] `docker run -i/-it` and attach stdin through the shim, TTY resize; healthchecks on the agent; start errors in Docker's wording
 - [x] Exec, cp, stats, pause through the guest agent (the CLI backend's freezer agent and `container stats` sampler go with that backend in the last step)
 - [x] pratico-net 4a: user-space switch (isolation, anti-spoofing), IPAM, gateway ARP/ping, embedded DNS (Docker names, `.pratico.internal`, `host.docker.internal`, external names via the Mac's resolver); `bridge`, `none`, custom networks
-- [ ] pratico-net 4b: Swift uplink to the internet (UDP relay, TCP endpoint), soak-tested
+- [x] pratico-net 4b: Swift uplink to the internet and the Mac (UDP, unprivileged ping, TCP endpoint), soak-tested; internal networks stay sealed
 - [ ] pratico-net 4c: port publishing
 - [ ] Custom networks with hot connect/disconnect that cut traffic, not just names
 - [ ] Registry auth and push on the OCI client, credentials in pratico's own Keychain item; scans read the store
