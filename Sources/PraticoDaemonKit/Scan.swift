@@ -115,6 +115,12 @@ enum ScanParsers {
         }
     }
 
+    /// Previous findings only a now-failed scanner reported; kept so a scanner outage
+    /// (osv-scanner offline, say) cannot drop a malicious-package finding and lift a block.
+    static func carryOver(_ prior: [ScanFinding], failed: Set<String>) -> [ScanFinding] {
+        prior.filter { !$0.sources.isEmpty && Set($0.sources).isSubset(of: failed) }
+    }
+
     /// Joins findings that name the same advisory (by ID or alias) for the same package.
     static func merge(_ lists: [[ScanFinding]]) -> [ScanFinding] {
         let rank = ["critical": 4, "high": 3, "medium": 2, "low": 1, "unknown": 0]
@@ -267,6 +273,12 @@ final class ScanService: @unchecked Sendable {
         } else {
             runs.append(ScannerRun(name: "grype", ran: false, note: "not installed"))
         }
+
+        // A failed run is no new information: never let it clear findings or a block.
+        let prior = report(img.id)
+        guard runs.contains(where: \.ran) || prior == nil else { return }
+        let failed = Set(runs.filter { !$0.ran }.map { $0.name == "osv-scanner" ? "osv" : $0.name })
+        lists.append(ScanParsers.carryOver(prior?.findings ?? [], failed: failed))
 
         let (kev, kevDate) = knownExploited()
         var findings = ScanParsers.merge(lists)

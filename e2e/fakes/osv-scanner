@@ -1,6 +1,8 @@
 #!/bin/sh
 # Fake osv-scanner for e2e: clean for every image except busybox:musl, which gets a
 # malicious-package advisory once $PRATICO_FAKE_SCAN_GATE exists (the test controls timing).
+# $PRATICO_FAKE_SCAN_FAIL makes it fail like an offline osv-scanner (exit 127).
+if [ -e "$PRATICO_FAKE_SCAN_FAIL" ]; then touch "$PRATICO_FAKE_SCAN_FAIL.ran"; echo "network unreachable" >&2; exit 127; fi
 archive=""
 while [ $# -gt 0 ]; do [ "$1" = "--archive" ] && archive="$2"; shift; done
 if tar -xOf "$archive" manifest.json 2>/dev/null | grep -q '"busybox:musl"'; then

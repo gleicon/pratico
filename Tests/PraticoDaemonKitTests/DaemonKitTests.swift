@@ -204,3 +204,11 @@ private let grypeSample = Data(#"""
     #expect(ScanVerdict.judge([], ran: false, block: "kev").0 == .unknown)
     #expect(ScanVerdict.judge([], ran: true, block: "kev").0 == .ok)
 }
+
+@Test func failedScannerKeepsItsPriorFindings() {
+    let mal = ScanFinding(id: "MAL-1", sources: ["osv"], package: "p", version: "1", severity: "unknown", malicious: true)
+    let both = ScanFinding(id: "CVE-1", sources: ["grype", "osv"], package: "q", version: "1", severity: "high")
+    #expect(ScanParsers.carryOver([mal, both], failed: ["osv"]) == [mal])  // grype re-reports CVE-1
+    #expect(ScanParsers.carryOver([mal, both], failed: ["osv", "grype"]).count == 2)
+    #expect(ScanParsers.carryOver([mal, both], failed: []).isEmpty)
+}

@@ -27,6 +27,7 @@ DAEMON_PID=""
 FAKES="$(cd "$(dirname "$0")" && pwd)/fakes"
 export PRATICO_OSV_BIN="$FAKES/osv-scanner" PRATICO_GRYPE_BIN="$FAKES/grype"
 export PRATICO_KEV_URL="file://$FAKES/kev.json" PRATICO_FAKE_SCAN_GATE="$HOME_DIR/scan-gate"
+export PRATICO_FAKE_SCAN_FAIL="$HOME_DIR/scan-fail"
 MUSL_PRESENT=0
 container image inspect busybox:musl >/dev/null 2>&1 && MUSL_PRESENT=1
 APPLE_ONLY="pratico-e2e-apple-$$"
@@ -367,6 +368,12 @@ expect_has "D-24 alert written for the menubar" "$(cat "$HOME_DIR/alerts.json" 2
 musl_id=$(docker image inspect busybox:musl --format '{{.Id}}')
 report="$HOME_DIR/scans/${musl_id#sha256:}.json"
 expect_has "D-24 report keeps the bill of materials" "$(cat "$report" 2>/dev/null)" "busybox@1.37.0"
+touch "$PRATICO_FAKE_SCAN_FAIL"
+docker pull busybox:musl >/dev/null 2>&1  # triggers a rescan, which now fails
+for _ in $(seq 50); do [ -e "$PRATICO_FAKE_SCAN_FAIL.ran" ] && break; sleep 0.1; done
+sleep 1
+rm -f "$PRATICO_FAKE_SCAN_FAIL"
+expect_has "a failed rescan keeps the block" "$(docker start e2e-evil 2>&1)" "MAL-0000-0001"
 check "other images are not blocked" docker run --rm alpine true
 stop_daemon
 printf 'scan_allow = ["%s"]\n' "$musl_id" >"$HOME_DIR/config.toml"
