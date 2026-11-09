@@ -10,12 +10,23 @@ SIGN_IDENTITY ?= -
 VERSION      ?= $(shell sed -n 's/.*static let version = "\(.*\)"/\1/p' Sources/PraticoCore/Pratico.swift)
 DMG          := $(DIST_DIR)/Pratico-$(VERSION).dmg
 
-.PHONY: all build test e2e e2e-registry app sign dmg release install uninstall clean
+ASSETS_DIR   := $(BUILD_DIR)/runtime-assets
+
+.PHONY: all build assets probe test e2e e2e-registry app sign dmg release install uninstall clean
 
 all: build
 
 build:
 	swift build -c $(CONFIG)
+
+# Kernel + vminit for the embedded runtime, pinned and verified (docs/design/runtime.md).
+assets:
+	scripts/fetch-runtime-assets.sh "$(ASSETS_DIR)"
+
+# Boots one container on the embedded runtime: make probe ARGS="alpine echo hi"
+probe: build assets
+	codesign --force --sign - --entitlements "$(ENTITLEMENTS)" "$(BIN_DIR)/pratico-runtime-probe"
+	PRATICO_RUNTIME_ASSETS="$(ASSETS_DIR)" "$(BIN_DIR)/pratico-runtime-probe" $(ARGS)
 
 test:
 	swift test

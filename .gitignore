@@ -10,3 +10,4 @@ dist/
 *.p12
 htpasswd
 .docker/
+.cache/
