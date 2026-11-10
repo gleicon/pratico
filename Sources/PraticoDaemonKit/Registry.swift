@@ -42,8 +42,7 @@ struct RegistryAuth: Equatable {
     /// Docker treats `localhost` and `127.0.0.0/8` registries as insecure, speaking plain
     /// HTTP; Apple's `auto` scheme always tries HTTPS there, so loopback gets `--scheme http`.
     static func schemeArgs(_ host: String) -> [String] {
-        let name = host.split(separator: ":").first.map(String.init) ?? host
-        return name == "localhost" || name.hasPrefix("127.") ? ["--scheme", "http"] : []
+        RegistryPolicy.isLoopback(host) ? ["--scheme", "http"] : []
     }
 }
 

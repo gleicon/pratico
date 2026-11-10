@@ -82,9 +82,12 @@ struct RegistryPolicy: @unchecked Sendable {
         return out
     }
 
+    /// Only `localhost` and IP literals in 127.0.0.0/8 or ::1: a DNS name such as
+    /// `127.example.com` is not loopback, whatever it starts with.
     static func isLoopback(_ host: String) -> Bool {
         let name = hostName(host)
-        return name == "localhost" || name.hasPrefix("127.") || name == "::1" || name == "[::1]"
+        if name == "localhost" || name == "[::1]" { return true }
+        return IPv4.parse(name).map { $0 >> 24 == 127 } ?? false
     }
 
     static func hostName(_ host: String) -> String {

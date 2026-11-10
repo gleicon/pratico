@@ -407,3 +407,14 @@ private let grypeSample = Data(#"""
     #expect(d?[kCFNetworkProxiesHTTPSPort] as? Int == 3128)
     #expect(d?["ExceptionsList"] as? [String] == ["localhost", ".corp"])
 }
+
+@Test func onlyRealLoopbackHostsCountAsLoopback() {
+    for h in ["localhost", "localhost:5000", "127.0.0.1", "127.1.2.3:5000", "[::1]:5000"] {
+        #expect(RegistryPolicy.isLoopback(h), "\(h)")
+    }
+    // DNS names that merely look like loopback must never get plain HTTP with credentials.
+    for h in ["127.attacker.example", "127.0.0.1.nip.io:5000", "localhost.example.com", "128.0.0.1", "10.0.0.1:5000"] {
+        #expect(!RegistryPolicy.isLoopback(h), "\(h)")
+        #expect(RegistryAuth.schemeArgs(h).isEmpty, "\(h)")
+    }
+}
