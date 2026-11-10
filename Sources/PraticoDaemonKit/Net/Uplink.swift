@@ -284,9 +284,9 @@ final class Uplink: @unchecked Sendable {
             source.setEventHandler { [weak self, unowned listener] in
                 guard let self, listener.live else { return }
                 if isUDP {
-                    self.inboundDatagram(listener, nic: listener.nic, gateway: listener.gateway, containerPort: containerPort)
+                    self.inboundDatagram(listener, containerPort: containerPort)
                 } else {
-                    self.accept(fd, nic: listener.nic, gateway: listener.gateway, containerPort: containerPort)
+                    self.accept(listener, containerPort: containerPort)
                 }
             }
             source.setCancelHandler { close(fd) }
@@ -327,9 +327,10 @@ final class Uplink: @unchecked Sendable {
         }
     }
 
-    private func accept(_ listener: Int32, nic: NetPort, gateway: UInt32, containerPort: UInt16) {
+    private func accept(_ l: Listener, containerPort: UInt16) {
+        let nic = l.nic, gateway = l.gateway
         while true {
-            let fd = Darwin.accept(listener, nil, nil)
+            let fd = Darwin.accept(l.fd, nil, nil)
             guard fd >= 0 else { return }
             guard admits(nic.path) else { close(fd); continue }
             _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
@@ -341,8 +342,8 @@ final class Uplink: @unchecked Sendable {
         }
     }
 
-    private func inboundDatagram(_ l: Listener, nic: NetPort, gateway: UInt32, containerPort: UInt16) {
-        let listener = l.fd
+    private func inboundDatagram(_ l: Listener, containerPort: UInt16) {
+        let listener = l.fd, nic = l.nic, gateway = l.gateway
         var buf = [UInt8](repeating: 0, count: 65535)
         var client = sockaddr_in()
         var len = socklen_t(MemoryLayout<sockaddr_in>.size)

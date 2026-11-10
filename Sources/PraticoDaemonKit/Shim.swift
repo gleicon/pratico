@@ -22,12 +22,26 @@ struct ShimSpec: Codable, Sendable {
     var cpus: Int
     var memoryMiB: Int
     var mounts: [ShimMount]
-    /// pratico-net NIC slots (`ethN` is slot N); empty for `--network none`.
-    var nics: [ShimNIC] = []
-
-    /// The NIC holding the default route, DNS, and published ports.
-    var primaryNIC: ShimNIC? { ShimNIC.primary(nics) }
+    /// pratico-net NIC slots; empty for `--network none`.
+    var nics = NICSlots()
     var switchSocket: String = ""
+}
+
+/// A change to a running VM's NIC slot: the body of the shim's `POST /nic`. Traffic is
+/// cut or allowed at the daemon's switch; this is the guest's view of it.
+enum NICChange: Codable, Sendable, Equatable {
+    /// Adds `address` to `ethN` unless it holds it already, brings the link up and, with a
+    /// gateway, takes the default route.
+    case up(slot: Int, address: String, gateway: String?)
+    case down(slot: Int)
+    /// Moves the default route to `ethN`.
+    case route(slot: Int, gateway: String)
+
+    var slot: Int {
+        switch self {
+        case .up(let slot, _, _), .down(let slot), .route(let slot, _): slot
+        }
+    }
 }
 
 struct ShimMount: Codable, Sendable, Equatable {
@@ -78,8 +92,8 @@ public enum ShimHost {
         let container: LinuxContainer
         let interfaces: [SwitchNIC]
         do {
-            interfaces = try spec.nics.map { nic in
-                try NICRelay.start(nic, switchSocket: spec.switchSocket, primary: nic == spec.primaryNIC)
+            interfaces = try spec.nics.slots.indices.map { i in
+                try NICRelay.start(spec.nics.slots[i], switchSocket: spec.switchSocket, primary: i == spec.nics.primary)
             }
         } catch {
             return fail("cannot set up networking: \(error)")
@@ -102,7 +116,7 @@ public enum ShimHost {
                 config.process.stderr = spec.tty ? nil : LogWriter(log: log, stream: 2)
                 config.process.stdin = stdin
                 config.interfaces = interfaces
-                if let primary = spec.primaryNIC {
+                if let primary = spec.nics.primaryNIC {
                     // pratico-net answers DNS at every gateway: container names, then the Mac's resolver.
                     config.dns = DNS(nameservers: [primary.gateway])
                     var hosts = Hosts.default
@@ -115,7 +129,7 @@ public enum ShimHost {
             }
             try await container.create()
             // Spare slots stay link-down until the daemon connects them (`POST /nic`).
-            let spares = spec.nics.indices.filter { spec.nics[$0].isSpare }
+            let spares = spec.nics.slots.indices.filter { spec.nics.slots[$0].isSpare }
             if !spares.isEmpty {
                 try await container.withVirtualMachineInstance { vm in
                     let agent = try await vm.dialAgent()
@@ -190,7 +204,7 @@ final class ShimControl: Sendable {
         self.files = files
         self.spec = spec
         self.stdin = stdin
-        addresses = GuestAddresses(spec.nics.map(\.address))
+        addresses = GuestAddresses(spec.nics.slots.map(\.address))
     }
 
     /// Whether a host path stays inside `dir` once `.`/`..` and symlinks are resolved (the
@@ -273,7 +287,10 @@ final class ShimControl: Sendable {
                     try blocking { try await p.resize(to: Terminal.Size(width: w, height: h)) }
                 }
             case ("POST", "nic"):
-                try nic(JSON.parse(req.body) ?? [:])
+                guard let change = try? JSONDecoder().decode(NICChange.self, from: req.body) else {
+                    throw APIError(400, "shim: not a NIC change")
+                }
+                try nic(change)
             case ("POST", "pause"):
                 try blocking { try await c.withVirtualMachineInstance { try await $0.pause() } }
                 record("paused")
@@ -315,41 +332,31 @@ final class GuestAddresses: @unchecked Sendable {
 }
 
 extension ShimControl {
-    /// Hot connect and disconnect (`docker network connect`): `{"slot", "action": "up" |
-    /// "down" | "route", "address", "gateway"}`. "up" adds the address and brings `ethN`
-    /// up, with the default route when a gateway is given; "route" moves the default
-    /// route to `ethN`. Traffic is cut at the daemon's switch either way; this is the
-    /// guest's view of it.
-    func nic(_ body: JSON) throws {
-        guard let slot = body["slot"]?.int.map(Int.init), spec.nics.indices.contains(slot) else {
-            throw APIError(400, "shim: no NIC slot \(body["slot"]?.int ?? -1)")
-        }
+    /// Hot connect and disconnect (`docker network connect`), as the guest sees them.
+    func nic(_ change: NICChange) throws {
+        let slot = change.slot
+        guard spec.nics.slots.indices.contains(slot) else { throw APIError(400, "shim: no NIC slot \(slot)") }
         let name = "eth\(slot)"
-        let action = body["action"]?.string ?? ""
-        let address = body["address"]?.string ?? ""
-        let gateway = try (body["gateway"]?.string).flatMap { $0.isEmpty ? nil : try IPv4Address($0) }
-        guard ["up", "down", "route"].contains(action) else { throw APIError(400, "shim: unknown NIC action \(action)") }
-        let cidr = action == "up" ? try CIDRv4(address) : nil
         let addresses = addresses
         try blocking { [container] in
             try await container.withVirtualMachineInstance { vm in
                 let agent = try await vm.dialAgent()
                 defer { Task { try? await agent.close() } }
-                switch action {
-                case "up":
-                    if let cidr, addresses.claim(slot, address) {
+                switch change {
+                case .up(_, let address, let gateway):
+                    let cidr = try CIDRv4(address)
+                    if addresses.claim(slot, address) {
                         do { try await agent.addressAdd(name: name, address: InterfaceAddress(ipv4Address: cidr)) } catch {
                             addresses.release(slot, address)
                             throw error
                         }
                     }
                     try await agent.up(name: name, mtu: 1500)
-                    if let gateway { try await agent.routeAddDefault(name: name, route: DefaultRoute(ipv4Gateway: gateway)) }
-                case "down":
+                    if let gateway { try await agent.routeAddDefault(name: name, route: DefaultRoute(ipv4Gateway: try IPv4Address(gateway))) }
+                case .down:
                     try await agent.down(name: name)
-                default:
-                    guard let gateway else { throw APIError(400, "shim: route needs a gateway") }
-                    try await agent.routeAddDefault(name: name, route: DefaultRoute(ipv4Gateway: gateway))
+                case .route(_, let gateway):
+                    try await agent.routeAddDefault(name: name, route: DefaultRoute(ipv4Gateway: try IPv4Address(gateway)))
                 }
             }
         }

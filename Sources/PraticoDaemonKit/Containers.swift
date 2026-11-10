@@ -81,6 +81,9 @@ public final class ContainerService: @unchecked Sendable {
     private var pauseAgents: [String: PauseAgent] = [:]
     private var pausedVMs: Set<String> = []  // embedded: paused through the shim
     private var published: [String: [String: [(ip: String, port: String)]]] = [:]  // embedded: bound host ports
+    /// Serializes network connect and disconnect, which read, check, and write a
+    /// container's endpoints and NIC slots.
+    let membership = NSLock()
 
     init(runtime: AppleContainer, images: ImageService, root: URL, networks: NetworkService, config: Config = Config(),
          events: EventBus = EventBus(), embedded: EmbeddedContainers? = nil) {
@@ -172,7 +175,7 @@ public final class ContainerService: @unchecked Sendable {
         try? enc.encode(rec).write(to: dir(rec.id).appending(path: "config.json"), options: .atomic)
     }
 
-    private func update(_ id: String, _ change: (inout ContainerRecord) -> Void) {
+    func update(_ id: String, _ change: (inout ContainerRecord) -> Void) {
         lock.lock()
         guard var rec = records[id] else { lock.unlock(); return }
         change(&rec)
@@ -906,156 +909,6 @@ public final class ContainerService: @unchecked Sendable {
         conn.chunk(batch)
         if follow { done.wait() }
         conn.endChunked()
-    }
-
-    // MARK: Networks
-
-    /// `POST /networks/{id}/connect`. Apple fixes a container's networks at create, so a
-    /// container that never ran is recreated on the new set; one that has run can only
-    /// rejoin a network it was disconnected from, whose interface it still has (D-25).
-    func connect(_ ref: String, to net: NetworkRecord, aliases: [String]) throws {
-        let rec = try resolve(ref)
-        var eps = networks.endpoints(rec)
-        if let embedded {
-            guard eps[net.id] == nil || eps[net.id]?.detached == true else {
-                throw APIError(403, "endpoint with name \(rec.name) already exists in network \(net.name)")
-            }
-            if net.name == "none" || networks.active(rec).keys.contains(where: { (try? networks.resolve($0))?.name == "none" }) {
-                throw APIError(400, "container cannot be connected to network none and other networks")
-            }
-            // A stopped container gets the network planned at its next start.
-            if rec.state.running { try hotConnect(rec, net, embedded) }
-            eps[net.id] = Endpoint(aliases: aliases)
-            update(rec.id) { $0.endpoints = eps }
-            networks.emit(net, "connect", container: rec.id)
-            return
-        }
-        if let ep = eps[net.id], !ep.detached {
-            throw APIError(403, "endpoint with name \(rec.name) already exists in network \(net.name)")
-        }
-        let onNone = networks.active(rec).keys.contains { (try? networks.resolve($0))?.name == "none" }
-        if net.name == "none" || onNone {
-            throw APIError(400, "container cannot be connected to network none and other networks")
-        }
-        if let ep = eps[net.id] {
-            eps[net.id] = Endpoint(aliases: aliases.isEmpty ? ep.aliases : aliases)
-            update(rec.id) { $0.endpoints = eps }
-        } else if rec.state.startedAt == nil {
-            eps[net.id] = Endpoint(aliases: aliases)
-            try recreate(rec, eps)
-        } else {
-            throw APIError(409, "pratico: cannot connect \(rec.name) to \(net.name): the Apple runtime fixes a container's networks when it is created, and this container has already run; recreate it with --network \(net.name)")
-        }
-        networks.emit(net, "connect", container: rec.id)
-        networks.sync([net.id], wait: true)
-    }
-
-    /// `POST /networks/{id}/disconnect`. A container that has run keeps its interface
-    /// (the guest cannot bring it down), but leaves Docker's view and name resolution.
-    func disconnect(_ ref: String, from net: NetworkRecord) throws {
-        let rec = try resolve(ref)
-        var eps = networks.endpoints(rec)
-        if let embedded {
-            guard eps[net.id] != nil else { throw APIError(403, "container \(rec.id) is not connected to network \(net.name)") }
-            if rec.state.running { hotDisconnect(rec, net, embedded) }
-            eps[net.id] = nil
-            update(rec.id) { $0.endpoints = eps }
-            networks.emit(net, "disconnect", container: rec.id)
-            return
-        }
-        guard let ep = eps[net.id], !ep.detached else {
-            throw APIError(403, "container \(rec.id) is not connected to network \(net.name)")
-        }
-        if rec.state.startedAt == nil {
-            eps[net.id] = nil
-            try recreate(rec, eps)
-        } else {
-            eps[net.id] = Endpoint(aliases: ep.aliases, detached: true)
-            update(rec.id) { $0.endpoints = eps }
-        }
-        networks.emit(net, "disconnect", container: rec.id)
-        networks.sync([net.id], wait: true)
-    }
-
-    /// Brings a spare NIC slot of the running VM up on `net`. Frames flow once the
-    /// guest's interface has its address; a first network also gets the default route
-    /// and the published ports.
-    private func hotConnect(_ rec: ContainerRecord, _ net: NetworkRecord, _ embedded: EmbeddedContainers) throws {
-        guard !isPaused(rec.id) else { throw APIError(409, "Container \(rec.id) is paused, unpause the container before connecting it") }
-        let files = shimFiles(rec.id)
-        let (slot, nic, before) = try networks.bindSlot(rec, net)
-        do {
-            try nicCall(files, embedded, ["slot": .int(Int64(slot)), "action": "up", "address": .string(nic.address),
-                                          "gateway": .string(nic.primary == true ? nic.gateway : "")])
-        } catch {
-            networks.restore(rec, before)
-            throw error
-        }
-        networks.plug(rec, nic)
-        saveNICs(rec, files)
-        if nic.primary == true { republish(rec) }
-    }
-
-    /// Cuts the NIC at the switch, then brings the guest's interface down. Losing the
-    /// primary network moves the default route and the published ports to the next one;
-    /// DNS keeps working because every pratico gateway answers it.
-    private func hotDisconnect(_ rec: ContainerRecord, _ net: NetworkRecord, _ embedded: EmbeddedContainers) {
-        guard let (slot, wasPrimary, successor) = networks.unbindSlot(rec, net) else { return }
-        let files = shimFiles(rec.id)
-        // The traffic is already cut; a guest that ignores this only sees a dead link.
-        try? nicCall(files, embedded, ["slot": .int(Int64(slot)), "action": "down"])
-        if wasPrimary {
-            if let (next, nic) = successor {
-                try? nicCall(files, embedded, ["slot": .int(Int64(next)), "action": "route", "gateway": .string(nic.gateway)])
-            }
-            republish(rec)
-        }
-        saveNICs(rec, files)
-    }
-
-    private func nicCall(_ files: ShimFiles, _ embedded: EmbeddedContainers, _ body: JSON) throws {
-        let r = try embedded.shim.request(files, "POST", "/nic", body: body.encoded())
-        guard r.status < 300 else {
-            let message = JSON.parse(r.body)?["message"]?.string ?? String(decoding: r.body, as: UTF8.self)
-            throw APIError(500, "pratico: cannot change the container's network interface: \(message)")
-        }
-    }
-
-    /// Published ports follow the primary NIC; they stay bound while the container has
-    /// none, and lead to its next first network.
-    private func republish(_ rec: ContainerRecord) {
-        _ = networks.retarget(rec)
-    }
-
-    /// The spec records the slots, so a restarted daemon re-registers what is plugged now.
-    private func saveNICs(_ rec: ContainerRecord, _ files: ShimFiles) {
-        guard let data = try? Data(contentsOf: files.spec), var spec = try? JSONDecoder().decode(ShimSpec.self, from: data) else { return }
-        spec.nics = networks.nics(rec.id)
-        try? JSONEncoder().encode(spec).write(to: files.spec, options: .atomic)
-    }
-
-    /// Replaces a never-started Apple container with one on other networks. Nothing is
-    /// lost: its filesystem is still the image's.
-    private func recreate(_ rec: ContainerRecord, _ eps: [String: Endpoint]) throws {
-        guard let base = rec.createArgs else {
-            throw APIError(409, "pratico: container \(rec.name) predates network support; recreate it")
-        }
-        _ = runtime.run(["delete", "--force", rec.appleId])
-        let r = runtime.run(Self.withNetworks(base, appleNetworks(rec, eps)))
-        guard r.ok else {
-            _ = runtime.run(Self.withNetworks(base, appleNetworks(rec, networks.endpoints(rec))))
-            throw APIError(500, "cannot change the networks of \(rec.name): \(r.errorText)")
-        }
-        update(rec.id) { $0.endpoints = eps }
-    }
-
-    /// Apple network names, `NetworkMode` first; no networks at all means Apple's `none`.
-    private func appleNetworks(_ rec: ContainerRecord, _ eps: [String: Endpoint]) -> [String] {
-        let nets = eps.keys.compactMap { try? networks.resolve($0) }
-        guard !nets.isEmpty else { return ["none"] }
-        let mode = rec.hostConfig["NetworkMode"]?.string ?? ""
-        func primary(_ n: NetworkRecord) -> Bool { n.name == mode || n.id == mode }
-        return nets.sorted { primary($0) != primary($1) ? primary($0) : $0.name < $1.name }.map(\.appleName)
     }
 
     // MARK: Views

@@ -3,9 +3,8 @@ import ContainerizationExtras
 import Foundation
 import Virtualization
 
-/// One NIC slot as the daemon plans it and the shim builds it (part of `ShimSpec`).
-/// Virtualization.framework cannot hot-plug NICs, so a VM boots with `slots` of them;
-/// the spare ones are link-down with no switch port until `docker network connect`.
+/// One NIC slot as the daemon plans it and the shim builds it (part of `NICSlots`).
+/// A spare slot is link-down with no switch port until `docker network connect`.
 struct ShimNIC: Codable, Sendable, Equatable {
     /// Empty for a spare slot: no switch port, so no frame reaches or leaves it.
     var networkId: String
@@ -16,25 +15,95 @@ struct ShimNIC: Codable, Sendable, Equatable {
     var gateway: String
     /// Where the shim's relay binds; the switch knows the port by this path.
     var socket: String
-    /// Holds the default route and the published ports; nil in specs from before slots,
-    /// where the first NIC does.
-    var primary: Bool?
 
     /// Virtualization.framework allows 4 network devices per VM.
     static let slots = 4
 
-    var isSpare: Bool { networkId.isEmpty }
+    /// Containerization gives every NIC an address at boot; a /32 link-local one adds no route.
+    private static let placeholderPrefix = "169.254.255."
 
-    /// The NIC holding the default route, DNS, and published ports, if any.
-    static func primary(_ nics: [ShimNIC]) -> ShimNIC? {
-        nics.first { $0.primary == true } ?? nics.first.flatMap { $0.primary == nil && !$0.isSpare ? $0 : nil }
-    }
-    var hasPlaceholder: Bool { address.hasPrefix("169.254.255.") }
+    var isSpare: Bool { networkId.isEmpty }
+    /// A spare that never held a real address.
+    var hasPlaceholder: Bool { address.hasPrefix(Self.placeholderPrefix) }
     var ip: String { String(address.split(separator: "/")[0]) }
 
-    /// Containerization gives every NIC an address at boot; a /32 link-local one adds no route.
     static func spare(_ slot: Int, mac: MAC, socket: String) -> ShimNIC {
-        ShimNIC(networkId: "", mac: mac.description, address: "169.254.255.\(slot + 1)/32", gateway: "", socket: socket)
+        ShimNIC(networkId: "", mac: mac.description, address: "\(placeholderPrefix)\(slot + 1)/32", gateway: "", socket: socket)
+    }
+}
+
+/// A VM's NIC slots (`ethN` is slot N) and which one is primary: it holds the default
+/// route, DNS, and the published ports. Virtualization.framework cannot hot-plug NICs,
+/// so a VM boots with `ShimNIC.slots` of them; empty for `--network none`.
+struct NICSlots: Codable, Sendable, Equatable {
+    var slots: [ShimNIC] = []
+    var primary: Int?
+
+    init(_ slots: [ShimNIC] = [], primary: Int? = nil) {
+        self.slots = slots
+        self.primary = primary
+    }
+
+    var primaryNIC: ShimNIC? { primary.map { slots[$0] } }
+
+    /// The slot `docker network connect` binds on a network with subnet `subnet`: one that
+    /// last held an address in it (the guest still holds it, and gets it back instead of
+    /// holding two), else a never-used spare.
+    func free(in subnet: (base: UInt32, prefix: Int)) -> (slot: Int, reused: Bool)? {
+        if let i = slots.indices.first(where: { slots[$0].isSpare && !slots[$0].hasPlaceholder && IPv4.contains(subnet, slots[$0].ip) }) {
+            return (i, true)
+        }
+        return slots.indices.first { slots[$0].isSpare && slots[$0].hasPlaceholder }.map { ($0, false) }
+    }
+
+    /// What `bind` changed, so `revert` undoes exactly that.
+    struct Binding: Sendable {
+        var slot: Int
+        var previous: ShimNIC
+        var previousPrimary: Int?
+    }
+
+    /// Binds `slot` to a network; it becomes primary when no slot is.
+    mutating func bind(_ slot: Int, networkId: String, address: String, gateway: String) -> Binding {
+        let b = Binding(slot: slot, previous: slots[slot], previousPrimary: primary)
+        slots[slot].networkId = networkId
+        slots[slot].address = address
+        slots[slot].gateway = gateway
+        if primary == nil { primary = slot }
+        return b
+    }
+
+    mutating func revert(_ b: Binding) {
+        slots[b.slot] = b.previous
+        if primary == b.slot { primary = b.previousPrimary }
+    }
+
+    /// Unbinds the network's slot, which keeps its address (the guest cannot delete it).
+    /// A primary slot hands over to the first slot still bound, the `successor`.
+    mutating func unbind(_ networkId: String) -> (slot: Int, wasPrimary: Bool, successor: Int?)? {
+        guard let i = slots.firstIndex(where: { $0.networkId == networkId }) else { return nil }
+        slots[i].networkId = ""
+        slots[i].gateway = ""
+        guard primary == i else { return (i, false, nil) }
+        primary = slots.firstIndex { !$0.isSpare }
+        return (i, true, primary)
+    }
+
+    // Specs from before slots hold a plain array, whose first NIC is primary; specs from
+    // before `primary` flag it on a NIC.
+    init(from decoder: any Decoder) throws {
+        guard let legacy = try? decoder.singleValueContainer().decode([ShimNIC].self) else {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            slots = try c.decode([ShimNIC].self, forKey: .slots)
+            primary = try c.decodeIfPresent(Int.self, forKey: .primary)
+            return
+        }
+        struct Flag: Decodable { var primary: Bool? }
+        let flags = (try? decoder.singleValueContainer().decode([Flag].self)) ?? []
+        slots = legacy
+        primary = flags.contains { $0.primary != nil }
+            ? flags.firstIndex { $0.primary == true }
+            : legacy.firstIndex { !$0.isSpare }
     }
 }
 

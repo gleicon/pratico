@@ -337,18 +337,41 @@ private let grypeSample = Data(#"""
     #expect(TCPConn.clampMSS(9000) == 1460)
 }
 
-@Test func primaryNICFollowsTheSlotsFlag() {
+@Test func nicSlotsBindRevertAndHandOverThePrimary() throws {
     let a = ShimNIC(networkId: "a", mac: "02:42:00:00:00:01", address: "172.17.0.2/16", gateway: "172.17.0.1", socket: "/s.0")
     let spare = ShimNIC.spare(1, mac: MAC.derive("x"), socket: "/s.1")
     #expect(spare.isSpare && spare.hasPlaceholder)
-    #expect(ShimNIC.primary([a, spare]) == a)  // specs from before slots: the first NIC
-    var b = a
-    b.networkId = "b"
-    b.primary = true
-    var c = a
-    c.primary = false
-    #expect(ShimNIC.primary([c, b]) == b)
-    #expect(ShimNIC.primary([spare]) == nil)
+    var nics = NICSlots([a, spare, .spare(2, mac: MAC.derive("y"), socket: "/s.2")], primary: 0)
+
+    let net = try #require(IPv4.cidr("172.18.0.0/24"))
+    let (slot, reused) = try #require(nics.free(in: net))
+    #expect(slot == 1 && !reused)
+    let b = nics.bind(slot, networkId: "b", address: "172.18.0.2/24", gateway: "172.18.0.1")
+    #expect(nics.primary == 0)
+    nics.revert(b)
+    #expect(nics.slots[1] == spare)
+
+    _ = nics.bind(1, networkId: "b", address: "172.18.0.2/24", gateway: "172.18.0.1")
+    let unbound = nics.unbind("a")
+    let cut = try #require(unbound)
+    #expect(cut.slot == 0 && cut.wasPrimary && cut.successor == 1 && nics.primary == 1)
+    #expect(nics.slots[0].address == a.address)  // the guest still holds it
+    _ = nics.unbind("b")
+    #expect(nics.primary == nil)
+    // Back on b: its old slot, with the same address.
+    #expect(nics.free(in: net).map { $0.slot == 1 && $0.reused } == true)
+    _ = nics.bind(1, networkId: "b", address: "172.18.0.2/24", gateway: "172.18.0.1")
+    #expect(nics.primary == 1)
+}
+
+@Test func nicSlotsReadOlderSpecs() throws {
+    let a = #"{"networkId":"a","mac":"02:42:00:00:00:01","address":"172.17.0.2/16","gateway":"172.17.0.1","socket":"/s.0""#
+    let b = #"{"networkId":"b","mac":"02:42:00:00:00:02","address":"172.18.0.2/24","gateway":"172.18.0.1","socket":"/s.1""#
+    func read(_ json: String) throws -> NICSlots { try JSONDecoder().decode(NICSlots.self, from: Data(json.utf8)) }
+    #expect(try read("[\(a)}, \(b)}]").primary == 0)  // before slots: the first NIC
+    #expect(try read(#"[\#(a),"primary":false}, \#(b),"primary":true}]"#).primary == 1)  // a flag per NIC
+    let current = NICSlots(try read("[\(a)}]").slots, primary: nil)
+    #expect(try JSONDecoder().decode(NICSlots.self, from: JSONEncoder().encode(current)) == current)
 }
 
 @Test func guestAddressesAreAddedOncePerSlot() {
