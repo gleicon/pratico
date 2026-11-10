@@ -94,12 +94,23 @@ networks cannot exchange a frame, because the switch never forwards one.
     `gateway.docker.internal` the network gateway, as Docker Desktop provides.
   - `docker inspect`, events, and the menubar show each container's DNS names.
 - **Hot connect/disconnect on running containers**: Virtualization.framework cannot
-  hot-add NICs. So each VM gets a fixed number of NIC slots (config
-  `network_slots`, default 4) at boot.
-  - Connect: the switch binds a free slot to the network, then the agent assigns its
-    address and brings it up.
-  - Disconnect: the agent takes the slot down, and the switch unbinds it. Frames are
-    dropped at the switch, so isolation holds even against a hostile guest.
+  hot-add NICs, and allows 4 per VM. So each VM boots with 4 NIC slots (`eth0`–`eth3`): its networks, then
+  spares that are link-down with no switch port.
+  - Connect: the daemon binds a spare slot to the network and reserves an address; the
+    shim's agent adds it and brings `ethN` up; then the switch registers the port. A
+    container's first network also gets the default route and the published ports.
+  - Disconnect: the switch drops the port first, so no frame reaches or leaves it from
+    then on, even if the guest brings the link back up; its uplink flows end. Then the
+    agent takes `ethN` down. Losing the primary network moves the default route and the
+    published ports to the next network.
+  - vminitd cannot delete an address, so a disconnected slot keeps its address on a
+    down link, reserved for that container until it restarts. Reconnecting to the same
+    network reuses that slot and address. Spares boot with a `169.254.255.N/32`
+    placeholder, which adds no route.
+  - Every pratico gateway answers DNS as the asker's own networks, so `resolv.conf`
+    (the first network's gateway) keeps working after that network is disconnected.
+  - Slots reset at each start. A fifth distinct network on one run answers 409, and a
+    container created on more than 4 networks fails to start with a clear error.
 - **Internet (uplink)**, in Swift, no extra binaries (decided 2026-11-09): the switch
   routes off-network traffic to pratico's own user-space stack, in the style of slirp.
   - It answers ARP, ICMP echo, and DNS.
@@ -164,8 +175,10 @@ The app gets an "Acknowledgements" file in the DMG and in About. Naming stays
 4. pratico-net: ✅ 4a switch, IPAM, gateway, embedded DNS (+ `.pratico.internal`,
    `host.docker.internal`), bridge/none/custom; ✅ 4b Swift uplink (UDP/ping/TCP);
    ✅ 4c published ports.
-5. Custom networks with hot connect/disconnect (new e2e: disconnect cuts traffic by IP).
-6. Registry auth and push on the OCI client; scanning reads the store directly.
+5. ✅ Custom networks with hot connect/disconnect (e2e: disconnect cuts traffic by IP,
+   even when the guest revives its link).
+6. ✅ Registry auth and push on the OCI client (`docker login` checks the registry and
+   keeps the login in pratico's Keychain items); scanning reads the store directly.
 7. Egress intercept: sandwich engine on container flows, per-container opt-in, menubar view.
 8. Remove `AppleContainer`, the `/etc/hosts` sync, and the anchor; update SPEC
    (D-10/D-11/D-15/D-21/D-25) and docs.
@@ -242,8 +255,15 @@ Learned while building:
 - Shims are spawned with `POSIX_SPAWN_CLOEXEC_DEFAULT`: without it they inherited the
   daemon's API connections and port listeners, which kept a published port captive
   after a daemon restart.
-- Interim limits: `docker login` (501); IPv6 port binds; connect/disconnect of running
-  containers (409, step 5).
+- `docker login` (6): the daemon pings the registry's `/v2/` with the credentials
+  (Basic or Bearer challenge) and keeps them as Internet-password items with security
+  domain `dev.pratico.registry`. Pulls and pushes use a request's `X-Registry-Auth`
+  first, then that login. Loopback registries get HTTPS when they answer TLS, else
+  plain HTTP; Containerization refuses credentials over plain HTTP, so a password-
+  protected local registry needs TLS. A private CA goes in `SSL_CERT_FILE`, which
+  replaces the system trust roots for the daemon's registry client (Containerization's
+  behavior), and macOS rejects a self-signed CA certificate used directly as a server's.
+- Interim limits: IPv6 port binds (not planned until there is IPv6 routing).
 
 ## Risks and costs
 

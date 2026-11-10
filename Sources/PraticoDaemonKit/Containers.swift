@@ -467,7 +467,7 @@ public final class ContainerService: @unchecked Sendable {
         let user: String = rec.config["User"]?.string ?? ""
         let hostname: String = rec.config["Hostname"]?.string ?? rec.appleId
         let openStdin: Bool = rec.config["OpenStdin"]?.bool ?? false
-        let nics = networks.allocateNICs(rec, runDir: files.socket.deletingLastPathComponent())
+        let nics = try networks.allocateNICs(rec, runDir: files.socket.deletingLastPathComponent())
         var spec = ShimSpec(
             id: rec.appleId, kernel: embedded.kernel, initfs: embedded.initfs, rootfs: rootfs,
             arguments: [rec.path] + rec.args, environment: env, workingDirectory: workdir, user: user,
@@ -916,15 +916,15 @@ public final class ContainerService: @unchecked Sendable {
     func connect(_ ref: String, to net: NetworkRecord, aliases: [String]) throws {
         let rec = try resolve(ref)
         var eps = networks.endpoints(rec)
-        if embedded != nil {
-            // pratico-net plans NICs at each start; a running container needs hot connect (4d).
-            guard !rec.state.running else { throw APIError(409, "pratico: connecting a running container arrives with pratico-net hot connect") }
+        if let embedded {
             guard eps[net.id] == nil || eps[net.id]?.detached == true else {
                 throw APIError(403, "endpoint with name \(rec.name) already exists in network \(net.name)")
             }
             if net.name == "none" || networks.active(rec).keys.contains(where: { (try? networks.resolve($0))?.name == "none" }) {
                 throw APIError(400, "container cannot be connected to network none and other networks")
             }
+            // A stopped container gets the network planned at its next start.
+            if rec.state.running { try hotConnect(rec, net, embedded) }
             eps[net.id] = Endpoint(aliases: aliases)
             update(rec.id) { $0.endpoints = eps }
             networks.emit(net, "connect", container: rec.id)
@@ -955,9 +955,9 @@ public final class ContainerService: @unchecked Sendable {
     func disconnect(_ ref: String, from net: NetworkRecord) throws {
         let rec = try resolve(ref)
         var eps = networks.endpoints(rec)
-        if embedded != nil {
+        if let embedded {
             guard eps[net.id] != nil else { throw APIError(403, "container \(rec.id) is not connected to network \(net.name)") }
-            guard !rec.state.running else { throw APIError(409, "pratico: disconnecting a running container arrives with pratico-net hot disconnect") }
+            if rec.state.running { hotDisconnect(rec, net, embedded) }
             eps[net.id] = nil
             update(rec.id) { $0.endpoints = eps }
             networks.emit(net, "disconnect", container: rec.id)
@@ -975,6 +975,63 @@ public final class ContainerService: @unchecked Sendable {
         }
         networks.emit(net, "disconnect", container: rec.id)
         networks.sync([net.id], wait: true)
+    }
+
+    /// Brings a spare NIC slot of the running VM up on `net`. Frames flow once the
+    /// guest's interface has its address; a first network also gets the default route
+    /// and the published ports.
+    private func hotConnect(_ rec: ContainerRecord, _ net: NetworkRecord, _ embedded: EmbeddedContainers) throws {
+        guard !isPaused(rec.id) else { throw APIError(409, "Container \(rec.id) is paused, unpause the container before connecting it") }
+        let files = shimFiles(rec.id)
+        let (slot, nic, before) = try networks.bindSlot(rec, net)
+        do {
+            try nicCall(files, embedded, ["slot": .int(Int64(slot)), "action": "up", "address": .string(nic.address),
+                                          "gateway": .string(nic.primary == true ? nic.gateway : "")])
+        } catch {
+            networks.restore(rec, before)
+            throw error
+        }
+        networks.plug(rec, nic)
+        saveNICs(rec, files)
+        if nic.primary == true { republish(rec) }
+    }
+
+    /// Cuts the NIC at the switch, then brings the guest's interface down. Losing the
+    /// primary network moves the default route and the published ports to the next one;
+    /// DNS keeps working because every pratico gateway answers it.
+    private func hotDisconnect(_ rec: ContainerRecord, _ net: NetworkRecord, _ embedded: EmbeddedContainers) {
+        guard let (slot, wasPrimary, successor) = networks.unbindSlot(rec, net) else { return }
+        let files = shimFiles(rec.id)
+        // The traffic is already cut; a guest that ignores this only sees a dead link.
+        try? nicCall(files, embedded, ["slot": .int(Int64(slot)), "action": "down"])
+        if wasPrimary {
+            if let (next, nic) = successor {
+                try? nicCall(files, embedded, ["slot": .int(Int64(next)), "action": "route", "gateway": .string(nic.gateway)])
+            }
+            republish(rec)
+        }
+        saveNICs(rec, files)
+    }
+
+    private func nicCall(_ files: ShimFiles, _ embedded: EmbeddedContainers, _ body: JSON) throws {
+        let r = try embedded.shim.request(files, "POST", "/nic", body: body.encoded())
+        guard r.status < 300 else {
+            let message = JSON.parse(r.body)?["message"]?.string ?? String(decoding: r.body, as: UTF8.self)
+            throw APIError(500, "pratico: cannot change the container's network interface: \(message)")
+        }
+    }
+
+    /// Published ports follow the primary NIC; they stay bound while the container has
+    /// none, and lead to its next first network.
+    private func republish(_ rec: ContainerRecord) {
+        _ = networks.retarget(rec)
+    }
+
+    /// The spec records the slots, so a restarted daemon re-registers what is plugged now.
+    private func saveNICs(_ rec: ContainerRecord, _ files: ShimFiles) {
+        guard let data = try? Data(contentsOf: files.spec), var spec = try? JSONDecoder().decode(ShimSpec.self, from: data) else { return }
+        spec.nics = networks.nics(rec.id)
+        try? JSONEncoder().encode(spec).write(to: files.spec, options: .atomic)
     }
 
     /// Replaces a never-started Apple container with one on other networks. Nothing is

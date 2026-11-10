@@ -115,6 +115,7 @@ final class NetworkService: @unchecked Sendable {
     private let lock = NSLock()
     private var records: [String: NetworkRecord] = [:]
     private var addresses: [String: [String: NetworkAddress]] = [:]  // container id → Apple network
+    private var slots: [String: [ShimNIC]] = [:]  // container id → its VM's NIC slots (embedded)
     private let hostsQueue = DispatchQueue(label: "pratico.hosts")
     private let anchorLock = NSLock()
     private var anchorRunning = false  // guarded by anchorLock
@@ -374,6 +375,7 @@ final class NetworkService: @unchecked Sendable {
     func stopped(_ id: String) {
         lock.lock()
         addresses[id] = nil
+        slots[id] = nil
         lock.unlock()
         netSwitch?.unregister(container: id)
     }
@@ -397,8 +399,9 @@ final class NetworkService: @unchecked Sendable {
         netSwitch.setSegment(rec.id, NetSegment(gateway: gw, prefix: c.prefix, isInternal: rec.isInternal))
     }
 
-    /// Plans the container's NICs (primary network first) and takes an address on each.
-    func allocateNICs(_ rec: ContainerRecord, runDir: URL) -> [ShimNIC] {
+    /// Plans the container's NIC slots: its networks (primary first), then spares for hot
+    /// connect. `--network none` gets no NICs at all.
+    func allocateNICs(_ rec: ContainerRecord, runDir: URL) throws -> [ShimNIC] {
         guard netSwitch != nil else { return [] }
         let mode = rec.hostConfig["NetworkMode"]?.string ?? ""
         let nets = active(rec).keys.compactMap { try? resolve($0) }.filter { $0.name != "none" }
@@ -406,46 +409,156 @@ final class NetworkService: @unchecked Sendable {
                 let pa = a.name == mode || a.id == mode, pb = b.name == mode || b.id == mode
                 return pa != pb ? pa : a.name < b.name
             }
-        var nics: [ShimNIC] = []
+        guard !nets.isEmpty else { return [] }
+        guard nets.count <= ShimNIC.slots else {
+            throw APIError(400, "pratico: a container can be on at most \(ShimNIC.slots) networks (the Virtualization.framework limit); \(rec.name) has \(nets.count)")
+        }
+        func socket(_ slot: Int) -> String { runDir.appending(path: "\(rec.appleId).\(slot)").path }
         lock.lock()
         defer { lock.unlock() }
-        for (i, net) in nets.enumerated() {
-            guard let c = IPv4.cidr(net.subnet), let gw = IPv4.parse(net.gateway) else { continue }
-            let used = Set(addresses.values.compactMap { $0[net.appleName].flatMap { IPv4.parse($0.ip) } } + [gw])
-            let size = UInt32(1) << UInt32(32 - c.prefix)
-            guard let ip = (UInt32(1)..<(size - 1)).lazy.map({ c.base + $0 }).first(where: { !used.contains($0) }) else { continue }
+        var nics: [ShimNIC] = []
+        for net in nets {
+            guard let ip = freeAddress(net) else { continue }
             let mac = MAC.derive(rec.id + net.id)
-            let nic = ShimNIC(networkId: net.id, mac: mac.description, address: "\(IPv4.format(ip))/\(c.prefix)",
-                              gateway: net.gateway, socket: runDir.appending(path: "\(rec.appleId).\(i)").path)
-            addresses[rec.id, default: [:]][net.appleName] = NetworkAddress(ip: IPv4.format(ip), prefix: c.prefix,
-                                                                            gateway: net.gateway, mac: mac.description)
-            nics.append(nic)
+            nics.append(ShimNIC(networkId: net.id, mac: mac.description, address: ip, gateway: net.gateway,
+                                socket: socket(nics.count), primary: nics.isEmpty))
+            record(rec.id, nics[nics.count - 1], on: net)
         }
+        while nics.count < ShimNIC.slots {
+            nics.append(.spare(nics.count, mac: MAC.derive(rec.id + "slot\(nics.count)"), socket: socket(nics.count)))
+        }
+        slots[rec.id] = nics
         return nics
+    }
+
+    /// A free address on `net` as CIDR. Spare slots keep theirs reserved: the guest still
+    /// holds it on a link-down interface. Callers hold `lock`.
+    private func freeAddress(_ net: NetworkRecord) -> String? {
+        guard let c = IPv4.cidr(net.subnet), let gw = IPv4.parse(net.gateway) else { return nil }
+        var used = Set(addresses.values.compactMap { $0[net.appleName].flatMap { IPv4.parse($0.ip) } } + [gw])
+        for nic in slots.values.joined() where !nic.hasPlaceholder {
+            if let ip = IPv4.parse(nic.ip), ip & IPv4.mask(c.prefix) == c.base { used.insert(ip) }
+        }
+        let size = UInt32(1) << UInt32(32 - c.prefix)
+        guard let ip = (UInt32(1)..<(size - 1)).lazy.map({ c.base + $0 }).first(where: { !used.contains($0) }) else { return nil }
+        return "\(IPv4.format(ip))/\(c.prefix)"
+    }
+
+    /// Callers hold `lock`.
+    private func record(_ id: String, _ nic: ShimNIC, on net: NetworkRecord) {
+        let prefix = Int(nic.address.split(separator: "/").last ?? "") ?? 0
+        addresses[id, default: [:]][net.appleName] = NetworkAddress(ip: nic.ip, prefix: prefix, gateway: nic.gateway, mac: nic.mac)
     }
 
     /// The shim is up with these NICs (also after a daemon restart, from its spec).
     func attach(_ rec: ContainerRecord, _ nics: [ShimNIC]) {
         guard let netSwitch else { return }
         lock.lock()
-        for nic in nics {
-            guard let net = records[nic.networkId], let mac = MAC(nic.mac), let c = IPv4.cidr(nic.address) else { continue }
-            let ip = IPv4.parse(String(nic.address.split(separator: "/")[0])) ?? c.base
-            addresses[rec.id, default: [:]][net.appleName] = NetworkAddress(ip: IPv4.format(ip), prefix: c.prefix,
-                                                                            gateway: nic.gateway, mac: nic.mac)
-            netSwitch.register(NetPort(path: nic.socket, containerId: rec.id, networkId: net.id, mac: mac, ip: ip))
+        slots[rec.id] = nics
+        for nic in nics where !nic.isSpare {
+            guard let net = records[nic.networkId], let port = Self.port(rec.id, nic) else { continue }
+            record(rec.id, nic, on: net)
+            netSwitch.register(port)
         }
         lock.unlock()
+    }
+
+    private static func port(_ id: String, _ nic: ShimNIC) -> NetPort? {
+        guard let mac = MAC(nic.mac), let ip = IPv4.parse(nic.ip) else { return nil }
+        return NetPort(path: nic.socket, containerId: id, networkId: nic.networkId, mac: mac, ip: ip)
+    }
+
+    func nics(_ id: String) -> [ShimNIC] {
+        lock.lock()
+        defer { lock.unlock() }
+        return slots[id] ?? []
+    }
+
+    /// Hot connect, step 1: binds a spare slot of a running container to `net` and
+    /// reserves its address. A slot that last held an address on `net` is reused, so the
+    /// guest gets that address back instead of holding two. The NIC becomes primary when
+    /// the container has none. The caller brings the guest side up, then calls `plug`,
+    /// or `restore` with `before` on failure.
+    func bindSlot(_ rec: ContainerRecord, _ net: NetworkRecord) throws -> (slot: Int, nic: ShimNIC, before: [ShimNIC]) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard var nics = slots[rec.id], !nics.isEmpty else {
+            throw APIError(409, "pratico: container \(rec.name) started without network slots; restart it to connect networks")
+        }
+        let before = nics
+        guard let c = IPv4.cidr(net.subnet) else { throw APIError(500, "network \(net.name) has no subnet") }
+        let reuse = nics.indices.first { i in
+            nics[i].isSpare && !nics[i].hasPlaceholder && IPv4.parse(nics[i].ip).map { $0 & IPv4.mask(c.prefix) == c.base } == true
+        }
+        guard let slot = reuse ?? nics.indices.first(where: { nics[$0].isSpare && nics[$0].hasPlaceholder }) else {
+            throw APIError(409, "pratico: container \(rec.name) has no free network slot (\(ShimNIC.slots) per VM, the Virtualization.framework limit; a disconnected network keeps its slot until the container restarts)")
+        }
+        var nic = nics[slot]
+        if reuse == nil {
+            // The slot's placeholder must not count as taken; it holds nothing on `net`.
+            guard let address = freeAddress(net) else { throw APIError(403, "no available IPv4 addresses on network \(net.name)") }
+            nic.address = address
+        }
+        nic.networkId = net.id
+        nic.gateway = net.gateway
+        nic.primary = !nics.contains { !$0.isSpare }
+        nics[slot] = nic
+        slots[rec.id] = nics
+        record(rec.id, nic, on: net)
+        return (slot, nic, before)
+    }
+
+    /// Hot connect, step 2: the guest's interface is up; frames now flow.
+    func plug(_ rec: ContainerRecord, _ nic: ShimNIC) {
+        guard let port = Self.port(rec.id, nic) else { return }
+        netSwitch?.register(port)
+    }
+
+    func restore(_ rec: ContainerRecord, _ before: [ShimNIC]) {
+        lock.lock()
+        slots[rec.id] = before
+        addresses[rec.id] = nil
+        for nic in before where !nic.isSpare {
+            if let net = records[nic.networkId] { record(rec.id, nic, on: net) }
+        }
+        lock.unlock()
+    }
+
+    /// Hot disconnect: the switch forgets the NIC first, so no frame reaches or leaves it
+    /// from here on, whatever the guest does; its flows to the Mac and the internet end.
+    /// The slot keeps its address reserved (see `freeAddress`). Returns the slot, whether
+    /// it was primary, and the NIC that takes over the default route, if any.
+    func unbindSlot(_ rec: ContainerRecord, _ net: NetworkRecord) -> (slot: Int, wasPrimary: Bool, successor: (Int, ShimNIC)?)? {
+        lock.lock()
+        guard var nics = slots[rec.id], let slot = nics.firstIndex(where: { $0.networkId == net.id }) else {
+            lock.unlock()
+            return nil
+        }
+        let old = nics[slot]
+        let current = ShimNIC.primary(nics)
+        let wasPrimary = old == current
+        for i in nics.indices { nics[i].primary = nics[i] == current }  // specs from before slots: explicit now
+        nics[slot].networkId = ""
+        nics[slot].gateway = ""
+        nics[slot].primary = false
+        var successor: (Int, ShimNIC)?
+        if wasPrimary, let next = nics.firstIndex(where: { !$0.isSpare }) {
+            nics[next].primary = true
+            successor = (next, nics[next])
+        }
+        slots[rec.id] = nics
+        addresses[rec.id]?[net.appleName] = nil
+        lock.unlock()
+        netSwitch?.unregister(path: old.socket)
+        return (slot, wasPrimary, successor)
     }
 
     /// Publishes the container's `PortBindings` on its primary NIC (Docker binds all
     /// interfaces unless a host IP is given, D-8). Returns the bound host ports per
     /// container port, or throws Docker's "port is already allocated" and unbinds all.
     func publish(_ rec: ContainerRecord, _ nics: [ShimNIC]) throws -> [String: [(ip: String, port: String)]] {
-        guard let netSwitch, let nic = nics.first, let mac = MAC(nic.mac),
-            let ip = IPv4.parse(String(nic.address.split(separator: "/")[0])), let gw = IPv4.parse(nic.gateway)
+        guard let netSwitch, let nic = ShimNIC.primary(nics), let port = Self.port(rec.id, nic), let gw = IPv4.parse(nic.gateway)
         else { return [:] }
-        let port = NetPort(path: nic.socket, containerId: rec.id, networkId: nic.networkId, mac: mac, ip: ip)
         var out: [String: [(ip: String, port: String)]] = [:]
         for (key, list) in (rec.hostConfig["PortBindings"]?.object ?? [:]).sorted(by: { $0.key < $1.key }) {
             let (num, proto) = key.splitOnce("/")
@@ -467,6 +580,16 @@ final class NetworkService: @unchecked Sendable {
         return out
     }
 
+    /// Points the container's published ports at its primary NIC. Returns false when it
+    /// has none (the caller publishes again once it has).
+    func retarget(_ rec: ContainerRecord) -> Bool {
+        guard let netSwitch, let nic = ShimNIC.primary(nics(rec.id)), let port = Self.port(rec.id, nic),
+            let gw = IPv4.parse(nic.gateway)
+        else { return false }
+        netSwitch.uplink.retarget(container: rec.id, nic: port, gateway: gw)
+        return true
+    }
+
     func unpublish(_ id: String) { netSwitch?.uplink.unpublish(container: id) }
 
     /// DNS for a container (SPEC D-27): Docker's names on user networks, plus pratico's
@@ -480,11 +603,13 @@ final class NetworkService: @unchecked Sendable {
         let suffix = ".pratico.internal"
         let scoped = name.hasSuffix(suffix)
         let bare = scoped ? String(name.dropLast(suffix.count)) : name
-        guard scoped || asker.name != "bridge" else { return nil }  // Docker: no names on bridge
         guard let containers, !bare.isEmpty else { return nil }
         guard let me = containers.all().first(where: { $0.id == port.containerId }) else { return nil }
-        // Bare names: the asker's network only. Scoped names: any network the asker is on.
-        let nets = scoped ? Set(active(me).keys) : [asker.id]
+        // Bare names: the asker's user networks, whichever NIC asked (Docker: none on
+        // bridge). Scoped names: any network the asker is on.
+        let mine = Set(active(me).keys)
+        let nets = scoped ? mine : mine.filter { (try? resolve($0))?.name != "bridge" }
+        guard !nets.isEmpty else { return nil }
         var out: [UInt32] = []
         for c in containers.all() where c.state.running {
             for (netId, ep) in active(c) where nets.contains(netId) {

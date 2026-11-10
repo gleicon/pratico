@@ -3,14 +3,39 @@ import ContainerizationExtras
 import Foundation
 import Virtualization
 
-/// One NIC as the daemon plans it and the shim builds it (part of `ShimSpec`).
+/// One NIC slot as the daemon plans it and the shim builds it (part of `ShimSpec`).
+/// Virtualization.framework cannot hot-plug NICs, so a VM boots with `slots` of them;
+/// the spare ones are link-down with no switch port until `docker network connect`.
 struct ShimNIC: Codable, Sendable, Equatable {
+    /// Empty for a spare slot: no switch port, so no frame reaches or leaves it.
     var networkId: String
     var mac: String
-    var address: String  // CIDR, e.g. 172.17.0.2/16
+    /// CIDR, e.g. 172.17.0.2/16. A spare slot keeps its last address (still reserved for
+    /// it, as the guest cannot delete addresses) or a link-local placeholder.
+    var address: String
     var gateway: String
     /// Where the shim's relay binds; the switch knows the port by this path.
     var socket: String
+    /// Holds the default route and the published ports; nil in specs from before slots,
+    /// where the first NIC does.
+    var primary: Bool?
+
+    /// Virtualization.framework allows 4 network devices per VM.
+    static let slots = 4
+
+    var isSpare: Bool { networkId.isEmpty }
+
+    /// The NIC holding the default route, DNS, and published ports, if any.
+    static func primary(_ nics: [ShimNIC]) -> ShimNIC? {
+        nics.first { $0.primary == true } ?? nics.first.flatMap { $0.primary == nil && !$0.isSpare ? $0 : nil }
+    }
+    var hasPlaceholder: Bool { address.hasPrefix("169.254.255.") }
+    var ip: String { String(address.split(separator: "/")[0]) }
+
+    /// Containerization gives every NIC an address at boot; a /32 link-local one adds no route.
+    static func spare(_ slot: Int, mac: MAC, socket: String) -> ShimNIC {
+        ShimNIC(networkId: "", mac: mac.description, address: "169.254.255.\(slot + 1)/32", gateway: "", socket: socket)
+    }
 }
 
 /// A VM NIC whose frames go through a datagram socket pair: Virtualization.framework
@@ -35,8 +60,8 @@ struct SwitchNIC: Interface, VZInterface {
 /// switch are connectionless, so a daemon restart costs a few dropped frames, not the
 /// network.
 enum NICRelay {
-    /// Builds the NIC for Containerization and starts relaying; `first` gets the default route.
-    static func start(_ nic: ShimNIC, switchSocket: String, first: Bool) throws -> SwitchNIC {
+    /// Builds the NIC for Containerization and starts relaying; `primary` gets the default route.
+    static func start(_ nic: ShimNIC, switchSocket: String, primary: Bool) throws -> SwitchNIC {
         var pair: [Int32] = [-1, -1]
         guard socketpair(AF_UNIX, SOCK_DGRAM, 0, &pair) == 0 else { throw APIError(500, "pratico-net: socketpair failed") }
         let vm = pair[0], local = pair[1]
@@ -84,7 +109,7 @@ enum NICRelay {
         }
         return SwitchNIC(
             ipv4Address: try CIDRv4(nic.address),
-            ipv4Gateway: first ? try IPv4Address(nic.gateway) : nil,
+            ipv4Gateway: primary ? try IPv4Address(nic.gateway) : nil,
             macAddress: try MACAddress(nic.mac),
             handle: FileHandle(fileDescriptor: vm, closeOnDealloc: false))
     }

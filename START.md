@@ -78,8 +78,8 @@ docker run --rm alpine uname -a
 
 It covers pull, images, run (`-d`, `-i`, `-it`, `-p`), logs, exec, cp, stats,
 healthchecks, networks with DNS by name, internet and `host.docker.internal` access,
-stop, kill, pause, rm, tag, save. `docker login` answers 501, and connecting or
-disconnecting a running container answers 409, for now. Progress:
+stop, kill, pause, rm, tag, save, login, push, and connecting or disconnecting running
+containers (disconnect cuts traffic at the switch). Progress:
 [docs/design/runtime.md](docs/design/runtime.md).
 
 ## Troubleshooting

@@ -334,3 +334,26 @@ private let grypeSample = Data(#"""
     #expect(TCPConn.clampMSS(1) == 64)
     #expect(TCPConn.clampMSS(9000) == 1460)
 }
+
+@Test func primaryNICFollowsTheSlotsFlag() {
+    let a = ShimNIC(networkId: "a", mac: "02:42:00:00:00:01", address: "172.17.0.2/16", gateway: "172.17.0.1", socket: "/s.0")
+    let spare = ShimNIC.spare(1, mac: MAC.derive("x"), socket: "/s.1")
+    #expect(spare.isSpare && spare.hasPlaceholder)
+    #expect(ShimNIC.primary([a, spare]) == a)  // specs from before slots: the first NIC
+    var b = a
+    b.networkId = "b"
+    b.primary = true
+    var c = a
+    c.primary = false
+    #expect(ShimNIC.primary([c, b]) == b)
+    #expect(ShimNIC.primary([spare]) == nil)
+}
+
+@Test func guestAddressesAreAddedOncePerSlot() {
+    let held = GuestAddresses(["172.17.0.2/16", "169.254.255.2/32"])
+    #expect(!held.claim(0, "172.17.0.2/16"))
+    #expect(held.claim(1, "172.18.0.3/24"))
+    #expect(!held.claim(1, "172.18.0.3/24"))
+    held.release(1, "172.18.0.3/24")
+    #expect(held.claim(1, "172.18.0.3/24"))
+}

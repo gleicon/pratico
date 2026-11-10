@@ -233,9 +233,14 @@ final class Uplink: @unchecked Sendable {
         let fd: Int32
         let source: DispatchSourceRead
         var live = true  // false once cancelled: its fd number may belong to another socket
-        init(fd: Int32, source: DispatchSourceRead) {
+        /// Where new connections go: the container's primary NIC, which hot disconnect can move.
+        var nic: NetPort
+        var gateway: UInt32
+        init(fd: Int32, source: DispatchSourceRead, nic: NetPort, gateway: UInt32) {
             self.fd = fd
             self.source = source
+            self.nic = nic
+            self.gateway = gateway
         }
     }
 
@@ -275,19 +280,30 @@ final class Uplink: @unchecked Sendable {
                 $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &len) }
             }
             let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
-            let listener = Listener(fd: fd, source: source)
+            let listener = Listener(fd: fd, source: source, nic: nic, gateway: gateway)
             source.setEventHandler { [weak self, unowned listener] in
                 guard let self, listener.live else { return }
                 if isUDP {
-                    self.inboundDatagram(listener, nic: nic, gateway: gateway, containerPort: containerPort)
+                    self.inboundDatagram(listener, nic: listener.nic, gateway: listener.gateway, containerPort: containerPort)
                 } else {
-                    self.accept(fd, nic: nic, gateway: gateway, containerPort: containerPort)
+                    self.accept(fd, nic: listener.nic, gateway: listener.gateway, containerPort: containerPort)
                 }
             }
             source.setCancelHandler { close(fd) }
             source.resume()
             listeners[id, default: []].append(listener)
             return UInt16(bigEndian: actual.sin_port)
+        }
+    }
+
+    /// The container's published ports now lead to `nic` (its new primary NIC). The host
+    /// listeners stay bound, so no other process can take the ports meanwhile.
+    func retarget(container id: String, nic: NetPort, gateway: UInt32) {
+        queue.sync {
+            for l in listeners[id] ?? [] {
+                l.nic = nic
+                l.gateway = gateway
+            }
         }
     }
 

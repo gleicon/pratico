@@ -79,10 +79,12 @@ final class NetSwitch: @unchecked Sendable {
         for path in gone { uplink.drop(path: path) }
     }
 
+    /// The NIC's frames are dropped from here on and its flows end.
     func unregister(path: String) {
         lock.lock()
         ports[path] = nil
         lock.unlock()
+        uplink.drop(path: path)
     }
 
     // MARK: Forwarding
@@ -154,22 +156,25 @@ final class NetSwitch: @unchecked Sendable {
             if let echo = icmpEchoReply(ip.payload) { reply(port, from: segment.gateway, proto: 1, echo) }
             return
         }
-        if ip.dst == segment.gateway && ip.proto == 17, let udp = UDPDatagram(ip.payload), udp.dstPort == 53 {
-            return dns(udp, from: port, segment: segment)
-        }
         lock.lock()
         let all = Array(segments.values)
         lock.unlock()
+        // DNS at any pratico gateway is answered as the asker's network: a container keeps
+        // the resolv.conf of its first network after hot-disconnecting from it.
+        if ip.proto == 17, all.contains(where: { $0.gateway == ip.dst }), let udp = UDPDatagram(ip.payload), udp.dstPort == 53 {
+            return dns(udp, from: port, segment: segment, server: ip.dst)
+        }
         uplink.handle(ip, from: port, segment: segment, pratico: all)
     }
 
     // MARK: DNS
 
-    private func dns(_ udp: UDPDatagram, from port: NetPort, segment: NetSegment) {
+    /// `server` is the gateway address asked; the answer comes from it, or resolvers drop it.
+    private func dns(_ udp: UDPDatagram, from port: NetPort, segment: NetSegment, server: UInt32) {
         guard let q = DNSQuery(udp.payload), q.qclass == 1 else { return }
         let respond: @Sendable ([UInt32]?) -> Void = { [self] addrs in
             let answer = UDPDatagram(srcPort: 53, dstPort: udp.srcPort, payload: q.answer(udp.payload, addresses: addrs))
-            reply(port, from: segment.gateway, proto: 17, answer.bytes(src: segment.gateway, dst: port.ip))
+            reply(port, from: server, proto: 17, answer.bytes(src: server, dst: port.ip))
         }
         if let local = resolveName?(port, q.name) {
             respond(q.qtype == 1 ? local : [])  // a container name has no AAAA/MX/…
@@ -222,6 +227,10 @@ final class NetSwitch: @unchecked Sendable {
 
     /// An IPv4 packet from beyond the network to a container, fragmented to the MTU.
     func deliver(to port: NetPort, src: UInt32, proto: UInt8, _ payload: [UInt8]) {
+        lock.lock()
+        let plugged = ports[port.path] == port
+        lock.unlock()
+        guard plugged else { return }  // unplugged (hot disconnect) or replugged elsewhere
         for packet in IPv4Packet.fragments(src: src, dst: port.ip, proto: proto, payload: payload, mtu: Self.mtu) {
             send(Ethernet(dst: port.mac, src: .gateway, type: EtherType.ipv4.rawValue, payload: packet).bytes, to: port)
         }

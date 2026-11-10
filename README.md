@@ -36,8 +36,9 @@ Pratico has no CLI of its own: `docker` is the CLI, the menubar is the control p
 | Exit codes after a daemon restart | lost (reported as 0) | kept (each VM has its own `pratico-shim`) |
 | Pause | cgroup freezer agent | whole-VM pause |
 | stdin (`-i`, `-it`), healthchecks, exec, cp, stats | yes | yes (guest agent; no tools needed in the image) |
-| `docker login` | yes | not yet (HTTP 501 with a reason) |
+| `docker login` | yes | yes: checked with the registry, kept in pratico's own Keychain items |
 | Networks, DNS by name | yes ([D-25](SPEC.md), `/etc/hosts`) | yes: pratico-net switch and DNS, isolated networks |
+| Connect/disconnect a running container | connect 409; disconnect drops names only | yes: disconnect cuts traffic at the switch |
 | Internet and Mac access (`host.docker.internal`) | yes | yes: pure-Swift uplink, no extra binaries |
 | Published ports (`-p`) | yes | yes |
 

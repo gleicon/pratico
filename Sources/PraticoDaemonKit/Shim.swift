@@ -1,5 +1,6 @@
 import Containerization
 import ContainerizationOCI
+import ContainerizationExtras
 import ContainerizationOS
 import Foundation
 
@@ -21,8 +22,11 @@ struct ShimSpec: Codable, Sendable {
     var cpus: Int
     var memoryMiB: Int
     var mounts: [ShimMount]
-    /// pratico-net NICs, primary first; empty for `--network none`.
+    /// pratico-net NIC slots (`ethN` is slot N); empty for `--network none`.
     var nics: [ShimNIC] = []
+
+    /// The NIC holding the default route, DNS, and published ports.
+    var primaryNIC: ShimNIC? { ShimNIC.primary(nics) }
     var switchSocket: String = ""
 }
 
@@ -74,8 +78,8 @@ public enum ShimHost {
         let container: LinuxContainer
         let interfaces: [SwitchNIC]
         do {
-            interfaces = try spec.nics.enumerated().map { i, nic in
-                try NICRelay.start(nic, switchSocket: spec.switchSocket, first: i == 0)
+            interfaces = try spec.nics.map { nic in
+                try NICRelay.start(nic, switchSocket: spec.switchSocket, primary: nic == spec.primaryNIC)
             }
         } catch {
             return fail("cannot set up networking: \(error)")
@@ -98,11 +102,11 @@ public enum ShimHost {
                 config.process.stderr = spec.tty ? nil : LogWriter(log: log, stream: 2)
                 config.process.stdin = stdin
                 config.interfaces = interfaces
-                if let first = spec.nics.first {
-                    // pratico-net answers DNS at the gateway: container names, then the Mac's resolver.
-                    config.dns = DNS(nameservers: [first.gateway])
+                if let primary = spec.primaryNIC {
+                    // pratico-net answers DNS at every gateway: container names, then the Mac's resolver.
+                    config.dns = DNS(nameservers: [primary.gateway])
                     var hosts = Hosts.default
-                    hosts.entries.append(Hosts.Entry(ipAddress: String(first.address.split(separator: "/")[0]), hostnames: [spec.hostname]))
+                    hosts.entries.append(Hosts.Entry(ipAddress: primary.ip, hostnames: [spec.hostname]))
                     config.hosts = hosts
                 }
                 for m in spec.mounts {
@@ -110,6 +114,15 @@ public enum ShimHost {
                 }
             }
             try await container.create()
+            // Spare slots stay link-down until the daemon connects them (`POST /nic`).
+            let spares = spec.nics.indices.filter { spec.nics[$0].isSpare }
+            if !spares.isEmpty {
+                try await container.withVirtualMachineInstance { vm in
+                    let agent = try await vm.dialAgent()
+                    for i in spares { try await agent.down(name: "eth\(i)") }
+                    try await agent.close()
+                }
+            }
             try await container.start()
         } catch {
             log.finish()
@@ -170,12 +183,14 @@ final class ShimControl: Sendable {
     let spec: ShimSpec
     let stdin: StdinStream?
     let execs = ExecTable()
+    let addresses: GuestAddresses
 
     init(container: LinuxContainer, files: ShimFiles, spec: ShimSpec, stdin: StdinStream?) {
         self.container = container
         self.files = files
         self.spec = spec
         self.stdin = stdin
+        addresses = GuestAddresses(spec.nics.map(\.address))
     }
 
     /// Whether a host path stays inside `dir` once `.`/`..` and symlinks are resolved (the
@@ -257,6 +272,8 @@ final class ShimControl: Sendable {
                 if let p = execs.get(req.query["id"] ?? "")?.process, w > 0, h > 0 {
                     try blocking { try await p.resize(to: Terminal.Size(width: w, height: h)) }
                 }
+            case ("POST", "nic"):
+                try nic(JSON.parse(req.body) ?? [:])
             case ("POST", "pause"):
                 try blocking { try await c.withVirtualMachineInstance { try await $0.pause() } }
                 record("paused")
@@ -275,7 +292,69 @@ final class ShimControl: Sendable {
     }
 }
 
+/// The addresses each slot's guest interface holds. The agent cannot delete one, and
+/// adding one twice fails, so the shim remembers them.
+final class GuestAddresses: @unchecked Sendable {
+    private let lock = NSLock()
+    private var held: [Set<String>]
+
+    init(_ boot: [String]) { held = boot.map { [$0] } }
+
+    /// True when `address` is new on `slot` (the caller adds it).
+    func claim(_ slot: Int, _ address: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return held[slot].insert(address).inserted
+    }
+
+    func release(_ slot: Int, _ address: String) {
+        lock.lock()
+        held[slot].remove(address)
+        lock.unlock()
+    }
+}
+
 extension ShimControl {
+    /// Hot connect and disconnect (`docker network connect`): `{"slot", "action": "up" |
+    /// "down" | "route", "address", "gateway"}`. "up" adds the address and brings `ethN`
+    /// up, with the default route when a gateway is given; "route" moves the default
+    /// route to `ethN`. Traffic is cut at the daemon's switch either way; this is the
+    /// guest's view of it.
+    func nic(_ body: JSON) throws {
+        guard let slot = body["slot"]?.int.map(Int.init), spec.nics.indices.contains(slot) else {
+            throw APIError(400, "shim: no NIC slot \(body["slot"]?.int ?? -1)")
+        }
+        let name = "eth\(slot)"
+        let action = body["action"]?.string ?? ""
+        let address = body["address"]?.string ?? ""
+        let gateway = try (body["gateway"]?.string).flatMap { $0.isEmpty ? nil : try IPv4Address($0) }
+        guard ["up", "down", "route"].contains(action) else { throw APIError(400, "shim: unknown NIC action \(action)") }
+        let cidr = action == "up" ? try CIDRv4(address) : nil
+        let addresses = addresses
+        try blocking { [container] in
+            try await container.withVirtualMachineInstance { vm in
+                let agent = try await vm.dialAgent()
+                defer { Task { try? await agent.close() } }
+                switch action {
+                case "up":
+                    if let cidr, addresses.claim(slot, address) {
+                        do { try await agent.addressAdd(name: name, address: InterfaceAddress(ipv4Address: cidr)) } catch {
+                            addresses.release(slot, address)
+                            throw error
+                        }
+                    }
+                    try await agent.up(name: name, mtu: 1500)
+                    if let gateway { try await agent.routeAddDefault(name: name, route: DefaultRoute(ipv4Gateway: gateway)) }
+                case "down":
+                    try await agent.down(name: name)
+                default:
+                    guard let gateway else { throw APIError(400, "shim: route needs a gateway") }
+                    try await agent.routeAddDefault(name: name, route: DefaultRoute(ipv4Gateway: gateway))
+                }
+            }
+        }
+    }
+
     /// One-shot exec with captured output (Docker keeps 4 KiB), for healthchecks:
     /// `{"args": [...], "timeout": seconds}` → `{"exitCode", "output"}`; -1 on timeout.
     func run(_ body: JSON) throws -> JSON {

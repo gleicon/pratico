@@ -31,6 +31,7 @@ fail=0
 ok() { echo "ok   $1"; pass=$((pass + 1)); }
 bad() { echo "FAIL $1${2:+ — $2}"; fail=$((fail + 1)); }
 check() { local name="$1"; shift; if "$@" >/dev/null 2>&1; then ok "$name"; else bad "$name"; fi; }
+expect_has() { if grep -qF -- "$3" <<<"$2"; then ok "$1"; else bad "$1" "want [$3] in [$2]"; fi; }
 expect_eq() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "want [$3] got [$2]"; fi; }
 
 start_daemon() {
@@ -212,6 +213,27 @@ if docker exec e-i1 nslookup example.com >/dev/null 2>&1; then bad "internal net
 if docker exec e-i1 ping -c1 -W2 1.1.1.1 >/dev/null 2>&1; then bad "internal networks do not reach the internet"; else ok "internal networks do not reach the internet"; fi
 gw=$(docker network inspect e-int --format '{{(index .IPAM.Config 0).Gateway}}')
 if docker exec e-i1 wget -qO- -T3 "http://$gw:18093/" >/dev/null 2>&1; then bad "internal networks do not reach the Mac"; else ok "internal networks do not reach the Mac"; fi
+# Hot connect and disconnect (pratico-net 5): spare NIC slots, cut at the switch.
+c2=$(docker inspect e-c2 --format '{{(index .NetworkSettings.Networks "e-n1").IPAddress}}')
+check "connect a running container" docker network connect e-n1 e-b1
+n1=$(docker inspect e-b1 --format '{{(index .NetworkSettings.Networks "e-n1").IPAddress}}')
+check "a hot-connected container reaches the network by name" docker exec e-b1 ping -c1 -W2 e-c2
+check "the network resolves a hot-connected container" docker exec e-c1 ping -c1 -W2 e-b1
+check "disconnect a running container" docker network disconnect e-n1 e-b1
+if docker exec e-b1 ping -c1 -W2 "$c2" >/dev/null 2>&1; then bad "disconnect cuts traffic"; else ok "disconnect cuts traffic"; fi
+docker exec e-b1 ip link set eth1 up >/dev/null 2>&1
+if docker exec e-b1 ping -c1 -W2 "$c2" >/dev/null 2>&1; then bad "a guest cannot revive a disconnected NIC"; else ok "a guest cannot revive a disconnected NIC"; fi
+if docker exec e-c1 nslookup e-b1 >/dev/null 2>&1; then bad "a disconnected container leaves DNS"; else ok "a disconnected container leaves DNS"; fi
+docker network connect e-n1 e-b1
+expect_eq "reconnect gets the same address back" "$(docker inspect e-b1 --format '{{(index .NetworkSettings.Networks "e-n1").IPAddress}}')" "$n1"
+check "disconnect the primary network" docker network disconnect bridge e-b1
+check "DNS survives losing the primary network" docker exec e-b1 ping -c1 -W2 e-c2
+check "the default route moves to the next network" docker exec e-b1 wget -qO /dev/null -T10 https://example.com
+if docker exec e-b1 ping -c1 -W2 "$b2" >/dev/null 2>&1; then bad "the old primary network is cut"; else ok "the old primary network is cut"; fi
+stop_daemon
+start_daemon
+check "hot-connected NICs survive a daemon restart" docker exec e-b1 ping -c1 -W2 e-c2
+
 docker rm -f e-b1 e-b2 e-c1 e-c2 e-i1 e-i2 >/dev/null
 check "network rm" docker network rm e-n1
 docker network rm e-int >/dev/null
@@ -234,6 +256,13 @@ for p in $(pgrep -f "pratico-shim $HOME_DIR"); do
     lsof -nP -a -p "$p" -iTCP -sTCP:LISTEN >/dev/null 2>&1 && leaked=1
 done
 expect_eq "shims inherit no daemon sockets" "$leaked" "0"
+docker network create e-pn >/dev/null
+docker run -d --name e-web3 -p 18213:80 busybox sh -c 'mkdir /w; echo follows > /w/index.html; httpd -f -p 80 -h /w' >/dev/null
+docker network connect e-pn e-web3
+docker network disconnect bridge e-web3
+expect_eq "published ports follow the primary network" "$(curl -s -m5 http://127.0.0.1:18213/)" "follows"
+docker rm -f e-web3 >/dev/null
+docker network rm e-pn >/dev/null
 stop_daemon
 start_daemon
 expect_eq "published ports survive a daemon restart" "$(curl -s -m5 http://127.0.0.1:18210/)" "published"
@@ -255,6 +284,48 @@ check "inspect by tag" test "$(docker image inspect pratico-e2e/emb:1 --format '
 docker save -o "$HOME_DIR/save.tar" alpine 2>/dev/null
 check "docker save writes a Docker archive" tar -xOf "$HOME_DIR/save.tar" manifest.json
 docker rmi pratico-e2e/emb:1 >/dev/null
+# docker login (pratico's own Keychain items): a TLS, password-protected registry:2
+# running on pratico itself.
+REG_PORT=15001
+REG="127.0.0.1:$REG_PORT"
+REG_DIR="$HOME_DIR/registry"
+REG_PASS="e2e-$(openssl rand -hex 8)"
+mkdir -p "$REG_DIR"
+# A CA and a leaf (macOS rejects a self-signed CA certificate as a TLS server's).
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=pratico e2e CA" \
+    -keyout "$REG_DIR/ca.key" -out "$REG_DIR/ca.pem" >/dev/null 2>&1
+openssl req -newkey rsa:2048 -nodes -subj /CN=localhost -keyout "$REG_DIR/key.pem" -out "$REG_DIR/leaf.csr" >/dev/null 2>&1
+printf 'basicConstraints=CA:FALSE\nextendedKeyUsage=serverAuth\nsubjectAltName=IP:127.0.0.1,DNS:localhost\n' >"$REG_DIR/leaf.ext"
+openssl x509 -req -in "$REG_DIR/leaf.csr" -CA "$REG_DIR/ca.pem" -CAkey "$REG_DIR/ca.key" -CAcreateserial -days 1 \
+    -extfile "$REG_DIR/leaf.ext" -out "$REG_DIR/cert.pem" >/dev/null 2>&1
+htpasswd -Bbn e2euser "$REG_PASS" >"$REG_DIR/htpasswd"
+reg_cleanup() { security delete-internet-password -s "$REG" -d dev.pratico.registry >/dev/null 2>&1; cleanup; }
+trap reg_cleanup EXIT
+docker pull -q registry:2 >/dev/null 2>&1  # SSL_CERT_FILE replaces the trust roots, Docker Hub's too
+stop_daemon
+SSL_CERT_FILE="$REG_DIR/ca.pem" start_daemon
+docker run -d --name e-reg -p "$REG:5000" -v "$REG_DIR:/auth" \
+    -e REGISTRY_AUTH=htpasswd -e REGISTRY_AUTH_HTPASSWD_REALM=e2e -e REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd \
+    -e REGISTRY_HTTP_TLS_CERTIFICATE=/auth/cert.pem -e REGISTRY_HTTP_TLS_KEY=/auth/key.pem registry:2 >/dev/null 2>&1
+for _ in $(seq 100); do
+    [ "$(curl -sk -o /dev/null -w '%{http_code}' "https://$REG/v2/")" = 401 ] && break
+    sleep 0.2
+done
+docker tag alpine "$REG/e2e/alpine:1"
+if docker push "$REG/e2e/alpine:1" >/dev/null 2>&1; then bad "push without login is refused"; else ok "push without login is refused"; fi
+expect_has "docker login with a wrong password fails" "$(echo wrong | docker login "$REG" -u e2euser --password-stdin 2>&1)" \
+    "incorrect username or password"
+expect_has "docker login succeeds" "$(echo "$REG_PASS" | docker login "$REG" -u e2euser --password-stdin 2>&1)" "Login Succeeded"
+check "push to a private registry" docker push "$REG/e2e/alpine:1"
+docker rmi "$REG/e2e/alpine:1" >/dev/null
+check "pull from a private registry" docker pull "$REG/e2e/alpine:1"
+docker rmi "$REG/e2e/alpine:1" >/dev/null
+# No X-Registry-Auth: the daemon uses the login it kept.
+expect_has "a kept login serves clients that send no credentials" \
+    "$(curl -s --unix-socket "$SOCK" -X POST "http://d/images/create?fromImage=$REG/e2e/alpine&tag=1")" "Downloaded newer image"
+docker rm -f e-reg >/dev/null
+docker rmi "$REG/e2e/alpine:1" registry:2 >/dev/null 2>&1
+
 check "rmi removes the image" docker rmi alpine
 if [ -s "$HOME_DIR/apple-calls" ]; then bad "no Apple container CLI calls" "$(head -3 "$HOME_DIR/apple-calls")"; else ok "no Apple container CLI calls"; fi
 

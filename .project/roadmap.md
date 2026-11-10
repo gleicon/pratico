@@ -49,8 +49,9 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 - [x] pratico-net 4a: user-space switch (isolation, anti-spoofing), IPAM, gateway ARP/ping, embedded DNS (Docker names, `.pratico.internal`, `host.docker.internal`, external names via the Mac's resolver); `bridge`, `none`, custom networks
 - [x] pratico-net 4b: Swift uplink to the internet and the Mac (UDP, unprivileged ping, TCP endpoint), soak-tested; internal networks stay sealed
 - [x] pratico-net 4c: published ports (TCP and UDP, host IP or all interfaces, random host ports, Docker's "port is already allocated"), surviving daemon restarts
-- [ ] Custom networks with hot connect/disconnect that cut traffic, not just names
-- [ ] Registry auth and push on the OCI client, credentials in pratico's own Keychain item; scans read the store
+- [x] Hot connect/disconnect on running containers: 4 NIC slots per VM (the VZ maximum), disconnect cuts traffic at the switch, default route and published ports follow the primary network
+- [x] `docker login` and push on the OCI client: credentials checked with the registry, kept in pratico's own Keychain items, used when a client sends none
+- [x] Scans read the embedded store (exports go through the image backend)
 - [ ] Egress intercept: sandwich-proxy engine on container HTTP/HTTPS flows, per-container opt-in, log/replay/HAR/threat feeds
 - [ ] `container` CLI adapter, `/etc/hosts` sync and default-network anchor removed; SPEC and docs updated; acknowledgements (licenses) in the app and DMG
 
