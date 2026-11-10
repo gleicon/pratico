@@ -14,15 +14,17 @@ public final class Daemon: @unchecked Sendable {
     let events = EventBus()
     let networks: NetworkService
     let scans: ScanService
+    /// Registry trust and kept logins; embedded runtime only.
+    let registries: Registries?
     private var server: HTTPServer?
     /// Embedded runtime asked for but could not open: refuse to serve rather than fall back.
     let embeddedStartupFailed: Bool
 
-    /// Refuses unreadable `registry_ca` files and impossible trust settings at startup
-    /// (exit 4, like any configuration error).
-    public static func checkRegistryConfig(_ config: Config) throws { _ = try RegistryPolicy.load(config) }
-
-    public init(home: URL, config: Config = Config(), socketPath: String? = nil, runtime: AppleContainer = AppleContainer()) {
+    /// Throws a configuration error for unreadable `registry_ca` files and impossible
+    /// trust settings, on either runtime: the daemon refuses to start (exit 4) rather
+    /// than trust less, or more, than `config.toml` says.
+    public init(home: URL, config: Config = Config(), socketPath: String? = nil, runtime: AppleContainer = AppleContainer()) throws {
+        let policy = try RegistryPolicy.load(config)
         self.home = home
         self.socketPath = socketPath ?? home.appending(path: "docker.sock").path
         self.runtime = runtime
@@ -30,26 +32,32 @@ public final class Daemon: @unchecked Sendable {
         // which becomes the default once it covers every operation.
         var embedded: EmbeddedContainers?
         var images = ImageService(runtime: runtime)
+        var registries: Registries?
+        var embeddedImages: EmbeddedImageBackend?
         if ProcessInfo.processInfo.environment["PRATICO_RUNTIME"] == "embedded" {
             switch EmbeddedContainers.open(home: home) {
             case .success(let (e, store, content)):
                 embedded = e
-                let policy = (try? RegistryPolicy.load(config)) ?? RegistryPolicy()  // checked in main
-                images = ImageService(backend: EmbeddedImageBackend(store: store, content: content, policy: policy, home: home))
+                let r = Registries(policy: policy, home: home)
+                for w in policy.warnings { FileHandle.standardError.write(Data("pratico-daemon: \(w)\n".utf8)) }
+                r.writeState()
+                registries = r
+                let backend = EmbeddedImageBackend(store: store, content: content, registries: r)
+                embeddedImages = backend
+                images = ImageService(backend: backend)
             case .failure(let error):
                 FileHandle.standardError.write(Data("pratico-daemon: embedded runtime unavailable: \(error.message)\n".utf8))
             }
         }
         self.embeddedStartupFailed = ProcessInfo.processInfo.environment["PRATICO_RUNTIME"] == "embedded" && embedded == nil
         self.images = images
+        self.registries = registries
         self.networks = NetworkService(runtime: runtime, root: home.appending(path: "networks", directoryHint: .isDirectory),
                                        events: events, apple: embedded == nil)
         self.containers = ContainerService(
             runtime: runtime, images: images, root: home.appending(path: "containers", directoryHint: .isDirectory),
             networks: networks, config: config, events: events, embedded: embedded)
-        if let backend = images.backend as? EmbeddedImageBackend {
-            backend.usedBy = { [containers] in Set(containers.all().map(\.imageId)) }
-        }
+        embeddedImages?.usedBy = { [containers] in Set(containers.all().map(\.imageId)) }
         self.execs = ExecService(runtime: runtime, containers: containers)
         self.archives = ArchiveService(runtime: runtime, containers: containers)
         self.stats = StatsService(runtime: runtime, containers: containers)
@@ -127,13 +135,10 @@ public final class Daemon: @unchecked Sendable {
             return .keepAlive
         // pratico's own endpoints (not Docker's): the menubar's view of registry trust and logins.
         case ("GET", "pratico") where parts.count == 2 && parts[1] == "registries":
-            guard let backend = images.backend as? EmbeddedImageBackend else { throw APIError(501, "pratico: registry settings are on the embedded runtime only") }
-            conn.json(200, ["policy": backend.policy.summary, "warnings": .array(backend.policy.warnings.map { .string($0) }),
-                            "logins": .array(backend.logins())])
+            conn.json(200, try embeddedRegistries().state)
             return .keepAlive
         case ("DELETE", "pratico") where parts.count == 4 && parts[1] == "registries" && parts[2] == "logins":
-            guard let backend = images.backend as? EmbeddedImageBackend else { throw APIError(501, "pratico: registry settings are on the embedded runtime only") }
-            try backend.logout(parts[3].removingPercentEncoding ?? parts[3])
+            try embeddedRegistries().logout(parts[3].removingPercentEncoding ?? parts[3])
             conn.respond(204)
             return .keepAlive
         case ("GET", "info") where parts.count == 1:
@@ -328,9 +333,13 @@ public final class Daemon: @unchecked Sendable {
         ]
     }
 
+    private func embeddedRegistries() throws -> Registries {
+        guard let registries else { throw APIError(501, "pratico: registry settings are on the embedded runtime only") }
+        return registries
+    }
+
     func info() -> JSON {
         let c = containers.counts
-        let policy = (images.backend as? EmbeddedImageBackend)?.policy
         var out: JSON = [
             "ID": "pratico",
             "Containers": .int(Int64(c.total)),
@@ -353,10 +362,10 @@ public final class Daemon: @unchecked Sendable {
             "Labels": [],
             "Warnings": [],
         ]
-        if let policy {
+        if let registries {
             // The CLI prints "Insecure Registries" from this and each warning as WARNING: …
-            out["RegistryConfig"] = policy.registryConfig
-            out["Warnings"] = .array(policy.warnings.map { .string($0) })
+            out["RegistryConfig"] = registries.policy.registryConfig
+            out["Warnings"] = registries.warnings
             out["OperatingSystem"] = "macOS (pratico)"
         }
         return out

@@ -1,7 +1,6 @@
 import Containerization
 import ContainerizationExtras
 import ContainerizationOCI
-import ContainerizationOS
 import Foundation
 
 /// Where images live. `ImageService` keeps the Docker semantics on top; a backend
@@ -117,22 +116,14 @@ struct AppleImageBackend: ImageBackend {
 final class EmbeddedImageBackend: ImageBackend, @unchecked Sendable {
     let store: ImageStore
     let content: LocalContentStore
-    let policy: RegistryPolicy
-    /// `~/.pratico/registries.json`: the trust settings in effect and the kept logins
-    /// (never passwords), for the menubar.
-    let stateFile: URL
+    let registries: Registries
     /// Image IDs used by Docker containers; set by the daemon.
     var usedBy: @Sendable () -> Set<String> = { [] }
 
-    init(store: ImageStore, content: LocalContentStore, policy: RegistryPolicy = RegistryPolicy(), home: URL? = nil) {
+    init(store: ImageStore, content: LocalContentStore, registries: Registries) {
         self.store = store
         self.content = content
-        self.policy = policy
-        stateFile = (home ?? FileManager.default.temporaryDirectory).appending(path: "registries.json")
-        if home != nil {
-            for w in policy.warnings { FileHandle.standardError.write(Data("pratico-daemon: \(w)\n".utf8)) }
-            writeState()
-        }
+        self.registries = registries
     }
 
     func images() -> [JSON] {
@@ -163,23 +154,25 @@ final class EmbeddedImageBackend: ImageBackend, @unchecked Sendable {
     }
 
     /// pratico's registry client for the image's registry, with the request's credentials
-    /// for that registry or the login `docker login` kept. Its notes (plain HTTP, an extra
-    /// CA) go to the client's progress output.
-    private func session(_ ref: String, _ auth: RegistryAuth?, _ progress: @escaping @Sendable (JSON) -> Void) throws -> (RegistrySession, Reference) {
-        let parsed = try Reference.parse(ImageRef.normalize(ref))
+    /// for that registry or the login `docker login` kept, and where the image is on it.
+    /// The client's notes (plain HTTP, an extra CA) go to the progress output.
+    private func target(_ ref: String, _ auth: RegistryAuth?, _ progress: @escaping @Sendable (JSON) -> Void) throws
+        -> (client: RegistrySession, name: String, tag: String, reference: String)
+    {
+        let reference = ImageRef.normalize(ref)
+        let parsed = try Reference.parse(reference)
+        guard let tag = parsed.tag ?? parsed.digest else { throw BackendError("invalid tag or digest in \(ref)") }
         let host = RegistryAuth.host(ofImage: ref)
-        let creds = Self.credentials(auth, for: host)
-        let client = try RegistrySession(host: host, credentials: creds, policy: policy) { progress(["status": .string($0)]) }
-        return (client, parsed)
+        let client = try RegistrySession(host: host, credentials: registries.credentials(auth, for: host), policy: registries.policy) {
+            progress(["status": .string($0)])
+        }
+        return (client, parsed.path, tag, reference)
     }
 
     func pull(_ ref: String, platform: String?, auth: RegistryAuth?, progress: @escaping @Sendable (JSON) -> Void) throws {
         let meter = ProgressMeter(progress)
         let wanted = platform.flatMap { try? Platform(from: $0) } ?? .current
-        let (client, parsed) = try session(ref, auth, progress)
-        guard let tag = parsed.tag ?? parsed.digest else { throw BackendError("invalid tag or digest in \(ref)") }
-        let name = parsed.path
-        let reference = ImageRef.normalize(ref)
+        let (client, name, tag, reference) = try target(ref, auth, progress)
         _ = try blocking { [store, content] in
             let root = try await client.resolve(name: name, tag: tag)
             let (id, dir) = try await content.newIngestSession()
@@ -199,10 +192,7 @@ final class EmbeddedImageBackend: ImageBackend, @unchecked Sendable {
 
     func push(_ ref: String, auth: RegistryAuth?, progress: @escaping @Sendable (JSON) -> Void) throws {
         let meter = ProgressMeter(progress)
-        let (client, parsed) = try session(ref, auth, progress)
-        guard let tag = parsed.tag ?? parsed.digest else { throw BackendError("invalid tag or digest in \(ref)") }
-        let name = parsed.path
-        let reference = ImageRef.normalize(ref)
+        let (client, name, tag, reference) = try target(ref, auth, progress)
         let current = Platform.current
         try blocking { [store, content] in
             let img = try await store.get(reference: reference)
@@ -219,52 +209,7 @@ final class EmbeddedImageBackend: ImageBackend, @unchecked Sendable {
         }
     }
 
-    /// pratico's own Keychain items (not Docker's, not Apple `container`'s), one per registry.
-    static let keychainDomain = "dev.pratico.registry"
-    static let keychain = KeychainHelper(securityDomain: keychainDomain)
-
-    func login(_ auth: RegistryAuth) throws {
-        let client = try RegistrySession(host: auth.server, credentials: (auth.username, auth.password), policy: policy)
-        do {
-            try blocking { try await client.ping() }
-        } catch let e as RegistryError where e.unauthorized {
-            throw APIError(401, e.description)
-        } catch {
-            throw APIError(500, "login to \(auth.server) failed: \(error)")
-        }
-        do { try Self.keychain.save(hostname: auth.server, username: auth.username, password: auth.password) } catch {
-            throw APIError(500, "pratico: cannot keep the login in the Keychain: \(error)")
-        }
-        writeState()
-    }
-
-    /// Kept logins, without passwords.
-    func logins() -> [JSON] {
-        ((try? Self.keychain.list()) ?? []).sorted { $0.hostname < $1.hostname }.map {
-            ["server": .string($0.hostname), "username": .string($0.username), "saved": .string(ISO8601DateFormatter().string(from: $0.modifiedDate))]
-        }
-    }
-
-    /// The `docker logout` the Docker CLI never sends to a daemon.
-    func logout(_ server: String) throws {
-        let host = RegistryAuth.host(server)
-        guard logins().contains(where: { $0["server"]?.string == host }) else { throw APIError(404, "pratico keeps no login for \(host)") }
-        do { try Self.keychain.delete(hostname: host) } catch { throw APIError(500, "cannot remove the login for \(host): \(error)") }
-        writeState()
-    }
-
-    func writeState() {
-        let state: JSON = ["policy": policy.summary, "warnings": .array(policy.warnings.map { .string($0) }), "logins": .array(logins())]
-        try? state.encoded().write(to: stateFile, options: .atomic)
-    }
-
-    /// The request's credentials for the image's own registry, else the ones `docker login`
-    /// kept (clients other than the Docker CLI rarely send any).
-    private static func credentials(_ auth: RegistryAuth?, for host: String) -> (username: String, password: String)? {
-        if let auth, auth.server == host { return (auth.username, auth.password) }
-        guard let kept = try? KeychainQuery().get(securityDomain: keychainDomain, hostname: host) else { return nil }
-        return (kept.username, kept.password)
-    }
+    func login(_ auth: RegistryAuth) throws { try registries.login(auth) }
 
     /// The Apple-shaped record `ImageService` reads, built from the store.
     static func record(_ img: Containerization.Image) async throws -> JSON {
@@ -332,24 +277,6 @@ final class ProgressMeter: @unchecked Sendable {
 
 /// Runs async work from one of the daemon's connection threads (never from a Swift
 /// concurrency thread, which this would block).
-/// A per-key answer computed once it is known.
-final class Memo<Key: Hashable, Value>: @unchecked Sendable {
-    private let lock = NSLock()
-    private var values: [Key: Value] = [:]
-
-    /// `compute` returning nil means "no answer yet": nothing is kept.
-    func answer(_ key: Key, _ compute: () -> Value?) -> Value? {
-        lock.lock()
-        if let v = values[key] { lock.unlock(); return v }
-        lock.unlock()
-        guard let v = compute() else { return nil }
-        lock.lock()
-        values[key] = v
-        lock.unlock()
-        return v
-    }
-}
-
 func blocking<T: Sendable>(_ op: @escaping @Sendable () async throws -> T) throws -> T {
     let result = Box<Result<T, any Error>?>(nil)
     let done = DispatchSemaphore(value: 0)

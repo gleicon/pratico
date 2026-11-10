@@ -441,3 +441,16 @@ private let grypeSample = Data(#"""
         #expect(RegistryAuth.schemeArgs(h).isEmpty, "\(h)")
     }
 }
+
+@Test func registryHTTPMatchesHostsPortsAndCIDRs() {
+    var p = RegistryPolicy()
+    p.httpHosts = ["10.0.0.0/8", "reg.local", "build:5000"]
+    p.httpLoopback = false
+    #expect(p.plainHTTPReason("10.1.2.3:5000") != nil)
+    #expect(p.plainHTTPReason("11.0.0.1") == nil)
+    #expect(p.plainHTTPReason("reg.local:443") != nil)  // a bare host covers its ports
+    #expect(p.plainHTTPReason("build:5000") != nil)
+    #expect(p.plainHTTPReason("build:5001") == nil)
+    #expect(p.plainHTTPReason("127.0.0.1:5000") == nil)
+    #expect(p.registryConfig["InsecureRegistryCIDRs"] == ["10.0.0.0/8"])
+}

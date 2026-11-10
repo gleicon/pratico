@@ -95,10 +95,17 @@ struct RegistryPolicy: @unchecked Sendable {
         return String(host.split(separator: ":").first ?? Substring(host)).lowercased()
     }
 
+    /// A `registry_http` entry is a host, a host:port, or an IPv4 CIDR (as Docker's
+    /// insecure-registries), which matches registries named by an address in it.
+    private static func matches(_ entry: String, _ host: String) -> Bool {
+        guard entry.contains("/") else { return entry == host || entry == hostName(host) }
+        return IPv4.cidr(entry).map { IPv4.contains($0, hostName(host)) } ?? false
+    }
+
     /// Why plain HTTP may be used for `host`, or nil when it may not.
     func plainHTTPReason(_ host: String) -> String? {
         let h = host.lowercased()
-        if httpHosts.contains(h) || httpHosts.contains(Self.hostName(h)) { return "registry_http in config.toml" }
+        if httpHosts.contains(where: { Self.matches($0, h) }) { return "registry_http in config.toml" }
         if httpLoopback && Self.isLoopback(h) { return "registry_http_loopback, a loopback registry" }
         return nil
     }
@@ -108,7 +115,7 @@ struct RegistryPolicy: @unchecked Sendable {
         var cidrs: [JSON] = httpLoopback ? ["127.0.0.0/8"] : []
         var indexes: [String: JSON] = ["docker.io": ["Name": "docker.io", "Mirrors": [], "Secure": true, "Official": true]]
         for h in httpHosts {
-            if let c = IPv4.cidr(h), h.contains("/") { cidrs.append(.string("\(IPv4.format(c.base))/\(c.prefix)")) } else {
+            if h.contains("/"), let c = IPv4.cidr(h) { cidrs.append(.string("\(IPv4.format(c.base))/\(c.prefix)")) } else {
                 indexes[h] = ["Name": .string(h), "Mirrors": [], "Secure": false, "Official": false]
             }
         }
@@ -368,12 +375,10 @@ final class RegistrySession: NSObject, ContentClient, URLSessionTaskDelegate, @u
         if let creds = credentials { request.setValue(Self.basicHeader(creds), forHTTPHeaderField: "Authorization") }
         let (data, response) = try await session.data(for: request, delegate: NoRedirects())
         guard let http = response as? HTTPURLResponse else { throw RegistryError(status: 502, description: "no response from \(realm)") }
-        guard http.value(forHTTPHeaderField: "WWW-Authenticate") == nil || http.statusCode == 200 else {
-            throw RegistryError(status: http.statusCode, description: "\(host): unauthorized: incorrect username or password")
-        }
         guard http.statusCode == 200 else {
-            if http.statusCode == 401 || http.statusCode == 403 {
-                throw RegistryError(status: http.statusCode, description: "\(host): unauthorized: incorrect username or password")
+            // A refusal, or a token server asking for credentials again: wrong ones.
+            if [401, 403].contains(http.statusCode) || http.value(forHTTPHeaderField: "WWW-Authenticate") != nil {
+                throw Self.wrongCredentials(host)
             }
             throw RegistryError(status: http.statusCode, description: "token request to \(realm) failed with response: \(http.statusCode)")
         }
@@ -460,9 +465,14 @@ final class RegistrySession: NSObject, ContentClient, URLSessionTaskDelegate, @u
         let (bytes, http) = try await send(nil) { URLRequest(url: url("/v2/")) }
         guard http.statusCode == 200 else {
             let e = await failure(http, bytes, "GET \(url("/v2/").absoluteString)")
-            if e.unauthorized { throw RegistryError(status: 401, description: "Get \"\(url("/v2/").absoluteString)\": unauthorized: incorrect username or password") }
+            if e.unauthorized { throw Self.wrongCredentials("Get \"\(url("/v2/").absoluteString)\"") }
             throw e
         }
+    }
+
+    /// Docker's wording, which scripts match on.
+    private static func wrongCredentials(_ what: String) -> RegistryError {
+        RegistryError(status: 401, description: "\(what): unauthorized: incorrect username or password")
     }
 
     // MARK: ContentClient
@@ -645,5 +655,23 @@ private final class ProbeTrust: NSObject, URLSessionTaskDelegate, @unchecked Sen
         guard let trust = challenge.protectionSpace.serverTrust else { return (.performDefaultHandling, nil) }
         if case .untrusted = RegistrySession.evaluate(trust, policy) { return (.cancelAuthenticationChallenge, nil) }
         return (.useCredential, URLCredential(trust: trust))
+    }
+}
+
+/// A per-key answer computed once it is known.
+private final class Memo<Key: Hashable, Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [Key: Value] = [:]
+
+    /// `compute` returning nil means "no answer yet": nothing is kept.
+    func answer(_ key: Key, _ compute: () -> Value?) -> Value? {
+        lock.lock()
+        if let v = values[key] { lock.unlock(); return v }
+        lock.unlock()
+        guard let v = compute() else { return nil }
+        lock.lock()
+        values[key] = v
+        lock.unlock()
+        return v
     }
 }

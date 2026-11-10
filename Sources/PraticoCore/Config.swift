@@ -44,7 +44,7 @@ public struct Config: Equatable, Sendable {
             choices: ["off", "malware", "kev", "critical"]),
         Key(name: "scan_allow", defaultValue: .strings([]), summary: "Image IDs allowed to run despite findings"),
         Key(name: "registry_http", defaultValue: .strings([]),
-            summary: "Registries (host or host:port) reached over plain HTTP, credentials included, like Docker's insecure-registries"),
+            summary: "Registries (host, host:port, or IPv4 CIDR) reached over plain HTTP, credentials included, like Docker's insecure-registries"),
         Key(name: "registry_http_loopback", defaultValue: .bool(true),
             summary: "Allow plain HTTP, credentials included, to registries on localhost and 127.0.0.0/8, as Docker does"),
         Key(name: "registry_ca", defaultValue: .strings([]),
