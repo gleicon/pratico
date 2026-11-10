@@ -98,7 +98,10 @@ networks cannot exchange a frame, because the switch never forwards one.
   spares that are link-down with no switch port.
   - Connect: the daemon binds a spare slot to the network and reserves an address; the
     shim's agent adds it and brings `ethN` up; then the switch registers the port. A
-    container's first network also gets the default route and the published ports.
+    container's first network also gets the default route and the published ports. If
+    the guest step fails, only that slot's binding is undone. Connects and disconnects
+    are serialized, so concurrent ones cannot take two slots for one network or undo
+    each other.
   - Disconnect: the switch drops the port first, so no frame reaches or leaves it from
     then on, even if the guest brings the link back up; its uplink flows end. Then the
     agent takes `ethN` down. Losing the primary network moves the default route and the
@@ -193,6 +196,8 @@ slice can switch over per operation group.
 | Asset fetch, pinned digests | `scripts/fetch-runtime-assets.sh`, `make assets` → `.build/runtime-assets/{vmlinux,vminit/}` (app: `Contents/Resources/runtime`) |
 | Runtime bootstrap (store, `vminit` load, `initfs.ext4`) | `EmbeddedRuntime` in `Sources/PraticoDaemonKit/Embedded.swift` |
 | Images on the store | `EmbeddedImageBackend` in `ImageBackend.swift`; `ImageService` is backend-agnostic |
+| Registry client, trust, logins | `RegistrySession`, `RegistryPolicy` in `RegistrySession.swift`; `Registries` (policy, Keychain logins, `registries.json`) in `Registries.swift` |
+| NIC slots | `ShimNIC`, `NICSlots` (slots plus the primary one; bind, revert, unbind) in `Net/NIC.swift`; hot connect and disconnect in `NetworkService` and `ContainerNetworks.swift` |
 | Shim (VM owner) | `ShimHost`, `ShimControl` in `Shim.swift`; executable `Sources/pratico-shim` |
 | Daemon side | `ShimClient` (spawn in its own session, control socket, exit watch via `DispatchSource` on the pid); `ContainerService` branches on `embedded` |
 | Tests | `make e2e-embedded` (`e2e/embedded.sh`): fake `container` binary that fails the suite if called |
@@ -209,7 +214,10 @@ EOF), `POST /exec` (`{"args", "timeout"}` → `{"exitCode", "output"}`, used by
 healthchecks and stat), `POST /exec-stream` (hijacked; Docker's raw or multiplexed
 framing), `GET /exec-status?id=`, `POST /exec-resize?id=&h=&w=`, `POST /copy-out?src=&dst=`
 and `POST /copy-in?src=&dst=&mode=` (host paths must be inside the container directory),
-`GET /stats` (agent counters under the CLI backend's keys). SIGTERM to a shim stops its
+`GET /stats` (agent counters under the CLI backend's keys), `POST /nic` (a `NICChange`:
+`up` with slot, address and an optional gateway, `down`, or `route`; the shim remembers
+which addresses each slot holds, since it outlives daemon restarts and the agent cannot
+delete one). SIGTERM to a shim stops its
 container like `docker stop` (SIGKILL after 10 s).
 
 Learned while building:
@@ -269,7 +277,8 @@ Learned while building:
     CA vouched. macOS rejects a self-signed CA certificate used directly as a server's;
     use a CA plus a leaf.
   - Plain HTTP: loopback by default (`registry_http_loopback`), others by
-    `registry_http`; HTTPS is still tried first, and an untrusted certificate never
+    `registry_http` (hosts, host:port, or IPv4 CIDRs, matched the same way for
+    `docker info` and for requests); HTTPS is still tried first, and an untrusted certificate never
     falls back to HTTP.
   - Awareness: `docker info` warnings and `RegistryConfig`, a note in pull and push
     output, the daemon log, `registries.json` and the menubar.

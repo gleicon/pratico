@@ -22,6 +22,8 @@
 - CLI backend: never leave an Apple container frozen without the daemon's pause agent (D-15). `container stop`, `kill`, and `rm -f` hang on a frozen VM; recovery is killing its `container-runtime-linux` process.
 - CLI backend: Apple vmnet's `default` network reclaims `bridge100`, breaking a custom network that activated while `default` was idle; the `pratico-anchor` pause container works around it (D-25). Gone with pratico-net.
 - Virtualization.framework allows 4 network devices per VM (`VZErrorDomain Code=2 "The number of network devices is greater than the maximum number supported"`); `ShimNIC.slots` is 4 for that reason.
+- `spec.json`'s `nics` is a `NICSlots` object (`slots`, `primary`). `NICSlots.init(from:)` still reads the older plain array, and its per-NIC `primary` flag, for VMs started by an older daemon; keep it while such VMs may still run.
+- The shim's `GuestAddresses`, not the daemon, records which addresses a guest slot holds: the shim outlives daemon restarts, and vminitd's `addressAdd` (netlink `NLM_F_EXCL`) fails on a duplicate without an errno the daemon can see.
 - vminitd has no address or route delete RPC: a hot-disconnected slot keeps its address on a down link. The switch, not the guest, is what cuts traffic; keep every delivery path behind its port registry (`NetSwitch.deliver`).
 - `SSL_CERT_FILE` replaces the daemon registry client's trust roots (Docker Hub stops verifying). macOS rejects a self-signed CA cert used directly as a TLS server cert; test registries need a CA plus a leaf.
 - `bash` reads scripts while running: never edit `e2e/*.sh` during a run.
