@@ -90,6 +90,10 @@ key and line named.
 | `scan` | `true` | scan pulled images in the background |
 | `scan_block` | `"kev"` | `off`, `malware`, `kev`, or `critical`: what stops and blocks an image |
 | `scan_allow` | `[]` | image IDs allowed despite findings |
+| `registry_http_loopback` | `true` | embedded runtime: plain HTTP, credentials included, to localhost registries, as Docker |
+| `registry_http` | `[]` | embedded runtime: other registries (`host[:port]`) allowed plain HTTP, Docker's insecure-registries |
+| `registry_ca` | `[]` | embedded runtime: PEM files of extra CAs, added to the system's trusted roots |
+| `registry_system_roots` | `true` | embedded runtime: `false` trusts only `registry_ca` |
 
 Image scanning uses osv-scanner and grype when installed, plus CISA's KEV list; see
 [docs/design/image-scanning.md](docs/design/image-scanning.md).

@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Observation
 import PraticoCore
@@ -18,6 +19,7 @@ final class DaemonController {
     private(set) var error: String?
     private(set) var needsApproval = false
     private(set) var alerts: [Alert] = []
+    private(set) var registries = Registries()
     /// Time of the newest alert the user has seen (menu opened or notified).
     private var seenUntil = UserDefaults.standard.string(forKey: "alertsSeenUntil") ?? ""
     let socketPath = Pratico.socketPath().path
@@ -35,6 +37,42 @@ final class DaemonController {
         var title: String
         var detail: String
         var id: String { time + title }
+    }
+
+    /// `registries.json`: what pratico trusts beyond HTTPS with the system's roots, and
+    /// the logins it keeps, so none of it is a surprise.
+    struct Registries: Decodable, Equatable {
+        struct Login: Decodable, Equatable, Identifiable {
+            var server: String
+            var username: String
+            var id: String { server }
+        }
+        struct Policy: Decodable, Equatable {
+            var httpLoopback = true
+            var systemRoots = true
+        }
+        var policy = Policy()
+        var warnings: [String] = []
+        var logins: [Login] = []
+    }
+
+    func removeLogin(_ server: String) {
+        let path = "/pratico/registries/logins/" + (server.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: "/"))) ?? server)
+        Task.detached { _ = DaemonProbe.request("DELETE", path) }
+        registries.logins.removeAll { $0.server == server }
+    }
+
+    func openConfig() {
+        let file = Pratico.home().appending(path: "config.toml")
+        if !FileManager.default.fileExists(atPath: file.path) { FileManager.default.createFile(atPath: file.path, contents: nil) }
+        NSWorkspace.shared.open(file)
+    }
+
+    private func refreshRegistries() {
+        guard let data = try? Data(contentsOf: Pratico.registriesPath()),
+            let r = try? JSONDecoder().decode(Registries.self, from: data), r != registries
+        else { return }
+        registries = r
     }
 
     var hasUnseenSerious: Bool { alerts.contains { $0.level == "serious" && $0.time > seenUntil } }
@@ -115,6 +153,7 @@ final class DaemonController {
                 guard let self else { return }
                 self.apply(version)
                 self.refreshAlerts()
+                self.refreshRegistries()
                 try? await Task.sleep(for: .seconds(1))
             }
         }

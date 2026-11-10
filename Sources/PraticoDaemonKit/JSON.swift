@@ -47,8 +47,15 @@ public enum JSON: Sendable, Equatable, Codable {
     }
 
     public subscript(key: String) -> JSON? {
-        if case .object(let o) = self { return o[key] }
-        return nil
+        get {
+            if case .object(let o) = self { return o[key] }
+            return nil
+        }
+        set {
+            guard case .object(var o) = self else { return }
+            o[key] = newValue
+            self = .object(o)
+        }
     }
 
     public var string: String? { if case .string(let v) = self { return v }; return nil }

@@ -43,6 +43,14 @@ public struct Config: Equatable, Sendable {
             summary: "Findings that stop and block an image's containers: off, malware, kev (malware + exploited CVEs), critical (kev + CVSS >= 9)",
             choices: ["off", "malware", "kev", "critical"]),
         Key(name: "scan_allow", defaultValue: .strings([]), summary: "Image IDs allowed to run despite findings"),
+        Key(name: "registry_http", defaultValue: .strings([]),
+            summary: "Registries (host or host:port) reached over plain HTTP, credentials included, like Docker's insecure-registries"),
+        Key(name: "registry_http_loopback", defaultValue: .bool(true),
+            summary: "Allow plain HTTP, credentials included, to registries on localhost and 127.0.0.0/8, as Docker does"),
+        Key(name: "registry_ca", defaultValue: .strings([]),
+            summary: "PEM files of extra CA certificates trusted for registries, added to the system's trusted roots"),
+        Key(name: "registry_system_roots", defaultValue: .bool(true),
+            summary: "Trust the system's roots for registries; false trusts only registry_ca"),
     ]
 
     /// Values set in the file, by key.
@@ -60,6 +68,10 @@ public struct Config: Equatable, Sendable {
     public var scan: Bool { if case .bool(let v) = value("scan") { v } else { true } }
     public var scanBlock: String { if case .string(let v) = value("scan_block") { v } else { "kev" } }
     public var scanAllow: [String] { if case .strings(let v) = value("scan_allow") { v } else { [] } }
+    public var registryHTTP: [String] { if case .strings(let v) = value("registry_http") { v } else { [] } }
+    public var registryHTTPLoopback: Bool { if case .bool(let v) = value("registry_http_loopback") { v } else { true } }
+    public var registryCA: [String] { if case .strings(let v) = value("registry_ca") { v } else { [] } }
+    public var registrySystemRoots: Bool { if case .bool(let v) = value("registry_system_roots") { v } else { true } }
 
     // MARK: Loading
 

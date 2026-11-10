@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 
+import PraticoCore
 @testable import PraticoDaemonKit
 
 @Test(arguments: [
@@ -89,6 +90,7 @@ func normalizesImageRefs(input: String, expected: String) {
 @Test func statsCPUDeltaGivesDockerPercent() throws {
     let rec = ContainerRecord(id: "abc", name: "t1", appleId: "abc", image: "alpine", imageId: "sha256:x",
                               created: Date(), path: "sh", args: [], config: [:], hostConfig: [:])
+    _ = StatsService.epoch  // as StatsService.init does: samples before the epoch clamp to 0
     let t = Date()
     let pre = StatsService.Sample(time: t, raw: ["cpuUsageUsec": 1_000_000])
     let now = StatsService.Sample(time: t.addingTimeInterval(2), raw: ["cpuUsageUsec": 3_000_000])
@@ -356,4 +358,52 @@ private let grypeSample = Data(#"""
     #expect(!held.claim(1, "172.18.0.3/24"))
     held.release(1, "172.18.0.3/24")
     #expect(held.claim(1, "172.18.0.3/24"))
+}
+
+@Test func registryPolicyReadsConfigAndCAs() throws {
+    let dir = FileManager.default.temporaryDirectory.appending(path: "pratico-ca-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    // A real certificate (any will do): macOS must be able to read it.
+    let pem = dir.appending(path: "ca.pem")
+    let p = Process()
+    p.executableURL = URL(filePath: "/usr/bin/openssl")
+    p.arguments = ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=pratico test CA",
+                   "-keyout", dir.appending(path: "ca.key").path, "-out", pem.path]
+    p.standardError = FileHandle.nullDevice
+    try p.run()
+    p.waitUntilExit()
+    let config = try Config.parse("""
+        registry_http = ["10.0.0.5:5000"]
+        registry_ca = ["\(pem.path)"]
+        """)
+    let policy = try RegistryPolicy.load(config, environment: [:])
+    #expect(policy.cas.count == 1 && policy.cas[0].subject == "pratico test CA" && policy.cas[0].sha256.count == 64)
+    #expect(policy.plainHTTPReason("10.0.0.5:5000") != nil)
+    #expect(policy.plainHTTPReason("127.0.0.1:5000") != nil)
+    #expect(policy.plainHTTPReason("ghcr.io") == nil)
+    #expect(policy.warnings.count == 2)
+    #expect(policy.registryConfig["IndexConfigs"]?["10.0.0.5:5000"]?["Secure"] == .bool(false))
+
+    #expect(throws: (any Error).self) { try RegistryPolicy.load(Config.parse("registry_ca = [\"/nonexistent.pem\"]"), environment: [:]) }
+    #expect(throws: (any Error).self) { try RegistryPolicy.load(Config.parse("registry_system_roots = false"), environment: [:]) }
+    let strict = try RegistryPolicy.load(Config.parse("registry_http_loopback = false"), environment: [:])
+    #expect(strict.plainHTTPReason("localhost:5000") == nil)
+}
+
+@Test func registryChallengesParse() {
+    let c = RegistrySession.parseChallenges(#"Bearer realm="https://auth.docker.io/token",service="registry.docker.io",scope="repository:library/alpine:pull""#)
+    #expect(c.count == 1 && c[0].type == "bearer")
+    #expect(c[0].params["realm"] == "https://auth.docker.io/token")
+    #expect(c[0].params["scope"] == "repository:library/alpine:pull")
+    let b = RegistrySession.parseChallenges(#"Basic realm="e2e""#)
+    #expect(b.first?.type == "basic" && b.first?.params["realm"] == "e2e")
+}
+
+@Test func registryProxyComesFromTheEnvironment() {
+    #expect(RegistrySession.environmentProxy([:]) == nil)
+    let d = RegistrySession.environmentProxy(["HTTPS_PROXY": "http://proxy.corp:3128", "NO_PROXY": "localhost, .corp"])
+    #expect(d?[kCFNetworkProxiesHTTPSProxy] as? String == "proxy.corp")
+    #expect(d?[kCFNetworkProxiesHTTPSPort] as? Int == 3128)
+    #expect(d?["ExceptionsList"] as? [String] == ["localhost", ".corp"])
 }

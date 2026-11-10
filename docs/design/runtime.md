@@ -258,11 +258,21 @@ Learned while building:
 - `docker login` (6): the daemon pings the registry's `/v2/` with the credentials
   (Basic or Bearer challenge) and keeps them as Internet-password items with security
   domain `dev.pratico.registry`. Pulls and pushes use a request's `X-Registry-Auth`
-  first, then that login. Loopback registries get HTTPS when they answer TLS, else
-  plain HTTP; Containerization refuses credentials over plain HTTP, so a password-
-  protected local registry needs TLS. A private CA goes in `SSL_CERT_FILE`, which
-  replaces the system trust roots for the daemon's registry client (Containerization's
-  behavior), and macOS rejects a self-signed CA certificate used directly as a server's.
+  first, then that login. The menubar's Registries menu removes a kept login.
+- Registry client (SPEC D-29): pratico's own, on URLSession
+  (`Sources/PraticoDaemonKit/RegistrySession.swift`), plugged into Containerization's
+  `ImportOperation`/`ExportOperation`. Containerization's client refuses credentials
+  over plain HTTP and only takes CAs through `SSL_CERT_FILE`, which replaces the
+  system's roots. Its guards are kept: digest checks, no substituted pinned digest,
+  size bounds, token realms in the registry's own domain.
+  - Trust: the system's roots first, then each `registry_ca`, so pratico can say which
+    CA vouched. macOS rejects a self-signed CA certificate used directly as a server's;
+    use a CA plus a leaf.
+  - Plain HTTP: loopback by default (`registry_http_loopback`), others by
+    `registry_http`; HTTPS is still tried first, and an untrusted certificate never
+    falls back to HTTP.
+  - Awareness: `docker info` warnings and `RegistryConfig`, a note in pull and push
+    output, the daemon log, `registries.json` and the menubar.
 - Interim limits: IPv6 port binds (not planned until there is IPv6 routing).
 
 ## Risks and costs

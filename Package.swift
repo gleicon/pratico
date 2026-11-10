@@ -12,6 +12,9 @@ let package = Package(
     dependencies: [
         // Embedded runtime (docs/design/runtime.md); pinned, its API is pre-1.0.
         .package(url: "https://github.com/apple/containerization.git", exact: "0.54.0"),
+        // Already in the graph through containerization; named for pratico's registry client.
+        .package(url: "https://github.com/apple/swift-crypto.git", from: "4.0.0"),
+        .package(url: "https://github.com/apple/swift-nio.git", from: "2.0.0"),
     ],
     targets: [
         .target(name: "PraticoCore"),
@@ -23,12 +26,14 @@ let package = Package(
                 .product(name: "ContainerizationOCI", package: "containerization"),
                 .product(name: "ContainerizationExtras", package: "containerization"),
                 .product(name: "ContainerizationOS", package: "containerization"),
+                .product(name: "Crypto", package: "swift-crypto"),
+                .product(name: "NIOCore", package: "swift-nio"),
             ]),
         .executableTarget(name: "pratico-daemon", dependencies: ["PraticoCore", "PraticoDaemonKit"]),
         .executableTarget(name: "pratico-menubar", dependencies: ["PraticoCore"]),
         .executableTarget(name: "pratico-shim", dependencies: ["PraticoDaemonKit"]),
         .executableTarget(name: "pratico-runtime-probe", dependencies: ["PraticoDaemonKit"]),
         .testTarget(name: "PraticoCoreTests", dependencies: ["PraticoCore"]),
-        .testTarget(name: "PraticoDaemonKitTests", dependencies: ["PraticoDaemonKit"]),
+        .testTarget(name: "PraticoDaemonKitTests", dependencies: ["PraticoCore", "PraticoDaemonKit"]),
     ]
 )

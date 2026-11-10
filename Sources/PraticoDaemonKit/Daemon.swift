@@ -18,6 +18,10 @@ public final class Daemon: @unchecked Sendable {
     /// Embedded runtime asked for but could not open: refuse to serve rather than fall back.
     let embeddedStartupFailed: Bool
 
+    /// Refuses unreadable `registry_ca` files and impossible trust settings at startup
+    /// (exit 4, like any configuration error).
+    public static func checkRegistryConfig(_ config: Config) throws { _ = try RegistryPolicy.load(config) }
+
     public init(home: URL, config: Config = Config(), socketPath: String? = nil, runtime: AppleContainer = AppleContainer()) {
         self.home = home
         self.socketPath = socketPath ?? home.appending(path: "docker.sock").path
@@ -28,9 +32,10 @@ public final class Daemon: @unchecked Sendable {
         var images = ImageService(runtime: runtime)
         if ProcessInfo.processInfo.environment["PRATICO_RUNTIME"] == "embedded" {
             switch EmbeddedContainers.open(home: home) {
-            case .success(let (e, store)):
+            case .success(let (e, store, content)):
                 embedded = e
-                images = ImageService(backend: EmbeddedImageBackend(store: store))
+                let policy = (try? RegistryPolicy.load(config)) ?? RegistryPolicy()  // checked in main
+                images = ImageService(backend: EmbeddedImageBackend(store: store, content: content, policy: policy, home: home))
             case .failure(let error):
                 FileHandle.standardError.write(Data("pratico-daemon: embedded runtime unavailable: \(error.message)\n".utf8))
             }
@@ -119,6 +124,17 @@ public final class Daemon: @unchecked Sendable {
             }
             try images.backend.login(auth)
             conn.json(200, ["Status": "Login Succeeded", "IdentityToken": ""])
+            return .keepAlive
+        // pratico's own endpoints (not Docker's): the menubar's view of registry trust and logins.
+        case ("GET", "pratico") where parts.count == 2 && parts[1] == "registries":
+            guard let backend = images.backend as? EmbeddedImageBackend else { throw APIError(501, "pratico: registry settings are on the embedded runtime only") }
+            conn.json(200, ["policy": backend.policy.summary, "warnings": .array(backend.policy.warnings.map { .string($0) }),
+                            "logins": .array(backend.logins())])
+            return .keepAlive
+        case ("DELETE", "pratico") where parts.count == 4 && parts[1] == "registries" && parts[2] == "logins":
+            guard let backend = images.backend as? EmbeddedImageBackend else { throw APIError(501, "pratico: registry settings are on the embedded runtime only") }
+            try backend.logout(parts[3].removingPercentEncoding ?? parts[3])
+            conn.respond(204)
             return .keepAlive
         case ("GET", "info") where parts.count == 1:
             conn.json(200, info())
@@ -314,7 +330,8 @@ public final class Daemon: @unchecked Sendable {
 
     func info() -> JSON {
         let c = containers.counts
-        return [
+        let policy = (images.backend as? EmbeddedImageBackend)?.policy
+        var out: JSON = [
             "ID": "pratico",
             "Containers": .int(Int64(c.total)),
             "ContainersRunning": .int(Int64(c.running)),
@@ -336,6 +353,13 @@ public final class Daemon: @unchecked Sendable {
             "Labels": [],
             "Warnings": [],
         ]
+        if let policy {
+            // The CLI prints "Insecure Registries" from this and each warning as WARNING: …
+            out["RegistryConfig"] = policy.registryConfig
+            out["Warnings"] = .array(policy.warnings.map { .string($0) })
+            out["OperatingSystem"] = "macOS (pratico)"
+        }
+        return out
     }
 }
 

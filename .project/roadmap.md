@@ -52,6 +52,7 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 - [x] Hot connect/disconnect on running containers: 4 NIC slots per VM (the VZ maximum), disconnect cuts traffic at the switch, default route and published ports follow the primary network
 - [x] `docker login` and push on the OCI client: credentials checked with the registry, kept in pratico's own Keychain items, used when a client sends none
 - [x] Scans read the embedded store (exports go through the image backend)
+- [x] Registry trust you choose and can see: plain HTTP for loopback (as Docker) and listed hosts, extra CAs added to the system's roots, system proxy/PAC; `docker info`, pull/push output and the menubar say so; kept logins removable from the menubar
 - [ ] Egress intercept: sandwich-proxy engine on container HTTP/HTTPS flows, per-container opt-in, log/replay/HAR/threat feeds
 - [ ] `container` CLI adapter, `/etc/hosts` sync and default-network anchor removed; SPEC and docs updated; acknowledgements (licenses) in the app and DMG
 

@@ -284,10 +284,11 @@ check "inspect by tag" test "$(docker image inspect pratico-e2e/emb:1 --format '
 docker save -o "$HOME_DIR/save.tar" alpine 2>/dev/null
 check "docker save writes a Docker archive" tar -xOf "$HOME_DIR/save.tar" manifest.json
 docker rmi pratico-e2e/emb:1 >/dev/null
-# docker login (pratico's own Keychain items): a TLS, password-protected registry:2
-# running on pratico itself.
-REG_PORT=15001
-REG="127.0.0.1:$REG_PORT"
+# Registries (SPEC D-29): logins in pratico's own Keychain items, plain HTTP for
+# loopback as Docker, extra CAs from config.toml added to the system's roots, and every
+# departure from verified HTTPS reported. Both registries run on pratico itself.
+REG="127.0.0.1:15001"   # TLS, signed by a private CA
+PLAIN="127.0.0.1:15002" # plain HTTP
 REG_DIR="$HOME_DIR/registry"
 REG_PASS="e2e-$(openssl rand -hex 8)"
 mkdir -p "$REG_DIR"
@@ -299,32 +300,73 @@ printf 'basicConstraints=CA:FALSE\nextendedKeyUsage=serverAuth\nsubjectAltName=I
 openssl x509 -req -in "$REG_DIR/leaf.csr" -CA "$REG_DIR/ca.pem" -CAkey "$REG_DIR/ca.key" -CAcreateserial -days 1 \
     -extfile "$REG_DIR/leaf.ext" -out "$REG_DIR/cert.pem" >/dev/null 2>&1
 htpasswd -Bbn e2euser "$REG_PASS" >"$REG_DIR/htpasswd"
-reg_cleanup() { security delete-internet-password -s "$REG" -d dev.pratico.registry >/dev/null 2>&1; cleanup; }
+reg_cleanup() {
+    for r in "$REG" "$PLAIN"; do security delete-internet-password -s "$r" -d dev.pratico.registry >/dev/null 2>&1; done
+    cleanup
+}
 trap reg_cleanup EXIT
-docker pull -q registry:2 >/dev/null 2>&1  # SSL_CERT_FILE replaces the trust roots, Docker Hub's too
+wait_401() { for _ in $(seq 100); do [ "$(curl -sk -o /dev/null -w '%{http_code}' "$1/v2/")" = 401 ] && return; sleep 0.2; done; }
+api() { curl -s --unix-socket "$SOCK" "$@"; }
+
+printf 'registry_ca = ["%s"]\n' "$REG_DIR/ca.pem" >"$HOME_DIR/config.toml"
 stop_daemon
-SSL_CERT_FILE="$REG_DIR/ca.pem" start_daemon
+start_daemon
+expect_has "docker info names the extra CA" "$(docker info 2>&1)" 'extra CA, "pratico e2e CA"'
+expect_has "docker info lists loopback as insecure" "$(docker info 2>&1)" "127.0.0.0/8"
+check "an extra CA leaves the system's roots in place (Docker Hub verifies)" docker pull -q registry:2
 docker run -d --name e-reg -p "$REG:5000" -v "$REG_DIR:/auth" \
     -e REGISTRY_AUTH=htpasswd -e REGISTRY_AUTH_HTPASSWD_REALM=e2e -e REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd \
     -e REGISTRY_HTTP_TLS_CERTIFICATE=/auth/cert.pem -e REGISTRY_HTTP_TLS_KEY=/auth/key.pem registry:2 >/dev/null 2>&1
-for _ in $(seq 100); do
-    [ "$(curl -sk -o /dev/null -w '%{http_code}' "https://$REG/v2/")" = 401 ] && break
-    sleep 0.2
-done
+docker run -d --name e-plain -p "$PLAIN:5000" -v "$REG_DIR:/auth" \
+    -e REGISTRY_AUTH=htpasswd -e REGISTRY_AUTH_HTPASSWD_REALM=e2e -e REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd registry:2 >/dev/null 2>&1
+wait_401 "https://$REG"
+wait_401 "http://$PLAIN"
+
 docker tag alpine "$REG/e2e/alpine:1"
 if docker push "$REG/e2e/alpine:1" >/dev/null 2>&1; then bad "push without login is refused"; else ok "push without login is refused"; fi
 expect_has "docker login with a wrong password fails" "$(echo wrong | docker login "$REG" -u e2euser --password-stdin 2>&1)" \
     "incorrect username or password"
 expect_has "docker login succeeds" "$(echo "$REG_PASS" | docker login "$REG" -u e2euser --password-stdin 2>&1)" "Login Succeeded"
-check "push to a private registry" docker push "$REG/e2e/alpine:1"
+expect_has "push says which extra CA vouched for the registry" "$(docker push "$REG/e2e/alpine:1" 2>&1)" \
+    'trusted through an extra CA, "pratico e2e CA"'
 docker rmi "$REG/e2e/alpine:1" >/dev/null
 check "pull from a private registry" docker pull "$REG/e2e/alpine:1"
 docker rmi "$REG/e2e/alpine:1" >/dev/null
 # No X-Registry-Auth: the daemon uses the login it kept.
 expect_has "a kept login serves clients that send no credentials" \
-    "$(curl -s --unix-socket "$SOCK" -X POST "http://d/images/create?fromImage=$REG/e2e/alpine&tag=1")" "Downloaded newer image"
-docker rm -f e-reg >/dev/null
-docker rmi "$REG/e2e/alpine:1" registry:2 >/dev/null 2>&1
+    "$(api -X POST "http://d/images/create?fromImage=$REG/e2e/alpine&tag=1")" "Downloaded newer image"
+docker rmi "$REG/e2e/alpine:1" >/dev/null
+
+# Plain HTTP with credentials on loopback, as Docker allows, and said so.
+expect_has "docker login to a plain-HTTP loopback registry" \
+    "$(echo "$REG_PASS" | docker login "$PLAIN" -u e2euser --password-stdin 2>&1)" "Login Succeeded"
+docker tag alpine "$PLAIN/e2e/alpine:1"
+expect_has "push over plain HTTP says it is not encrypted" "$(docker push "$PLAIN/e2e/alpine:1" 2>&1)" "not encrypted"
+docker rmi "$PLAIN/e2e/alpine:1" >/dev/null
+check "pull over plain HTTP" docker pull "$PLAIN/e2e/alpine:1"
+docker rmi "$PLAIN/e2e/alpine:1" >/dev/null
+
+state=$(cat "$HOME_DIR/registries.json")
+expect_has "registries.json lists the kept logins" "$state" "\"server\":\"$PLAIN\""
+if grep -qF "$REG_PASS" <<<"$state"; then bad "registries.json holds no password"; else ok "registries.json holds no password"; fi
+expect_eq "a kept login can be removed" "$(api -o /dev/null -w '%{http_code}' -X DELETE "http://d/pratico/registries/logins/$REG")" "204"
+expect_has "a removed login no longer serves" "$(api -X POST "http://d/images/create?fromImage=$REG/e2e/alpine&tag=1")" "requires a login"
+
+# Locked down: no plain HTTP, even on loopback.
+printf 'registry_ca = ["%s"]\nregistry_http_loopback = false\n' "$REG_DIR/ca.pem" >"$HOME_DIR/config.toml"
+stop_daemon
+start_daemon
+if echo "$REG_PASS" | docker login "$PLAIN" -u e2euser --password-stdin >/dev/null 2>&1; then
+    bad "registry_http_loopback = false refuses plain HTTP"
+else ok "registry_http_loopback = false refuses plain HTTP"; fi
+printf 'registry_ca = ["/nonexistent/ca.pem"]\n' >"$HOME_DIR/config.toml"
+stop_daemon
+"$BIN/pratico-daemon" --home "$HOME_DIR" >/dev/null 2>&1
+expect_eq "an unreadable registry_ca stops the daemon (exit 4)" "$?" "4"
+rm -f "$HOME_DIR/config.toml"
+start_daemon
+docker rm -f e-reg e-plain >/dev/null
+docker rmi registry:2 >/dev/null 2>&1
 
 check "rmi removes the image" docker rmi alpine
 if [ -s "$HOME_DIR/apple-calls" ]; then bad "no Apple container CLI calls" "$(head -3 "$HOME_DIR/apple-calls")"; else ok "no Apple container CLI calls"; fi

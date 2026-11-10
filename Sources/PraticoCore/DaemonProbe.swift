@@ -10,6 +10,11 @@ public enum DaemonProbe {
 
     /// `GET <path>` with a short timeout; nil when the daemon is not answering.
     public static func get(_ path: String, socket: URL = Pratico.socketPath(), timeout: Int = 1) -> Response? {
+        request("GET", path, socket: socket, timeout: timeout)
+    }
+
+    /// One bodiless request (`GET`, `DELETE`); nil when the daemon is not answering.
+    public static func request(_ method: String, _ path: String, socket: URL = Pratico.socketPath(), timeout: Int = 1) -> Response? {
         let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { return nil }
         defer { close(fd) }
@@ -33,7 +38,7 @@ public enum DaemonProbe {
         }
         guard rc == 0 else { return nil }
 
-        let request = Array("GET \(path) HTTP/1.1\r\nHost: pratico\r\nConnection: close\r\n\r\n".utf8)
+        let request = Array("\(method) \(path) HTTP/1.1\r\nHost: pratico\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".utf8)
         guard write(fd, request, request.count) == request.count else { return nil }
 
         var data = Data()
@@ -55,6 +60,8 @@ extension Pratico {
     /// Where the daemon records why it refused to start, for the menubar to show (SPEC FR-3, FR-38).
     /// Scan alerts the daemon writes for the menubar (SPEC D-24).
     public static func alertsPath(home: URL = home()) -> URL { home.appending(path: "alerts.json") }
+    /// Registry trust settings in effect and kept logins (no passwords), written by the daemon.
+    public static func registriesPath(home: URL = home()) -> URL { home.appending(path: "registries.json") }
 
     public static func startupErrorPath(home: URL = home()) -> URL {
         home.appending(path: "daemon.err", directoryHint: .notDirectory)

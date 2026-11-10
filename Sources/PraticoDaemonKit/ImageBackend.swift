@@ -1,6 +1,7 @@
 import Containerization
 import ContainerizationExtras
 import ContainerizationOCI
+import ContainerizationOS
 import Foundation
 
 /// Where images live. `ImageService` keeps the Docker semantics on top; a backend
@@ -115,10 +116,24 @@ struct AppleImageBackend: ImageBackend {
 /// software involved; registry credentials go straight to the registry client.
 final class EmbeddedImageBackend: ImageBackend, @unchecked Sendable {
     let store: ImageStore
+    let content: LocalContentStore
+    let policy: RegistryPolicy
+    /// `~/.pratico/registries.json`: the trust settings in effect and the kept logins
+    /// (never passwords), for the menubar.
+    let stateFile: URL
     /// Image IDs used by Docker containers; set by the daemon.
     var usedBy: @Sendable () -> Set<String> = { [] }
 
-    init(store: ImageStore) { self.store = store }
+    init(store: ImageStore, content: LocalContentStore, policy: RegistryPolicy = RegistryPolicy(), home: URL? = nil) {
+        self.store = store
+        self.content = content
+        self.policy = policy
+        stateFile = (home ?? FileManager.default.temporaryDirectory).appending(path: "registries.json")
+        if home != nil {
+            for w in policy.warnings { FileHandle.standardError.write(Data("pratico-daemon: \(w)\n".utf8)) }
+            writeState()
+        }
+    }
 
     func images() -> [JSON] {
         (try? blocking { [store] in
@@ -147,25 +162,53 @@ final class EmbeddedImageBackend: ImageBackend, @unchecked Sendable {
         try blocking { [store] in try await store.delete(reference: ref, performCleanup: true) }
     }
 
+    /// pratico's registry client for the image's registry, with the request's credentials
+    /// for that registry or the login `docker login` kept. Its notes (plain HTTP, an extra
+    /// CA) go to the client's progress output.
+    private func session(_ ref: String, _ auth: RegistryAuth?, _ progress: @escaping @Sendable (JSON) -> Void) throws -> (RegistrySession, Reference) {
+        let parsed = try Reference.parse(ImageRef.normalize(ref))
+        let host = RegistryAuth.host(ofImage: ref)
+        let creds = Self.credentials(auth, for: host)
+        let client = try RegistrySession(host: host, credentials: creds, policy: policy) { progress(["status": .string($0)]) }
+        return (client, parsed)
+    }
+
     func pull(_ ref: String, platform: String?, auth: RegistryAuth?, progress: @escaping @Sendable (JSON) -> Void) throws {
         let meter = ProgressMeter(progress)
         let wanted = platform.flatMap { try? Platform(from: $0) } ?? .current
-        let host = RegistryAuth.host(ofImage: ref)
-        let credentials = Self.credentials(auth, for: host)
-        _ = try blocking { [store] in
-            try await store.pull(reference: ref, platform: wanted, insecure: Self.insecure(host), auth: credentials,
-                                 progress: { events in meter.record(events) })
+        let (client, parsed) = try session(ref, auth, progress)
+        guard let tag = parsed.tag ?? parsed.digest else { throw BackendError("invalid tag or digest in \(ref)") }
+        let name = parsed.path
+        let reference = ImageRef.normalize(ref)
+        _ = try blocking { [store, content] in
+            let root = try await client.resolve(name: name, tag: tag)
+            let (id, dir) = try await content.newIngestSession()
+            let operation = ImageStore.ImportOperation(name: name, contentStore: content, client: client, ingestDir: dir,
+                                                       progress: { events in meter.record(events) })
+            do {
+                let index = try await operation.import(root: root, matcher: { wanted.os == $0.os && wanted.architecture == $0.architecture && (wanted.variant == nil || wanted.variant == $0.variant) })
+                _ = try await content.completeIngestSession(id)
+                return try await store.create(description: Image.Description(reference: reference, descriptor: index))
+            } catch {
+                try? await content.cancelIngestSession(id)
+                throw error
+            }
         }
         meter.flush()
     }
 
     func push(_ ref: String, auth: RegistryAuth?, progress: @escaping @Sendable (JSON) -> Void) throws {
         let meter = ProgressMeter(progress)
-        let host = RegistryAuth.host(ofImage: ref)
-        let credentials = Self.credentials(auth, for: host)
-        try blocking { [store] in
-            try await store.push(reference: ref, platform: .current, insecure: Self.insecure(host), auth: credentials,
-                                 progress: { events in meter.record(events) })
+        let (client, parsed) = try session(ref, auth, progress)
+        guard let tag = parsed.tag ?? parsed.digest else { throw BackendError("invalid tag or digest in \(ref)") }
+        let name = parsed.path
+        let reference = ImageRef.normalize(ref)
+        let current = Platform.current
+        try blocking { [store, content] in
+            let img = try await store.get(reference: reference)
+            let operation = ImageStore.ExportOperation(name: name, tag: tag, contentStore: content, client: client,
+                                                       progress: { events in meter.record(events) })
+            _ = try await operation.export(index: img.descriptor, platforms: { $0.os == current.os && $0.architecture == current.architecture })
         }
         meter.flush()
     }
@@ -177,56 +220,51 @@ final class EmbeddedImageBackend: ImageBackend, @unchecked Sendable {
     }
 
     /// pratico's own Keychain items (not Docker's, not Apple `container`'s), one per registry.
-    static let keychain = KeychainHelper(securityDomain: "dev.pratico.registry")
+    static let keychainDomain = "dev.pratico.registry"
+    static let keychain = KeychainHelper(securityDomain: keychainDomain)
 
     func login(_ auth: RegistryAuth) throws {
-        let basic = BasicAuthentication(username: auth.username, password: auth.password)
-        let insecure = Self.insecure(auth.server)
-        let client = try RegistryClient(reference: "\(auth.server)/pratico/login", insecure: insecure, auth: basic,
-                                        tlsConfiguration: TLSUtils.makeEnvironmentAwareTLSConfiguration())
+        let client = try RegistrySession(host: auth.server, credentials: (auth.username, auth.password), policy: policy)
         do {
             try blocking { try await client.ping() }
+        } catch let e as RegistryError where e.unauthorized {
+            throw APIError(401, e.description)
         } catch {
-            let text = String(describing: error)
-            if text.contains("wrong credentials") || text.contains("401") || text.contains("403") {
-                // Docker's wording; the CLI prints it after "Error response from daemon:".
-                throw APIError(401, "Get \"\(insecure ? "http" : "https")://\(auth.server)/v2/\": unauthorized: incorrect username or password")
-            }
-            throw APIError(500, "login to \(auth.server) failed: \(text)")
+            throw APIError(500, "login to \(auth.server) failed: \(error)")
         }
         do { try Self.keychain.save(hostname: auth.server, username: auth.username, password: auth.password) } catch {
             throw APIError(500, "pratico: cannot keep the login in the Keychain: \(error)")
         }
+        writeState()
+    }
+
+    /// Kept logins, without passwords.
+    func logins() -> [JSON] {
+        ((try? Self.keychain.list()) ?? []).sorted { $0.hostname < $1.hostname }.map {
+            ["server": .string($0.hostname), "username": .string($0.username), "saved": .string(ISO8601DateFormatter().string(from: $0.modifiedDate))]
+        }
+    }
+
+    /// The `docker logout` the Docker CLI never sends to a daemon.
+    func logout(_ server: String) throws {
+        let host = RegistryAuth.host(server)
+        guard logins().contains(where: { $0["server"]?.string == host }) else { throw APIError(404, "pratico keeps no login for \(host)") }
+        do { try Self.keychain.delete(hostname: host) } catch { throw APIError(500, "cannot remove the login for \(host): \(error)") }
+        writeState()
+    }
+
+    func writeState() {
+        let state: JSON = ["policy": policy.summary, "warnings": .array(policy.warnings.map { .string($0) }), "logins": .array(logins())]
+        try? state.encoded().write(to: stateFile, options: .atomic)
     }
 
     /// The request's credentials for the image's own registry, else the ones `docker login`
     /// kept (clients other than the Docker CLI rarely send any).
-    private static func credentials(_ auth: RegistryAuth?, for host: String) -> (any Authentication)? {
-        if let auth, auth.server == host { return BasicAuthentication(username: auth.username, password: auth.password) }
-        return try? keychain.lookup(hostname: host)
+    private static func credentials(_ auth: RegistryAuth?, for host: String) -> (username: String, password: String)? {
+        if let auth, auth.server == host { return (auth.username, auth.password) }
+        guard let kept = try? KeychainQuery().get(securityDomain: keychainDomain, hostname: host) else { return nil }
+        return (kept.username, kept.password)
     }
-
-    /// Docker speaks plain HTTP to loopback registries unless they answer TLS. Only a
-    /// definite answer is kept: a registry that is not up yet is asked again next time.
-    private static func insecure(_ host: String) -> Bool {
-        guard !RegistryAuth.schemeArgs(host).isEmpty else { return false }
-        return schemes.answer(host) {
-            let parts = host.split(separator: ":")
-            let client = RegistryClient(host: String(parts[0]), scheme: "https", port: parts.dropFirst().first.flatMap { Int($0) },
-                                        tlsConfiguration: TLSUtils.makeEnvironmentAwareTLSConfiguration())
-            do {
-                try blocking { try await client.ping() }
-                return false
-            } catch {
-                let text = String(describing: error)
-                if text.contains("failed with response") { return false }  // an HTTP status over TLS
-                if text.contains("Connection refused") || text.contains("rawValue: 61") { return nil }
-                return true  // a plain-HTTP server cannot complete a TLS handshake
-            }
-        } ?? false
-    }
-
-    private static let schemes = Memo<String, Bool>()
 
     /// The Apple-shaped record `ImageService` reads, built from the store.
     static func record(_ img: Containerization.Image) async throws -> JSON {

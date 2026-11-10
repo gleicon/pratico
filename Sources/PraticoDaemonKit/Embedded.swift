@@ -11,11 +11,14 @@ public actor EmbeddedRuntime {
 
     public let assets: URL
     public let store: ImageStore
+    /// The store's content, shared with pratico's registry client (`RegistrySession`).
+    public let content: LocalContentStore
     private var manager: ContainerManager
 
-    private init(assets: URL, store: ImageStore, manager: ContainerManager) {
+    private init(assets: URL, store: ImageStore, content: LocalContentStore, manager: ContainerManager) {
         self.assets = assets
         self.store = store
+        self.content = content
         self.manager = manager
     }
 
@@ -40,13 +43,16 @@ public actor EmbeddedRuntime {
         guard let assets = locateAssets() else {
             throw APIError(500, "pratico: runtime assets (kernel, vminit) not found; run `make assets`")
         }
-        let store = try ImageStore(path: home.appending(path: "store", directoryHint: .isDirectory))
+        let root = home.appending(path: "store", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let content = try LocalContentStore(path: root.appending(path: "content", directoryHint: .isDirectory))
+        let store = try ImageStore(path: root, contentStore: content)
         if try await store.getOrNil(reference: initReference) == nil {
             _ = try await store.load(from: assets.appending(path: "vminit", directoryHint: .isDirectory))
         }
         let kernel = Kernel(path: assets.appending(path: "vmlinux"), platform: .linuxArm)
         let manager = try await ContainerManager(kernel: kernel, initfsReference: initReference, imageStore: store)
-        return EmbeddedRuntime(assets: assets, store: store, manager: manager)
+        return EmbeddedRuntime(assets: assets, store: store, content: content, manager: manager)
     }
 
     /// Runs `arguments` in a fresh container from `image` (pulled if missing) and returns
@@ -112,13 +118,13 @@ final class EmbeddedContainers: Sendable {
     }
 
     /// Opens the runtime under `home`; nil with a reason when it cannot run here.
-    static func open(home: URL) -> Result<(EmbeddedContainers, ImageStore), APIError> {
+    static func open(home: URL) -> Result<(EmbeddedContainers, ImageStore, LocalContentStore), APIError> {
         guard let binary = ShimClient.locate() else { return .failure(APIError(500, "pratico-shim not found next to the daemon")) }
         do {
             let rt = try blocking { try await EmbeddedRuntime.open(home: home) }
             let initfs = rt.store.path.appending(path: "initfs.ext4").path
             let kernel = rt.assets.appending(path: "vmlinux").path
-            return .success((EmbeddedContainers(shim: ShimClient(binary: binary), kernel: kernel, initfs: initfs, store: rt.store), rt.store))
+            return .success((EmbeddedContainers(shim: ShimClient(binary: binary), kernel: kernel, initfs: initfs, store: rt.store), rt.store, rt.content))
         } catch let e as APIError {
             return .failure(e)
         } catch {

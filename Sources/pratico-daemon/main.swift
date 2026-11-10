@@ -35,6 +35,7 @@ while let arg = args.first {
 // FR-37/FR-38: defaults when absent; refuse to start on unknown keys or bad values.
 let config: Config
 do { config = try Config.load(home: home) } catch { fail("\(error)", code: 4) }
+do { try Daemon.checkRegistryConfig(config) } catch { fail("\(error)", code: 4) }
 
 let runtime = AppleContainer()
 // The embedded runtime (docs/design/runtime.md) needs no Apple `container` install.

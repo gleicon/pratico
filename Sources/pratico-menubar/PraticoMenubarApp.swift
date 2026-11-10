@@ -41,6 +41,23 @@ struct StatusMenu: View {
             }
             Button("Clear Alerts") { daemon.clearAlerts() }
         }
+        // D-29: trust beyond the system's roots, and kept logins, in plain view.
+        if daemon.isRunning {
+            Divider()
+            Menu(daemon.registries.warnings.isEmpty ? "Registries" : "Registries ⚠︎") {
+                Text(daemon.registries.policy.systemRoots ? "HTTPS, verified by the system's trusted roots" : "HTTPS, verified only by registry_ca")
+                Text(daemon.registries.policy.httpLoopback ? "Loopback registries may use plain HTTP (as Docker)" : "Plain HTTP refused for loopback registries")
+                ForEach(daemon.registries.warnings, id: \.self) { w in
+                    Text("⚠︎ " + w.replacingOccurrences(of: "pratico: ", with: ""))
+                }
+                if !daemon.registries.logins.isEmpty { Divider() }
+                ForEach(daemon.registries.logins) { l in
+                    Button("Remove login \(l.username) @ \(l.server)") { daemon.removeLogin(l.server) }
+                }
+                Divider()
+                Button("Edit config.toml…") { daemon.openConfig() }
+            }
+        }
         Divider()
         switch daemon.state {
         case .running:
