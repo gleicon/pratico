@@ -114,12 +114,10 @@ public final class Daemon: @unchecked Sendable {
             events.serve(req, conn: conn)
             return .close
         case ("POST", "auth") where parts.count == 1:
-            try containers.requireCLIBackend("docker login")
             guard let body = JSON.parse(req.body), let auth = RegistryAuth.body(body) else {
                 throw APIError(400, "username and password are required")
             }
-            let r = runtime.login(auth)
-            guard r.ok else { throw APIError(401, "login to \(auth.server) failed: \(r.errorText)") }
+            try images.backend.login(auth)
             conn.json(200, ["Status": "Login Succeeded", "IdentityToken": ""])
             return .keepAlive
         case ("GET", "info") where parts.count == 1:

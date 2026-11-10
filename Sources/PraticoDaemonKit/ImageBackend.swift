@@ -19,6 +19,10 @@ protocol ImageBackend: Sendable {
     func push(_ ref: String, auth: RegistryAuth?, progress: @escaping @Sendable (JSON) -> Void) throws
     /// Writes the image's OCI layout (`index.json`, `oci-layout`, `blobs/`) for one platform.
     func saveLayout(_ ref: String, os: String, arch: String, into dir: URL) throws
+    /// `docker login`: checks the credentials with the registry and keeps them for later
+    /// pulls and pushes that come without `X-Registry-Auth`. Throws `APIError(401)` when
+    /// the registry refuses them.
+    func login(_ auth: RegistryAuth) throws
 }
 
 struct BackendError: Error, CustomStringConvertible {
@@ -70,6 +74,11 @@ struct AppleImageBackend: ImageBackend {
 
     /// Apple takes credentials only from its Keychain, so a forwarded login is stored there.
     /// Credentials named for another server are ignored, never sent elsewhere.
+    func login(_ auth: RegistryAuth) throws {
+        let r = runtime.login(auth)
+        guard r.ok else { throw APIError(401, "login to \(auth.server) failed: \(r.errorText)") }
+    }
+
     private func login(_ ref: String, _ auth: RegistryAuth?) throws {
         guard let auth, auth.server == RegistryAuth.host(ofImage: ref) else { return }
         let r = runtime.login(auth)
@@ -167,14 +176,57 @@ final class EmbeddedImageBackend: ImageBackend, @unchecked Sendable {
         }
     }
 
-    /// Credentials only for the image's own registry, as with the Apple backend.
-    private static func credentials(_ auth: RegistryAuth?, for host: String) -> (any Authentication)? {
-        guard let auth, auth.server == host else { return nil }
-        return BasicAuthentication(username: auth.username, password: auth.password)
+    /// pratico's own Keychain items (not Docker's, not Apple `container`'s), one per registry.
+    static let keychain = KeychainHelper(securityDomain: "dev.pratico.registry")
+
+    func login(_ auth: RegistryAuth) throws {
+        let basic = BasicAuthentication(username: auth.username, password: auth.password)
+        let insecure = Self.insecure(auth.server)
+        let client = try RegistryClient(reference: "\(auth.server)/pratico/login", insecure: insecure, auth: basic,
+                                        tlsConfiguration: TLSUtils.makeEnvironmentAwareTLSConfiguration())
+        do {
+            try blocking { try await client.ping() }
+        } catch {
+            let text = String(describing: error)
+            if text.contains("wrong credentials") || text.contains("401") || text.contains("403") {
+                // Docker's wording; the CLI prints it after "Error response from daemon:".
+                throw APIError(401, "Get \"\(insecure ? "http" : "https")://\(auth.server)/v2/\": unauthorized: incorrect username or password")
+            }
+            throw APIError(500, "login to \(auth.server) failed: \(text)")
+        }
+        do { try Self.keychain.save(hostname: auth.server, username: auth.username, password: auth.password) } catch {
+            throw APIError(500, "pratico: cannot keep the login in the Keychain: \(error)")
+        }
     }
 
-    /// Docker speaks plain HTTP to loopback registries.
-    private static func insecure(_ host: String) -> Bool { !RegistryAuth.schemeArgs(host).isEmpty }
+    /// The request's credentials for the image's own registry, else the ones `docker login`
+    /// kept (clients other than the Docker CLI rarely send any).
+    private static func credentials(_ auth: RegistryAuth?, for host: String) -> (any Authentication)? {
+        if let auth, auth.server == host { return BasicAuthentication(username: auth.username, password: auth.password) }
+        return try? keychain.lookup(hostname: host)
+    }
+
+    /// Docker speaks plain HTTP to loopback registries unless they answer TLS. Only a
+    /// definite answer is kept: a registry that is not up yet is asked again next time.
+    private static func insecure(_ host: String) -> Bool {
+        guard !RegistryAuth.schemeArgs(host).isEmpty else { return false }
+        return schemes.answer(host) {
+            let parts = host.split(separator: ":")
+            let client = RegistryClient(host: String(parts[0]), scheme: "https", port: parts.dropFirst().first.flatMap { Int($0) },
+                                        tlsConfiguration: TLSUtils.makeEnvironmentAwareTLSConfiguration())
+            do {
+                try blocking { try await client.ping() }
+                return false
+            } catch {
+                let text = String(describing: error)
+                if text.contains("failed with response") { return false }  // an HTTP status over TLS
+                if text.contains("Connection refused") || text.contains("rawValue: 61") { return nil }
+                return true  // a plain-HTTP server cannot complete a TLS handshake
+            }
+        } ?? false
+    }
+
+    private static let schemes = Memo<String, Bool>()
 
     /// The Apple-shaped record `ImageService` reads, built from the store.
     static func record(_ img: Containerization.Image) async throws -> JSON {
@@ -242,6 +294,24 @@ final class ProgressMeter: @unchecked Sendable {
 
 /// Runs async work from one of the daemon's connection threads (never from a Swift
 /// concurrency thread, which this would block).
+/// A per-key answer computed once it is known.
+final class Memo<Key: Hashable, Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [Key: Value] = [:]
+
+    /// `compute` returning nil means "no answer yet": nothing is kept.
+    func answer(_ key: Key, _ compute: () -> Value?) -> Value? {
+        lock.lock()
+        if let v = values[key] { lock.unlock(); return v }
+        lock.unlock()
+        guard let v = compute() else { return nil }
+        lock.lock()
+        values[key] = v
+        lock.unlock()
+        return v
+    }
+}
+
 func blocking<T: Sendable>(_ op: @escaping @Sendable () async throws -> T) throws -> T {
     let result = Box<Result<T, any Error>?>(nil)
     let done = DispatchSemaphore(value: 0)
