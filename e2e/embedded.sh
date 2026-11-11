@@ -368,6 +368,14 @@ start_daemon
 docker rm -f e-reg e-plain >/dev/null
 docker rmi registry:2 >/dev/null 2>&1
 
+# Docker-in-Docker clients (Compose in a container, Testcontainers) mount the daemon socket.
+docker pull -q docker:cli >/dev/null 2>&1
+out=$(docker run --rm -v /var/run/docker.sock:/var/run/docker.sock docker:cli docker version --format '{{.Server.Os}}' 2>&1)
+expect_eq "-v /var/run/docker.sock reaches pratico" "$out" "linux"
+out=$(docker run --rm --mount "type=bind,source=$SOCK,target=/run/d.sock" docker:cli docker -H unix:///run/d.sock ps --format '{{.Image}}' 2>&1)
+expect_eq "any host Unix socket can be mounted" "$out" "docker:cli"
+docker rmi docker:cli >/dev/null 2>&1
+
 check "rmi removes the image" docker rmi alpine
 if [ -s "$HOME_DIR/apple-calls" ]; then bad "no Apple container CLI calls" "$(head -3 "$HOME_DIR/apple-calls")"; else ok "no Apple container CLI calls"; fi
 

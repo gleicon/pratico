@@ -56,7 +56,8 @@ public final class Daemon: @unchecked Sendable {
                                        events: events, apple: embedded == nil)
         self.containers = ContainerService(
             runtime: runtime, images: images, root: home.appending(path: "containers", directoryHint: .isDirectory),
-            networks: networks, config: config, events: events, embedded: embedded)
+            networks: networks, config: config, events: events, embedded: embedded,
+            dockerSocket: self.socketPath)
         embeddedImages?.usedBy = { [containers] in Set(containers.all().map(\.imageId)) }
         self.execs = ExecService(runtime: runtime, containers: containers)
         self.archives = ArchiveService(runtime: runtime, containers: containers)

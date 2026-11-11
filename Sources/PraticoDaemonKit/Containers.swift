@@ -67,6 +67,8 @@ public final class ContainerService: @unchecked Sendable {
     /// Set when the embedded runtime runs containers (docs/design/runtime.md); nil means
     /// Apple's `container` CLI.
     let embedded: EmbeddedContainers?
+    /// The daemon's own API socket: what `-v /var/run/docker.sock:...` gives a container.
+    let dockerSocket: String
     let health = HealthMonitor()
     /// Returns why a container may not start (pratico's image scan, D-24), if it may not.
     var startGate: (@Sendable (ContainerRecord) -> String?)?
@@ -86,8 +88,9 @@ public final class ContainerService: @unchecked Sendable {
     let membership = NSLock()
 
     init(runtime: AppleContainer, images: ImageService, root: URL, networks: NetworkService, config: Config = Config(),
-         events: EventBus = EventBus(), embedded: EmbeddedContainers? = nil) {
+         events: EventBus = EventBus(), embedded: EmbeddedContainers? = nil, dockerSocket: String = "") {
         self.runtime = runtime
+        self.dockerSocket = dockerSocket
         self.embedded = embedded
         self.events = events
         self.networks = networks
@@ -355,6 +358,19 @@ public final class ContainerService: @unchecked Sendable {
         var createSource: Bool
     }
 
+    /// Where Docker clients and tools expect the daemon. A container that mounts it gets
+    /// pratico's API whether or not the Mac has the link (Docker Desktop does the same).
+    static let dockerSocketPaths: Set<String> = ["/var/run/docker.sock", "/private/var/run/docker.sock", "/run/docker.sock"]
+
+    /// The guest side of a mount: a host Unix socket is relayed over vsock, since virtiofs
+    /// shares files but not the connections behind a socket.
+    static func shimMount(_ m: Mount, dockerSocket: String) -> ShimMount {
+        let source = dockerSocketPaths.contains(m.source) ? dockerSocket : m.source
+        var st = stat()
+        let socket = stat(source, &st) == 0 && st.st_mode & S_IFMT == S_IFSOCK
+        return ShimMount(source: source, destination: m.destination, readOnly: m.readOnly, socket: socket)
+    }
+
     /// Docker `Binds` (`src:dst[:opts]`) and bind-type `Mounts` (SPEC FR-14). Named
     /// volumes and other mount types are rejected until volumes exist.
     static func mounts(_ host: JSON) throws -> [Mount] {
@@ -368,7 +384,8 @@ public final class ContainerService: @unchecked Sendable {
                 throw APIError(400, "named volumes are not supported yet: '\(bind)'")
             }
             let opts = parts.count == 3 ? parts[2].split(separator: ",").map(String.init) : []
-            out.append(Mount(source: parts[0], destination: parts[1], readOnly: opts.contains("ro"), createSource: true))
+            out.append(Mount(source: parts[0], destination: parts[1], readOnly: opts.contains("ro"),
+                             createSource: !dockerSocketPaths.contains(parts[0])))
         }
         for m in host["Mounts"]?.array ?? [] {
             let type = m["Type"]?.string ?? "volume"
@@ -376,8 +393,7 @@ public final class ContainerService: @unchecked Sendable {
             guard let src = m["Source"]?.string, src.hasPrefix("/"), let dst = m["Target"]?.string, dst.hasPrefix("/") else {
                 throw APIError(400, "invalid mount config: bind mounts need an absolute source and target")
             }
-            var isDir: ObjCBool = false
-            guard FileManager.default.fileExists(atPath: src, isDirectory: &isDir) else {
+            guard dockerSocketPaths.contains(src) || FileManager.default.fileExists(atPath: src) else {
                 throw APIError(400, "invalid mount config for type \"bind\": bind source path does not exist: \(src)")
             }
             out.append(Mount(source: src, destination: dst, readOnly: m["ReadOnly"]?.bool ?? false, createSource: false))
@@ -461,7 +477,7 @@ public final class ContainerService: @unchecked Sendable {
     /// through the log file the shim writes.
     private func launchEmbedded(_ rec: ContainerRecord, _ embedded: EmbeddedContainers) throws {
         let files = ShimFiles(dir: dir(rec.id))
-        let mounts = try Self.mounts(rec.hostConfig).map { ShimMount(source: $0.source, destination: $0.destination, readOnly: $0.readOnly) }
+        let mounts = try Self.mounts(rec.hostConfig).map { Self.shimMount($0, dockerSocket: dockerSocket) }
         let mem = rec.hostConfig["Memory"]?.int.flatMap { $0 > 0 ? Int($0 / 1_048_576) : nil } ?? config.defaultMemoryMiB
         let cpus = rec.hostConfig["NanoCpus"]?.int.flatMap { $0 > 0 ? Int(($0 + 999_999_999) / 1_000_000_000) : nil } ?? config.defaultCPUs
         let rootfs: String = files.dir.appending(path: "rootfs.ext4").path

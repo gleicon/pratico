@@ -454,3 +454,30 @@ private let grypeSample = Data(#"""
     #expect(p.plainHTTPReason("127.0.0.1:5000") == nil)
     #expect(p.registryConfig["InsecureRegistryCIDRs"] == ["10.0.0.0/8"])
 }
+
+@Test func socketMountsAreRelayedAndDockerSocketIsTheDaemons() throws {
+    let dir = FileManager.default.temporaryDirectory.appending(path: "pratico-sock-\(UUID().uuidString.prefix(8))")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let api = dir.appending(path: "d.sock").path
+    let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+    defer { close(fd) }
+    var addr = sockaddr_un()
+    addr.sun_family = sa_family_t(AF_UNIX)
+    withUnsafeMutableBytes(of: &addr.sun_path) { dst in api.utf8CString.withUnsafeBytes { dst.copyMemory(from: $0) } }
+    #expect(withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) } } == 0)
+
+    let mounts = try ContainerService.mounts([
+        "Binds": ["/var/run/docker.sock:/var/run/docker.sock", .string("\(dir.path):/data:ro")],
+        "Mounts": [["Type": "bind", "Source": "/run/docker.sock", "Target": "/d.sock"]],
+    ])
+    #expect(mounts.map(\.createSource) == [false, true, false])
+    let shim = mounts.map { ContainerService.shimMount($0, dockerSocket: api) }
+    #expect(shim == [
+        ShimMount(source: api, destination: "/var/run/docker.sock", readOnly: false, socket: true),
+        ShimMount(source: dir.path, destination: "/data", readOnly: true),
+        ShimMount(source: api, destination: "/d.sock", readOnly: false, socket: true),
+    ])
+    let old = try JSONDecoder().decode(ShimMount.self, from: Data(#"{"source":"/a","destination":"/b","readOnly":false}"#.utf8))
+    #expect(old == ShimMount(source: "/a", destination: "/b", readOnly: false))
+}

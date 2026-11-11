@@ -48,6 +48,24 @@ struct ShimMount: Codable, Sendable, Equatable {
     var source: String
     var destination: String
     var readOnly: Bool
+    /// A host Unix socket, relayed into the guest rather than shared.
+    var socket = false
+
+    init(source: String, destination: String, readOnly: Bool, socket: Bool = false) {
+        self.source = source
+        self.destination = destination
+        self.readOnly = readOnly
+        self.socket = socket
+    }
+
+    /// Specs written before socket mounts have no `socket`.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        source = try c.decode(String.self, forKey: .source)
+        destination = try c.decode(String.self, forKey: .destination)
+        readOnly = try c.decode(Bool.self, forKey: .readOnly)
+        socket = try c.decodeIfPresent(Bool.self, forKey: .socket) ?? false
+    }
 }
 
 /// Files a shim keeps in its container directory (`<home>/containers/<id>`).
@@ -123,7 +141,11 @@ public enum ShimHost {
                     hosts.entries.append(Hosts.Entry(ipAddress: primary.ip, hostnames: [spec.hostname]))
                     config.hosts = hosts
                 }
-                for m in spec.mounts {
+                for m in spec.mounts where m.socket {
+                    config.sockets.append(UnixSocketConfiguration(
+                        source: URL(filePath: m.source), destination: URL(filePath: m.destination), direction: .into))
+                }
+                for m in spec.mounts where !m.socket {
                     config.mounts.append(.share(source: m.source, destination: m.destination, options: m.readOnly ? ["ro"] : []))
                 }
             }
