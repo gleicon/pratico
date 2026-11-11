@@ -1,4 +1,5 @@
 import PraticoCore
+import ServiceManagement
 import SwiftUI
 
 @main
@@ -30,6 +31,10 @@ struct StatusMenu: View {
         }
         if daemon.needsApproval {
             Button("Open Login Items…") { daemon.openLoginItems() }
+        }
+        Toggle("Use \(DefaultSocket.path)", isOn: Binding(get: { daemon.usesDefaultSocket }, set: { daemon.setUseDefaultSocket($0) }))
+        if let note = defaultSocketNote {
+            Button(note) { daemon.openLoginItems() }.disabled(daemon.defaultSocketStatus != .requiresApproval)
         }
         // D-24: image scan alerts, newest first.
         if !daemon.alerts.isEmpty {
@@ -71,6 +76,14 @@ struct StatusMenu: View {
         Button("Quit Pratico") { NSApplication.shared.terminate(nil) }
             .keyboardShortcut("q")
             .onAppear { daemon.markAlertsSeen() }
+    }
+
+    /// Why the toggle is on but the path is not pratico's yet.
+    private var defaultSocketNote: String? {
+        guard daemon.usesDefaultSocket else { return nil }
+        if daemon.defaultSocketStatus == .requiresApproval { return "Allow the socket helper in Login Items…" }
+        if case .other(let owner) = daemon.defaultSocket { return "⚠︎ \(DefaultSocket.path) is taken: \(owner)" }
+        return nil
     }
 
     private var statusLine: String {

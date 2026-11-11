@@ -25,6 +25,10 @@ final class DaemonController {
     let socketPath = Pratico.socketPath().path
 
     private let service = SMAppService.agent(plistName: "dev.pratico.daemon.plist")
+    /// The root helper that links `/var/run/docker.sock` to `socketPath`.
+    private let socketLink = SMAppService.daemon(plistName: "dev.pratico.socket.plist")
+    private(set) var defaultSocket: DefaultSocket.State = .absent
+    private(set) var defaultSocketStatus: SMAppService.Status = .notRegistered
     private var pollTask: Task<Void, Never>?
 
     var isRunning: Bool { if case .running = state { true } else { false } }
@@ -145,6 +149,25 @@ final class DaemonController {
 
     func openLoginItems() { SMAppService.openSystemSettingsLoginItems() }
 
+    var usesDefaultSocket: Bool { defaultSocketStatus == .enabled || defaultSocketStatus == .requiresApproval }
+
+    /// Registering asks for approval in Login Items once (an admin's); after that the link
+    /// is made at every boot.
+    func setUseDefaultSocket(_ on: Bool) {
+        do {
+            if on { try socketLink.register() } else { try socketLink.unregister() }
+        } catch {
+            if socketLink.status == .requiresApproval { openLoginItems() }
+            else { self.error = "Could not \(on ? "link" : "unlink") \(DefaultSocket.path): \(error.localizedDescription)" }
+        }
+        refreshDefaultSocket()
+    }
+
+    private func refreshDefaultSocket() {
+        defaultSocketStatus = socketLink.status
+        defaultSocket = DefaultSocket.state(target: socketPath)
+    }
+
     /// Refreshes once a second, so state changes show within 2 s (SPEC FR-30).
     private func poll() {
         pollTask = Task { [weak self] in
@@ -154,6 +177,7 @@ final class DaemonController {
                 self.apply(version)
                 self.refreshAlerts()
                 self.refreshRegistries()
+                self.refreshDefaultSocket()
                 try? await Task.sleep(for: .seconds(1))
             }
         }
