@@ -46,18 +46,15 @@ e2e-registry: build
 
 app: build
 	rm -rf "$(APP)"
-	mkdir -p "$(APP)/Contents/MacOS" "$(APP)/Contents/Library/LaunchAgents" "$(APP)/Contents/Library/LaunchDaemons"
+	mkdir -p "$(APP)/Contents/MacOS" "$(APP)/Contents/Library/LaunchAgents"
 	cp Support/Info.plist "$(APP)/Contents/Info.plist"
 	cp Support/dev.pratico.daemon.plist "$(APP)/Contents/Library/LaunchAgents/"
-	cp Support/dev.pratico.socket.plist "$(APP)/Contents/Library/LaunchDaemons/"
-	cp "$(BIN_DIR)/pratico-menubar" "$(BIN_DIR)/pratico-daemon" "$(BIN_DIR)/pratico-socket-link" "$(APP)/Contents/MacOS/"
+	cp "$(BIN_DIR)/pratico-menubar" "$(BIN_DIR)/pratico-daemon" "$(APP)/Contents/MacOS/"
 	$(MAKE) sign
 
 sign:
 	codesign --force --sign "$(SIGN_IDENTITY)" --entitlements "$(ENTITLEMENTS)" --options runtime \
 		"$(APP)/Contents/MacOS/pratico-daemon"
-	# Runs as root and needs no entitlement.
-	codesign --force --sign "$(SIGN_IDENTITY)" --options runtime "$(APP)/Contents/MacOS/pratico-socket-link"
 	codesign --force --sign "$(SIGN_IDENTITY)" --entitlements "$(ENTITLEMENTS)" --options runtime "$(APP)"
 
 # Drag-to-Applications image with the Gatekeeper walkthrough (SPEC D-10).

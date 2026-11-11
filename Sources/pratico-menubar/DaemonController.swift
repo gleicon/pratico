@@ -25,10 +25,9 @@ final class DaemonController {
     let socketPath = Pratico.socketPath().path
 
     private let service = SMAppService.agent(plistName: "dev.pratico.daemon.plist")
-    /// The root helper that links `/var/run/docker.sock` to `socketPath`.
-    private let socketLink = SMAppService.daemon(plistName: "dev.pratico.socket.plist")
     private(set) var defaultSocket: DefaultSocket.State = .absent
-    private(set) var defaultSocketStatus: SMAppService.Status = .notRegistered
+    /// The root-owned launchd job that links `/var/run/docker.sock` to `socketPath` at boot.
+    private(set) var usesDefaultSocket = false
     private var pollTask: Task<Void, Never>?
 
     var isRunning: Bool { if case .running = state { true } else { false } }
@@ -149,23 +148,35 @@ final class DaemonController {
 
     func openLoginItems() { SMAppService.openSystemSettingsLoginItems() }
 
-    var usesDefaultSocket: Bool { defaultSocketStatus == .enabled || defaultSocketStatus == .requiresApproval }
-
-    /// Registering asks for approval in Login Items once (an admin's); after that the link
-    /// is made at every boot.
+    /// Asks for an admin's password each way: macOS's own prompt runs the script as root.
     func setUseDefaultSocket(_ on: Bool) {
-        do {
-            if on { try socketLink.register() } else { try socketLink.unregister() }
-        } catch {
-            if socketLink.status == .requiresApproval { openLoginItems() }
-            else { self.error = "Could not \(on ? "link" : "unlink") \(DefaultSocket.path): \(error.localizedDescription)" }
+        let script = on ? DefaultSocket.installScript(target: socketPath) : DefaultSocket.removeScript(target: socketPath)
+        Task {
+            if let failure = await Task.detached(operation: { Self.runAsAdmin(script) }).value {
+                error = "Could not \(on ? "link" : "unlink") \(DefaultSocket.path): \(failure)"
+            }
+            refreshDefaultSocket()
         }
-        refreshDefaultSocket()
     }
 
     private func refreshDefaultSocket() {
-        defaultSocketStatus = socketLink.status
+        usesDefaultSocket = FileManager.default.fileExists(atPath: DefaultSocket.plistPath)
         defaultSocket = DefaultSocket.state(target: socketPath)
+    }
+
+    /// nil on success or when the user cancels the prompt.
+    nonisolated private static func runAsAdmin(_ script: String) -> String? {
+        let quoted = script.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+        let p = Process()
+        p.executableURL = URL(filePath: "/usr/bin/osascript")
+        p.arguments = ["-e", "do shell script \"\(quoted)\" with prompt \"Pratico wants to manage \(DefaultSocket.path).\" with administrator privileges"]
+        let err = Pipe()
+        p.standardError = err
+        do { try p.run() } catch { return "\(error)" }
+        p.waitUntilExit()
+        let message = String(decoding: err.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        if p.terminationStatus == 0 || message.contains("-128") { return nil }  // -128: canceled
+        return message.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Refreshes once a second, so state changes show within 2 s (SPEC FR-30).

@@ -88,7 +88,7 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 - [ ] Connection and request-body limits hold: 65th connection handled cleanly, RSS ≤ 100 MiB (AC-47)
 - [ ] 100 start/stop cycles leave idle fd count unchanged (AC-48)
 - [ ] Oldest allowed and current Docker CLI both pass; 20.10 rejected like Docker Engine (AC-49)
-- [x] `/var/run/docker.sock` on request: menubar toggle, root link helper, never takes another daemon's link (D-30)
+- [x] `/var/run/docker.sock` on request: menubar toggle, root-owned `/bin/ln` launchd job, never takes another daemon's link (D-30)
 - [x] Containers mounting `/var/run/docker.sock` reach pratico; any host Unix socket bind is relayed (D-30, embedded)
 - [ ] `docker run --rm alpine true` P99 ≤ 1500 ms (AC-44)
 - [ ] Control calls P99 ≤ 50 ms with 100 containers (AC-45)

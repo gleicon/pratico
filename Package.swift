@@ -8,7 +8,6 @@ let package = Package(
         .executable(name: "pratico-daemon", targets: ["pratico-daemon"]),
         .executable(name: "pratico-menubar", targets: ["pratico-menubar"]),
         .executable(name: "pratico-shim", targets: ["pratico-shim"]),
-        .executable(name: "pratico-socket-link", targets: ["pratico-socket-link"]),
     ],
     dependencies: [
         // Embedded runtime (docs/design/runtime.md); pinned, its API is pre-1.0.
@@ -33,7 +32,6 @@ let package = Package(
         .executableTarget(name: "pratico-daemon", dependencies: ["PraticoCore", "PraticoDaemonKit"]),
         .executableTarget(name: "pratico-menubar", dependencies: ["PraticoCore"]),
         .executableTarget(name: "pratico-shim", dependencies: ["PraticoDaemonKit"]),
-        .executableTarget(name: "pratico-socket-link", dependencies: ["PraticoCore"]),
         .executableTarget(name: "pratico-runtime-probe", dependencies: ["PraticoDaemonKit"]),
         .testTarget(name: "PraticoCoreTests", dependencies: ["PraticoCore"]),
         .testTarget(name: "PraticoDaemonKitTests", dependencies: ["PraticoCore", "PraticoDaemonKit"]),

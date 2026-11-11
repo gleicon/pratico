@@ -1,10 +1,14 @@
 import Foundation
 
-/// `/var/run/docker.sock`, the path Docker tools assume: a symlink to pratico's socket,
-/// made by the `pratico-socket-link` helper. The daemon stays unprivileged; only the link
-/// needs root, because `/var/run` is root's and macOS empties it at every boot.
+/// `/var/run/docker.sock`, the path Docker tools assume: a symlink to pratico's socket.
+/// The daemon stays unprivileged; only the link needs root, because `/var/run` is root's
+/// and macOS empties it at every boot. A root-owned launchd job in `/Library/LaunchDaemons`
+/// remakes it at boot with `/bin/ln` and nothing else: no pratico code runs as root, and
+/// nothing a user can write is ever run as root (the app bundle is the user's).
 public enum DefaultSocket {
     public static let path = "/var/run/docker.sock"
+    public static let label = "dev.pratico.socket"
+    public static let plistPath = "/Library/LaunchDaemons/\(label).plist"
 
     public enum State: Equatable, Sendable {
         case absent
@@ -22,16 +26,59 @@ public enum DefaultSocket {
         return dest == target ? .ours : .other(dest)
     }
 
-    /// Links `link` to `target` unless something is there already; someone else's link or
-    /// socket is left alone. `symlink(2)` fails rather than replace, so there is no race.
-    @discardableResult
-    public static func claim(link: String = path, target: String) -> State {
-        if symlink(target, link) == 0 { return .ours }
-        return state(link: link, target: target)
+    /// The launchd job: `ln -s` without `-f` fails rather than replace someone else's link.
+    /// `target` is fixed here, for the user who turned the option on.
+    public static func launchdPlist(target: String) -> String {
+        """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+        \t<key>Label</key>
+        \t<string>\(label)</string>
+        \t<key>ProgramArguments</key>
+        \t<array>
+        \t\t<string>/bin/ln</string>
+        \t\t<string>-s</string>
+        \t\t<string>\(xmlEscaped(target))</string>
+        \t\t<string>\(path)</string>
+        \t</array>
+        \t<key>RunAtLoad</key>
+        \t<true/>
+        </dict>
+        </plist>
+        """
     }
 
-    /// Removes the link only if it is pratico's.
-    public static func release(link: String = path, target: String) {
-        if state(link: link, target: target) == .ours { unlink(link) }
+    /// Run as root, once, after an admin approves it: installs the job and links now. The
+    /// plist travels inside the script, never through a file the user could swap.
+    public static func installScript(target: String) -> String {
+        """
+        set -e
+        /bin/cat > \(plistPath) <<'PRATICO_PLIST'
+        \(launchdPlist(target: target))
+        PRATICO_PLIST
+        /usr/sbin/chown root:wheel \(plistPath)
+        /bin/chmod 644 \(plistPath)
+        /bin/launchctl bootout system/\(label) 2>/dev/null || true
+        /bin/launchctl bootstrap system \(plistPath)
+        """
     }
+
+    /// Run as root: removes the job, and the link only if it is pratico's.
+    public static func removeScript(target: String) -> String {
+        """
+        /bin/launchctl bootout system/\(label) 2>/dev/null
+        /bin/rm -f \(plistPath)
+        if [ "$(/usr/bin/readlink \(path))" = \(shellQuoted(target)) ]; then /bin/rm -f \(path); fi
+        exit 0
+        """
+    }
+
+    static func xmlEscaped(_ s: String) -> String {
+        s.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;").replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\n", with: "&#10;")  // no line can end the heredoc
+    }
+
+    static func shellQuoted(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
 }

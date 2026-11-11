@@ -42,10 +42,12 @@ docker context use pratico
 ```
 
 Or for tools that only look at `/var/run/docker.sock` (Testcontainers, some IDE
-plugins): turn on **Use /var/run/docker.sock** in the menubar and allow the socket helper
-in System Settings › General › Login Items. The helper runs as root only to keep that
-symlink to `~/.pratico/docker.sock`; it recreates it at every boot. If Docker Desktop or
-Colima owns the path, the menubar says so and pratico leaves it alone.
+plugins): turn on **Use /var/run/docker.sock** in the menubar and enter an admin
+password. That installs `/Library/LaunchDaemons/dev.pratico.socket.plist`, which runs
+`/bin/ln -s ~/.pratico/docker.sock /var/run/docker.sock` at every boot; no pratico code
+runs as root. If Docker Desktop or Colima owns the path, the menubar says so and pratico
+leaves it alone. Turn the option off before deleting the app (it asks for the password
+again), or remove that plist by hand.
 
 Containers that mount the Docker socket (`-v /var/run/docker.sock:/var/run/docker.sock`)
 reach pratico, with or without the link.

@@ -26,9 +26,9 @@ behind a flag (see [Runtimes](#runtimes)).
    ```
 
    Tools that only know `/var/run/docker.sock` work too once the menubar's
-   **Use /var/run/docker.sock** is on: a small root helper (approved once in Login
-   Items) links that path to pratico's socket at every boot. The daemon itself never
-   runs as root, and a link owned by Docker Desktop or Colima is left alone.
+   **Use /var/run/docker.sock** is on. It asks for an admin password once and installs
+   a root-owned launchd job that runs `/bin/ln -s` at every boot. No pratico code runs
+   as root, and a link owned by Docker Desktop or Colima is left alone.
 
 Pratico has no CLI of its own: `docker` is the CLI, the menubar is the control panel.
 
