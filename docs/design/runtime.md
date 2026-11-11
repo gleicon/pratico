@@ -198,6 +198,8 @@ slice can switch over per operation group.
 | Images on the store | `EmbeddedImageBackend` in `ImageBackend.swift`; `ImageService` is backend-agnostic |
 | Registry client, trust, logins | `RegistrySession`, `RegistryPolicy` in `RegistrySession.swift`; `Registries` (policy, Keychain logins, `registries.json`) in `Registries.swift` |
 | NIC slots | `ShimNIC`, `NICSlots` (slots plus the primary one; bind, revert, unbind) in `Net/NIC.swift`; hot connect and disconnect in `NetworkService` and `ContainerNetworks.swift` |
+| Socket mounts | `ContainerService.shimMount` (maps `/var/run/docker.sock` to the daemon's socket, marks Unix sockets) in `Containers.swift`; the shim relays them with `UnixSocketConfiguration(direction: .into)` |
+| `/var/run/docker.sock` link | `DefaultSocket` in `Sources/PraticoCore/DefaultSocket.swift`; root helper `Sources/pratico-socket-link` (launchd `dev.pratico.socket`, `Support/dev.pratico.socket.plist`); menubar toggle |
 | Shim (VM owner) | `ShimHost`, `ShimControl` in `Shim.swift`; executable `Sources/pratico-shim` |
 | Daemon side | `ShimClient` (spawn in its own session, control socket, exit watch via `DispatchSource` on the pid); `ContainerService` branches on `embedded` |
 | Tests | `make e2e-embedded` (`e2e/embedded.sh`): fake `container` binary that fails the suite if called |

@@ -26,4 +26,6 @@
 - The shim's `GuestAddresses`, not the daemon, records which addresses a guest slot holds: the shim outlives daemon restarts, and vminitd's `addressAdd` (netlink `NLM_F_EXCL`) fails on a duplicate without an errno the daemon can see.
 - vminitd has no address or route delete RPC: a hot-disconnected slot keeps its address on a down link. The switch, not the guest, is what cuts traffic; keep every delivery path behind its port registry (`NetSwitch.deliver`).
 - `SSL_CERT_FILE` replaces the daemon registry client's trust roots (Docker Hub stops verifying). macOS rejects a self-signed CA cert used directly as a TLS server cert; test registries need a CA plus a leaf.
+- `pratico-socket-link` runs as root from inside the user-owned app bundle (SMAppService keeps `BundleProgram` there). Keep it to `DefaultSocket.claim`/`release`: one `symlink(2)`, one `unlink(2)`, no reads of user files, no arguments. It links for the bundle's owner and refuses a root-owned bundle.
+- Unregistering `dev.pratico.socket` sends SIGTERM, and that is when the helper removes the link. Deleting `Pratico.app` without turning the option off leaves the link until reboot.
 - `bash` reads scripts while running: never edit `e2e/*.sh` during a run.

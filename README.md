@@ -25,6 +25,11 @@ behind a flag (see [Runtimes](#runtimes)).
    docker run --rm alpine echo hello
    ```
 
+   Tools that only know `/var/run/docker.sock` work too once the menubar's
+   **Use /var/run/docker.sock** is on: a small root helper (approved once in Login
+   Items) links that path to pratico's socket at every boot. The daemon itself never
+   runs as root, and a link owned by Docker Desktop or Colima is left alone.
+
 Pratico has no CLI of its own: `docker` is the CLI, the menubar is the control panel.
 
 ## Runtimes
@@ -41,6 +46,7 @@ Pratico has no CLI of its own: `docker` is the CLI, the menubar is the control p
 | Connect/disconnect a running container | connect 409; disconnect drops names only | yes: disconnect cuts traffic at the switch |
 | Internet and Mac access (`host.docker.internal`) | yes | yes: pure-Swift uplink, no extra binaries |
 | Published ports (`-p`) | yes | yes |
+| `-v /var/run/docker.sock:...`, other host Unix sockets | no | yes: relayed over vsock to pratico's API or the host socket |
 
 The embedded runtime is the target: once it covers every operation it becomes the
 default and the CLI backend is removed. Design and progress:

@@ -41,6 +41,15 @@ docker context create pratico --docker host=unix://$HOME/.pratico/docker.sock
 docker context use pratico
 ```
 
+Or for tools that only look at `/var/run/docker.sock` (Testcontainers, some IDE
+plugins): turn on **Use /var/run/docker.sock** in the menubar and allow the socket helper
+in System Settings › General › Login Items. The helper runs as root only to keep that
+symlink to `~/.pratico/docker.sock`; it recreates it at every boot. If Docker Desktop or
+Colima owns the path, the menubar says so and pratico leaves it alone.
+
+Containers that mount the Docker socket (`-v /var/run/docker.sock:/var/run/docker.sock`)
+reach pratico, with or without the link.
+
 Everyday commands work as usual: `run`, `ps`, `logs -f`, `exec -it`, `cp`, `stats`,
 `pause`, `stop`, `rm`, `pull`, `push`, `login`, `images`, `rmi`, `save`, `tag`,
 `network create/connect/disconnect`, `events`, healthchecks. `docker build` and volumes
