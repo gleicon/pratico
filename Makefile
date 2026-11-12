@@ -12,7 +12,7 @@ DMG          := $(DIST_DIR)/Pratico-$(VERSION).dmg
 
 ASSETS_DIR   := $(BUILD_DIR)/runtime-assets
 
-.PHONY: all build assets probe test e2e e2e-embedded e2e-registry app sign dmg release install uninstall clean
+.PHONY: all build assets probe test e2e e2e-embedded e2e-registry app sign dmg release install run uninstall clean
 
 all: build
 
@@ -76,6 +76,10 @@ release:
 install: app
 	rm -rf "$(INSTALL_DIR)/Pratico.app"
 	cp -R "$(APP)" "$(INSTALL_DIR)/"
+
+# Installs and opens the app: its menubar item starts the daemon.
+run: install
+	open "$(INSTALL_DIR)/Pratico.app"
 
 uninstall:
 	rm -rf "$(INSTALL_DIR)/Pratico.app"
