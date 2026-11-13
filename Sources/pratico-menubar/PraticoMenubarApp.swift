@@ -12,11 +12,16 @@ struct PraticoMenubarApp: App {
             Image(systemName: daemon.hasUnseenSerious ? "exclamationmark.shield.fill"
                   : daemon.isRunning ? "shippingbox.fill" : "shippingbox")
         }
+        // ⌘, (SPEC FR-34): config.toml as a form.
+        Settings {
+            SettingsView(daemon: daemon)
+        }
     }
 }
 
 struct StatusMenu: View {
     let daemon: DaemonController
+    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         // FR-5: state, socket path, API version.
@@ -63,6 +68,7 @@ struct StatusMenu: View {
                 ForEach(daemon.registries.warnings, id: \.self) { w in
                     Text("⚠︎ " + w.replacingOccurrences(of: "pratico: ", with: ""))
                 }
+                Text(daemon.registries.policy.keepLogins ? "docker login is kept for clients that send none" : "docker login is checked, not kept (as dockerd)")
                 if !daemon.registries.logins.isEmpty { Divider() }
                 ForEach(daemon.registries.logins) { l in
                     Button("Remove login \(l.username) @ \(l.server)") { daemon.removeLogin(l.server) }
@@ -81,6 +87,12 @@ struct StatusMenu: View {
             Button("Working…") {}.disabled(true)
         }
         Divider()
+        // A menubar app is never frontmost on its own; bring the window forward.
+        Button("Settings…") {
+            NSApp.activate()
+            openSettings()
+        }
+        .keyboardShortcut(",")
         Button("Quit Pratico") { NSApplication.shared.terminate(nil) }
             .keyboardShortcut("q")
             .onAppear { daemon.markAlertsSeen() }

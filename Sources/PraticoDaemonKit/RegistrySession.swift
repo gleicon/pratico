@@ -23,6 +23,8 @@ struct RegistryPolicy: @unchecked Sendable {
     var httpHosts: [String] = []
     var httpLoopback = true
     var systemRoots = true
+    /// `registry_keep_logins`: keep `docker login` credentials, or only check them.
+    var keepLogins = true
     var cas: [CA] = []
     /// The CA certificates themselves, in `cas` order.
     var anchors: [SecCertificate] = []
@@ -34,6 +36,7 @@ struct RegistryPolicy: @unchecked Sendable {
         p.httpHosts = config.registryHTTP.map { $0.lowercased() }
         p.httpLoopback = config.registryHTTPLoopback
         p.systemRoots = config.registrySystemRoots
+        p.keepLogins = config.registryKeepLogins
         // SSL_CERT_FILE adds to the roots here, unlike Containerization's client, where it
         // replaced them (and Docker Hub stopped verifying).
         var files = config.registryCA
@@ -139,6 +142,7 @@ struct RegistryPolicy: @unchecked Sendable {
     /// The part of `registries.json` the menubar shows.
     var summary: JSON {
         ["httpLoopback": .bool(httpLoopback), "http": .array(httpHosts.map { .string($0) }), "systemRoots": .bool(systemRoots),
+         "keepLogins": .bool(keepLogins),
          "ca": .array(cas.map { ["file": .string($0.file), "subject": .string($0.subject), "sha256": .string($0.sha256)] })]
     }
 }

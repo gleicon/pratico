@@ -481,3 +481,14 @@ private let grypeSample = Data(#"""
     let old = try JSONDecoder().decode(ShimMount.self, from: Data(#"{"source":"/a","destination":"/b","readOnly":false}"#.utf8))
     #expect(old == ShimMount(source: "/a", destination: "/b", readOnly: false))
 }
+
+@Test func loginsNotKeptAreNeverReadBack() throws {
+    var p = try RegistryPolicy.load(try Config.parse("registry_keep_logins = false"), environment: [:])
+    #expect(!p.keepLogins)
+    let r = Registries(policy: p, home: FileManager.default.temporaryDirectory)
+    #expect(r.credentials(nil, for: "registry-1.docker.io") == nil)
+    let sent = RegistryAuth(username: "u", password: "p", server: "reg.local")
+    #expect(r.credentials(sent, for: "reg.local")?.username == "u")
+    p.keepLogins = true
+    #expect(p.summary["keepLogins"]?.bool == true)
+}

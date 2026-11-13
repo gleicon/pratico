@@ -51,6 +51,8 @@ public struct Config: Equatable, Sendable {
             summary: "PEM files of extra CA certificates trusted for registries, added to the system's trusted roots"),
         Key(name: "registry_system_roots", defaultValue: .bool(true),
             summary: "Trust the system's roots for registries; false trusts only registry_ca"),
+        Key(name: "registry_keep_logins", defaultValue: .bool(true),
+            summary: "Keep docker login credentials in pratico's Keychain items, for clients that send none; false only checks them, as dockerd does"),
     ]
 
     /// Values set in the file, by key.
@@ -72,6 +74,7 @@ public struct Config: Equatable, Sendable {
     public var registryHTTPLoopback: Bool { if case .bool(let v) = value("registry_http_loopback") { v } else { true } }
     public var registryCA: [String] { if case .strings(let v) = value("registry_ca") { v } else { [] } }
     public var registrySystemRoots: Bool { if case .bool(let v) = value("registry_system_roots") { v } else { true } }
+    public var registryKeepLogins: Bool { if case .bool(let v) = value("registry_keep_logins") { v } else { true } }
 
     // MARK: Loading
 
@@ -93,6 +96,28 @@ public struct Config: Equatable, Sendable {
         guard FileManager.default.fileExists(atPath: url.path) else { return Config() }
         let text = try String(contentsOf: url, encoding: .utf8)
         return try parse(text)
+    }
+
+    /// `text` with only `name`'s line changed: replaced, appended, or removed for `nil` (back
+    /// to the default). Comments and every other line stay as they are (FR-34).
+    public static func setting(_ name: String, to value: Value?, in text: String) throws -> String {
+        var lines = text.isEmpty ? [] : text.components(separatedBy: "\n")
+        if lines.last == "" { lines.removeLast() }
+        let index = lines.firstIndex {
+            let line = stripComment($0)
+            guard let eq = line.firstIndex(of: "=") else { return false }
+            return line[..<eq].trimmingCharacters(in: .whitespaces) == name
+        }
+        let line = value.map { "\(name) = \($0)" }
+        switch (index, line) {
+        case (let i?, let line?): lines[i] = line
+        case (let i?, nil): lines.remove(at: i)
+        case (nil, let line?): lines.append(line)
+        case (nil, nil): break
+        }
+        let out = lines.isEmpty ? "" : lines.joined(separator: "\n") + "\n"
+        _ = try parse(out)
+        return out
     }
 
     public static func parse(_ text: String) throws -> Config {

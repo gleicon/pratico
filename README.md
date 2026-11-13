@@ -97,8 +97,11 @@ network beyond image pulls.
 
 ## Configure
 
-`~/.pratico/config.toml` holds overrides only; unknown keys stop the daemon with the
-key and line named.
+**Settings…** (⌘, from the menubar) edits `~/.pratico/config.toml` as a form: each key
+shows its value and whether it comes from the file or the default, and saving rewrites
+only the keys you changed, keeping your comments. The daemon reads the file when it
+starts; Settings offers the restart. The file holds overrides only; unknown keys stop
+the daemon with the key and line named.
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -112,6 +115,7 @@ key and line named.
 | `registry_http` | `[]` | embedded runtime: other registries (`host`, `host:port`, or an IPv4 CIDR such as `10.0.0.0/8`) allowed plain HTTP, Docker's insecure-registries |
 | `registry_ca` | `[]` | embedded runtime: PEM files of extra CAs, added to the system's trusted roots |
 | `registry_system_roots` | `true` | embedded runtime: `false` trusts only `registry_ca` |
+| `registry_keep_logins` | `true` | embedded runtime: keep `docker login` credentials in pratico's Keychain items for clients that send none; `false` only checks them, as `dockerd` does, and never reads the Keychain |
 
 Image scanning uses osv-scanner and grype when installed, plus CISA's KEV list; see
 [docs/design/image-scanning.md](docs/design/image-scanning.md).

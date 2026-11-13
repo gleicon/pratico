@@ -62,6 +62,7 @@ final class DaemonController {
         struct Policy: Decodable, Equatable {
             var httpLoopback = true
             var systemRoots = true
+            var keepLogins = true
         }
         var policy = Policy()
         var warnings: [String] = []

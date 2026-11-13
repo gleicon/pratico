@@ -59,3 +59,19 @@ import Testing
     #expect(throws: Config.ParseError.self) { try Config.parse(#"scan_block = "sometimes""#) }
     #expect(throws: Config.ParseError.self) { try Config.parse(#"scan_allow = "sha256:abc""#) }
 }
+
+@Test func settingWritesOnlyThatKeyAndKeepsComments() throws {
+    // AC-37: from no file, one change writes one key.
+    #expect(try Config.setting("default_memory", to: .int(2048), in: "") == "default_memory = 2048\n")
+    let text = """
+        # mine
+        scan = false  # quiet
+        registry_http = ["a"]
+        """
+    let changed = try Config.setting("registry_http", to: .strings(["a", "10.0.0.0/8"]), in: text)
+    #expect(changed == "# mine\nscan = false  # quiet\nregistry_http = [\"a\", \"10.0.0.0/8\"]\n")
+    #expect(try Config.parse(changed).registryHTTP == ["a", "10.0.0.0/8"])
+    #expect(try Config.setting("scan", to: nil, in: text) == "# mine\nregistry_http = [\"a\"]\n")
+    #expect(try Config.setting("registry_keep_logins", to: .bool(false), in: text).hasSuffix("registry_keep_logins = false\n"))
+    #expect(throws: Config.ParseError.self) { try Config.setting("default_cpus", to: .int(999), in: "") }
+}

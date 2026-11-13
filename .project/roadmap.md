@@ -76,7 +76,7 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 - [ ] Alert on a container turning `unhealthy` (AC-52, menubar part)
 - [x] View logs: daemon log in `~/.pratico/daemon.log`, opened in Console; Status submenu and Copy Diagnostics (FR-32)
 - [ ] View alerts quick action (FR-32)
-- [ ] Preferences panel shows effective values and source; saving writes only the changed key (AC-37)
+- [x] Preferences panel (⌘,) shows effective values and source; saving writes only the changed key (AC-37)
 
 ## Snapshot
 

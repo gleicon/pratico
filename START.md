@@ -75,7 +75,7 @@ Pulled images are scanned in the background with osv-scanner and grype if they a
 installed (`brew install osv-scanner grype`). An image with a known-malicious package or
 a CVE in CISA's exploited list is stopped and blocked: starting it fails with the
 finding named, and the menubar shows an alert. To run it anyway, add its ID to
-`~/.pratico/config.toml`:
+`scan_allow` in **Settings…** (⌘,), or in `~/.pratico/config.toml`:
 
 ```toml
 scan_allow = ["sha256:…"]

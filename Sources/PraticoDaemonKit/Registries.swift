@@ -20,7 +20,8 @@ final class Registries: Sendable {
         stateFile = Pratico.registriesPath(home: home)
     }
 
-    /// Checks the credentials with the registry, then keeps them.
+    /// Checks the credentials with the registry, then keeps them unless
+    /// `registry_keep_logins = false`.
     func login(_ auth: RegistryAuth) throws {
         let client = try RegistrySession(host: auth.server, credentials: (auth.username, auth.password), policy: policy)
         do {
@@ -30,6 +31,7 @@ final class Registries: Sendable {
         } catch {
             throw APIError(500, "login to \(auth.server) failed: \(error)")
         }
+        guard policy.keepLogins else { return }
         do { try Self.keychain.save(hostname: auth.server, username: auth.username, password: auth.password) } catch {
             throw APIError(500, "pratico: cannot keep the login in the Keychain: \(error)")
         }
@@ -52,9 +54,11 @@ final class Registries: Sendable {
     }
 
     /// The request's credentials for `host`'s own registry, else the ones `docker login`
-    /// kept (clients other than the Docker CLI rarely send any).
+    /// kept (clients other than the Docker CLI rarely send any). With
+    /// `registry_keep_logins = false` the Keychain is never read, as with dockerd.
     func credentials(_ auth: RegistryAuth?, for host: String) -> (username: String, password: String)? {
         if let auth, auth.server == host { return (auth.username, auth.password) }
+        guard policy.keepLogins else { return nil }
         guard let kept = try? KeychainQuery().get(securityDomain: Self.keychainDomain, hostname: host) else { return nil }
         return (kept.username, kept.password)
     }
