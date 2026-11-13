@@ -1,3 +1,4 @@
+import ContainerizationArchive
 import Foundation
 import Testing
 
@@ -491,4 +492,35 @@ private let grypeSample = Data(#"""
     #expect(r.credentials(sent, for: "reg.local")?.username == "u")
     p.keepLogins = true
     #expect(p.summary["keepLogins"]?.bool == true)
+}
+
+@Test func tarKeepsLinksAsLinksAndRefusesEscapes() throws {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appending(path: "pratico-tar-\(UUID().uuidString.prefix(8))")
+    defer { try? fm.removeItem(at: root) }
+    let src = root.appending(path: "src/d")
+    try fm.createDirectory(at: src, withIntermediateDirectories: true)
+    try Data("hi".utf8).write(to: src.appending(path: "f"))
+    try fm.createSymbolicLink(atPath: src.appending(path: "out").path, withDestinationPath: "/etc/hosts")
+    let archive = root.appending(path: "a.tar")
+    try Tar.create(archive, base: root.appending(path: "src"), names: ["d"])
+
+    let dst = root.appending(path: "dst")
+    try Tar.extract(archive, to: dst)
+    #expect(try String(contentsOf: dst.appending(path: "d/f"), encoding: .utf8) == "hi")
+    #expect(try fm.destinationOfSymbolicLink(atPath: dst.appending(path: "d/out").path) == "/etc/hosts")
+
+    // A member that climbs out of the destination is refused.
+    let evil = root.appending(path: "evil.tar")
+    let w = try ArchiveWriter(configuration: ArchiveWriterConfiguration(format: .pax, filter: .none))
+    try w.open(file: evil)
+    let e = WriteEntry()
+    e.path = "../escaped"
+    e.fileType = .regular
+    e.permissions = 0o644
+    e.size = 1
+    try w.writeEntry(entry: e, data: Data("x".utf8))
+    try w.finishEncoding()
+    #expect(throws: APIError.self) { try Tar.extract(evil, to: root.appending(path: "dst2")) }
+    #expect(!fm.fileExists(atPath: root.appending(path: "escaped").path))
 }

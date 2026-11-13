@@ -14,6 +14,7 @@ public final class Daemon: @unchecked Sendable {
     let events = EventBus()
     let networks: NetworkService
     let scans: ScanService
+    let disk: DiskService
     /// Registry trust and kept logins; embedded runtime only.
     let registries: Registries?
     let startedAt = Date()
@@ -64,6 +65,7 @@ public final class Daemon: @unchecked Sendable {
         self.archives = ArchiveService(runtime: runtime, containers: containers)
         self.stats = StatsService(runtime: runtime, containers: containers)
         self.scans = ScanService(home: home, images: images, containers: containers, config: config)
+        self.disk = DiskService(home: home, images: images, containers: containers)
         containers.startGate = { [scans] rec in scans.blockReason(imageId: rec.imageId) }
     }
 
@@ -139,7 +141,7 @@ public final class Daemon: @unchecked Sendable {
         // registry trust and logins.
         case ("GET", "pratico") where parts.count == 2 && parts[1] == "status":
             let c = containers.counts
-            conn.json(200, ["Version": .string(Pratico.version), "Runtime": containers.embedded == nil ? "container" : "embedded",
+            conn.json(200, ["Version": .string(Pratico.version), "Pid": .int(Int64(getpid())), "Runtime": containers.embedded == nil ? "container" : "embedded",
                             "StartedAt": .string(startedAt.ISO8601Format()), "Socket": .string(socketPath),
                             "Containers": .int(Int64(c.total)), "ContainersRunning": .int(Int64(c.running))])
             return .keepAlive
@@ -149,6 +151,22 @@ public final class Daemon: @unchecked Sendable {
         case ("DELETE", "pratico") where parts.count == 4 && parts[1] == "registries" && parts[2] == "logins":
             try embeddedRegistries().logout(parts[3].removingPercentEncoding ?? parts[3])
             conn.respond(204)
+            return .keepAlive
+        case ("GET", "pratico") where parts.count == 2 && parts[1] == "disk":
+            conn.json(200, disk.usage())
+            return .keepAlive
+        case ("GET", "system") where parts.count == 2 && parts[1] == "df":
+            conn.json(200, disk.df())
+            return .keepAlive
+        case ("POST", "containers") where parts.count == 2 && parts[1] == "prune":
+            conn.json(200, try disk.pruneContainers(filters: ContainerService.parseFilters(req.query["filters"])))
+            return .keepAlive
+        // Nothing to prune yet; answering lets `docker system prune` finish.
+        case ("POST", "build") where parts.count == 2 && parts[1] == "prune":
+            conn.json(200, ["CachesDeleted": [], "SpaceReclaimed": 0])
+            return .keepAlive
+        case ("POST", "volumes") where parts.count == 2 && parts[1] == "prune":
+            conn.json(200, ["VolumesDeleted": [], "SpaceReclaimed": 0])
             return .keepAlive
         case ("GET", "info") where parts.count == 1:
             conn.json(200, info())

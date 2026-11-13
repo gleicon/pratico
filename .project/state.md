@@ -9,6 +9,8 @@
 - Users must not need Apple's `container` installed (2026-11-09). The embedded runtime (SPEC D-26, `docs/design/runtime.md`) replaces the CLI backend; limitations of the CLI are bugs to remove, not documented behavior.
 - Behave like Docker by default and go beyond it where that helps (agents especially); never ship a weaker approximation because an acceptance criterion is literally met.
 - Embedded networking is pure Swift with no extra binaries (SPEC D-27). Kernel and `vminit` are bundled, not downloaded by users.
+- pratico runs no shell and no external program (2026-11-12): native Swift and system APIs only (tar through ContainerizationArchive, daemon start by `posix_spawn` of its own binary, stop by SIGTERM). Spawning pratico's own binaries (`pratico-daemon`, `pratico-shim`) is fine. Left to retire: the `container` CLI backend (`AppleContainer`) and the scanners (`osv-scanner`, `grype`, SPEC D-24).
+- Every removal the user can trigger asks first (cleanup, logins, alerts).
 
 # hazards
 
@@ -27,5 +29,6 @@
 - vminitd has no address or route delete RPC: a hot-disconnected slot keeps its address on a down link. The switch, not the guest, is what cuts traffic; keep every delivery path behind its port registry (`NetSwitch.deliver`).
 - `SSL_CERT_FILE` replaces the daemon registry client's trust roots (Docker Hub stops verifying). macOS rejects a self-signed CA cert used directly as a TLS server cert; test registries need a CA plus a leaf.
 - Never run pratico code as root from `Pratico.app`: the bundle is the user's (drag install), `/Applications` is group-writable by `admin`, and ad-hoc signing gives launchd nothing to verify, so a root job with `BundleProgram` is a user-to-root escalation. For `/var/run/docker.sock` (D-30) pratico only shows `sudo` commands; the user runs them (2026-11-12: keep it simple, no admin prompt from the app).
+- The daemon refuses to start while another answers on its socket (`DaemonError.alreadyServing`, no `daemon.err` written); it used to unlink the socket and take over. The menubar spawns it (own session, reaped by `waitpid`), and launchd starts it at login from `~/Library/LaunchAgents/dev.pratico.daemon.plist`.
 - Do not go back to `SMAppService` for the daemon while builds are ad-hoc signed: its Background Task Management record pins the daemon's code signature, and after a rebuild, a move, or an update launchd refuses it (`OS_REASON_CODESIGNING | Launch Constraint Violation`, job `spawn failed`, `needs LWCR update`). The menubar just showed "starting…" forever. `LaunchAgent.start()` still unregisters an old SMAppService registration of the same label.
 - `bash` reads scripts while running: never edit `e2e/*.sh` during a run.

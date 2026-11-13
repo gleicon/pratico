@@ -285,7 +285,6 @@ public final class HTTPServer: @unchecked Sendable {
         signal(SIGPIPE, SIG_IGN)
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw DaemonError.system("socket", errno) }
-        unlink(path)
 
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
@@ -296,6 +295,15 @@ public final class HTTPServer: @unchecked Sendable {
             for (i, b) in bytes.enumerated() { dst[i] = b }
         }
         let len = socklen_t(MemoryLayout<sockaddr_un>.size)
+        // A live daemon keeps its socket: a second one must not take it over.
+        let probe = socket(AF_UNIX, SOCK_STREAM, 0)
+        let live = withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(probe, $0, len) } } == 0
+        close(probe)
+        if live {
+            close(fd)
+            throw DaemonError.alreadyServing(path)
+        }
+        unlink(path)
         let rc = withUnsafePointer(to: &addr) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, len) }
         }
@@ -351,11 +359,14 @@ public final class HTTPServer: @unchecked Sendable {
 public enum DaemonError: Error, CustomStringConvertible {
     case system(String, Int32)
     case message(String)
+    /// Another daemon answers on the socket; it is left alone.
+    case alreadyServing(String)
 
     public var description: String {
         switch self {
         case .system(let what, let code): "\(what): \(String(cString: strerror(code)))"
         case .message(let m): m
+        case .alreadyServing(let path): "another pratico-daemon is already serving \(path)"
         }
     }
 }

@@ -51,7 +51,11 @@ signal(SIGPIPE, SIG_IGN)
 
 let daemon: Daemon
 do { daemon = try Daemon(home: home, config: config, runtime: runtime) } catch { fail("\(error)", code: 4) }
-do { try daemon.start() } catch { fail("\(error)") }
+do { try daemon.start() } catch let e as DaemonError {
+    // A second copy says why in the log, but leaves no startup error: the first is fine.
+    if case .alreadyServing = e { Pratico.log("pratico-daemon: \(e)"); exit(1) }
+    fail("\(e)")
+} catch { fail("\(error)") }
 try? FileManager.default.removeItem(at: Pratico.startupErrorPath(home: home))
 Pratico.log("pratico-daemon: listening on \(daemon.socketPath)")
 

@@ -17,6 +17,7 @@ final class DaemonController {
     private(set) var state: State = .stopped
     private(set) var error: String?
     private(set) var status: Status?
+    private(set) var disk: DiskUsage?
     private(set) var alerts: [Alert] = []
     private(set) var registries = Registries()
     /// Time of the newest alert the user has seen (menu opened or notified).
@@ -36,6 +37,7 @@ final class DaemonController {
     /// `GET /pratico/status`.
     struct Status: Decodable, Equatable {
         var Version: String
+        var Pid: Int32
         var Runtime: String
         var StartedAt: Date
         var Socket: String
@@ -70,6 +72,7 @@ final class DaemonController {
     }
 
     func removeLogin(_ server: String) {
+        guard confirm("Remove the login for \(server)?", "Pratico forgets the credentials it kept for \(server). Docker's own login, if any, stays.", button: "Remove") else { return }
         let path = "/pratico/registries/logins/" + (server.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: "/"))) ?? server)
         Task.detached { _ = DaemonProbe.request("DELETE", path) }
         registries.logins.removeAll { $0.server == server }
@@ -97,6 +100,7 @@ final class DaemonController {
     }
 
     func clearAlerts() {
+        guard confirm("Clear \(alerts.count) alert\(alerts.count == 1 ? "" : "s")?", "Blocked images stay blocked; only the list is cleared.", button: "Clear") else { return }
         try? FileManager.default.removeItem(at: Pratico.alertsPath())
         alerts = []
     }
@@ -144,7 +148,18 @@ final class DaemonController {
 
     func stop() {
         state = .stopping
-        agent.stop()
+        agent.stop(pid: status?.Pid)
+    }
+
+    /// Stop, wait until the old daemon has let go of the socket (it stops its containers'
+    /// supervision cleanly first), then start.
+    func restart() async {
+        stop()
+        for _ in 0..<60 {
+            if await Task.detached(operation: { DaemonController.probeVersion() == nil }).value { break }
+            try? await Task.sleep(for: .milliseconds(250))
+        }
+        start()
     }
 
     /// Console follows the file as it grows; no terminal needed.
@@ -232,6 +247,18 @@ final class DaemonController {
         refreshDefaultSocket()
     }
 
+    /// Every removal asks first.
+    private func confirm(_ title: String, _ text: String, button: String) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = text
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: button)
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate()
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
     /// An explanation and Terminal commands the user runs themselves, with a Copy button.
     private func showCommands(title: String, text: String, commands: String) {
         let alert = NSAlert()
@@ -258,9 +285,59 @@ final class DaemonController {
         update(\.defaultSocket, DefaultSocket.state(target: socketPath))
     }
 
-    /// Refreshes once a second, so state changes show within 2 s (SPEC FR-30).
+    /// Lists what goes and what it frees, asks, then uses Docker's own prune endpoints.
+    func cleanUp(containers: Bool, images: Bool) {
+        guard let d = disk else { return }
+        var lines: [String] = []
+        if containers { lines += d.stopped.map { "container \($0.Name)  \(bytes($0.Size + $0.Logs))" } }  // its logs go too
+        if images { lines += d.unusedImages.map { "image \($0.Tags.first ?? String($0.Id.dropFirst(7).prefix(12)))  \(bytes($0.Size))" } }
+        if images && d.Images.Unreferenced > 0 { lines.append("leftover image data  \(bytes(d.Images.Unreferenced))") }
+        let alert = NSAlert()
+        alert.messageText = "Remove \(lines.count) item\(lines.count == 1 ? "" : "s")?"
+        alert.informativeText = lines.prefix(15).joined(separator: "\n") + (lines.count > 15 ? "\n… and \(lines.count - 15) more" : "")
+            + "\n\nRunning containers and the images they use are kept."
+        alert.addButton(withTitle: "Remove")
+        alert.addButton(withTitle: "Cancel")
+        alert.alertStyle = .warning
+        NSApp.activate()
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        Task {
+            let freed = await Task.detached { () -> Int64 in
+                var freed: Int64 = 0
+                // Containers first, so the images they held become unused.
+                if containers { freed += Self.reclaimed(DaemonProbe.request("POST", "/containers/prune", timeout: 300)) }
+                if images {
+                    freed += Self.reclaimed(DaemonProbe.request("POST", "/images/prune?filters=%7B%22dangling%22%3A%5B%22false%22%5D%7D", timeout: 300))
+                }
+                return freed
+            }.value
+            await refreshDisk()
+            let done = NSAlert()
+            done.messageText = "Freed \(bytes(freed))"
+            done.informativeText = "\(bytes(disk?.Total ?? 0)) used, \(bytes(disk?.Free ?? 0)) free on this Mac."
+            NSApp.activate()
+            done.runModal()
+        }
+    }
+
+    nonisolated private static func reclaimed(_ r: DaemonProbe.Response?) -> Int64 {
+        guard let r, let obj = try? JSONSerialization.jsonObject(with: r.body) as? [String: Any] else { return 0 }
+        return (obj["SpaceReclaimed"] as? NSNumber)?.int64Value ?? 0
+    }
+
+    func refreshDisk() async {
+        let usage = await Task.detached { () -> DiskUsage? in
+            guard let r = DaemonProbe.request("GET", "/pratico/disk", timeout: 30), r.status == 200 else { return nil }
+            return try? JSONDecoder().decode(DiskUsage.self, from: r.body)
+        }.value
+        update(\.disk, usage)
+    }
+
+    /// Refreshes once a second, so state changes show within 2 s (SPEC FR-30); disk use,
+    /// which walks the store, every 10 s.
     private func poll() {
         pollTask = Task { [weak self] in
+            var tick = 0
             while !Task.isCancelled {
                 let (version, status) = await Task.detached { (DaemonController.probeVersion(), DaemonController.probeStatus()) }.value
                 guard let self else { return }
@@ -269,6 +346,8 @@ final class DaemonController {
                 self.refreshAlerts()
                 self.refreshRegistries()
                 self.refreshDefaultSocket()
+                if tick % 10 == 0 { await self.refreshDisk() }
+                tick += 1
                 try? await Task.sleep(for: .seconds(1))
             }
         }

@@ -46,6 +46,8 @@ struct StatusMenu: View {
             Button("View Daemon Log…") { daemon.openLog() }
             Button("Copy Diagnostics") { daemon.copyDiagnostics() }
         }
+        // Space used and cleanup, better than `docker system df` and `prune`.
+        if daemon.isRunning { DiskMenu(daemon: daemon) }
         // ~/.pratico/docker.sock is the default; this path needs root, which pratico never asks for.
         Button("Use with docker…") { daemon.showDockerSetup() }
         Button("Use \(DefaultSocket.path)…") { daemon.showDefaultSocketHelp() }

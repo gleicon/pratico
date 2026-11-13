@@ -14,6 +14,8 @@ protocol ImageBackend: Sendable {
     func inUse() -> Set<String>
     func tag(_ source: String, _ target: String) throws
     func delete(_ ref: String) throws
+    /// Deletes stored blobs no image references (failed pulls, older layouts); bytes freed.
+    func removeUnreferencedBlobs() -> Int64
     /// `progress` gets Docker JSON progress messages, without `id`.
     func pull(_ ref: String, platform: String?, auth: RegistryAuth?, progress: @escaping @Sendable (JSON) -> Void) throws
     func push(_ ref: String, auth: RegistryAuth?, progress: @escaping @Sendable (JSON) -> Void) throws
@@ -34,6 +36,8 @@ struct BackendError: Error, CustomStringConvertible {
 
 /// The original backend: Apple's `container` CLI and its image store.
 struct AppleImageBackend: ImageBackend {
+    func removeUnreferencedBlobs() -> Int64 { 0 }  // Apple's store is its own
+
     let runtime: AppleContainer
 
     func images() -> [JSON] { runtime.images() }
@@ -69,7 +73,7 @@ struct AppleImageBackend: ImageBackend {
         let archive = dir.deletingLastPathComponent().appending(path: "oci.tar").path
         let r = runtime.run(["image", "save", "--platform", "\(os)/\(arch)", "-o", archive, ref])
         guard r.ok else { throw BackendError(r.errorText) }
-        guard ImageService.tar(["-xf", archive, "-C", dir.path]) else { throw BackendError("cannot unpack saved image") }
+        do { try Tar.extract(URL(filePath: archive), to: dir) } catch { throw BackendError("cannot unpack saved image: \(error)") }
     }
 
     /// Apple takes credentials only from its Keychain, so a forwarded login is stored there.
@@ -153,6 +157,10 @@ final class EmbeddedImageBackend: ImageBackend, @unchecked Sendable {
         try blocking { [store] in try await store.delete(reference: ref, performCleanup: true) }
     }
 
+    func removeUnreferencedBlobs() -> Int64 {
+        (try? blocking { [store] in Int64(try await store.cleanUpOrphanedBlobs().freed) }) ?? 0
+    }
+
     /// pratico's registry client for the image's registry, with the request's credentials
     /// for that registry or the login `docker login` kept, and where the image is on it.
     /// The client's notes (plain HTTP, an extra CA) go to the progress output.
@@ -219,8 +227,11 @@ final class EmbeddedImageBackend: ImageBackend, @unchecked Sendable {
         let config = JSON.parse(configData) ?? [:]
         let size = manifest.layers.reduce(Int64(0)) { $0 + $1.size }
         let digest = img.digest
+        // The content store blobs (hex digests) the image holds, so a shared layer counts once (Disk.swift).
+        let blobs = (try? await img.referencedDigests()) ?? []
         return [
             "id": .string(String(digest.dropFirst("sha256:".count))),
+            "blobs": JSON(blobs),
             "configuration": [
                 "name": .string(img.reference),
                 "descriptor": ["digest": .string(digest), "size": .int(img.descriptor.size), "mediaType": .string(img.mediaType)],

@@ -189,9 +189,10 @@ public final class ImageService: Sendable {
 
     /// `POST /images/prune`. Every Apple image has a reference, so nothing is dangling and
     /// the default prune removes nothing; `dangling=false` (`prune -a`) removes unused images.
+    /// Either way, blobs no image references are collected too.
     func prune(filters: [String: [String]]) -> JSON {
         guard filters["dangling"]?.contains(where: { $0 == "false" || $0 == "0" }) == true else {
-            return ["ImagesDeleted": .null, "SpaceReclaimed": 0]
+            return ["ImagesDeleted": .null, "SpaceReclaimed": .int(backend.removeUnreferencedBlobs())]
         }
         let used = inUse()
         var deleted: [JSON] = []
@@ -201,6 +202,7 @@ public final class ImageService: Sendable {
             deleted += items
             reclaimed += Self.variant(img.record)?["size"]?.int ?? 0
         }
+        reclaimed += backend.removeUnreferencedBlobs()
         return ["ImagesDeleted": deleted.isEmpty ? .null : .array(deleted), "SpaceReclaimed": .int(reclaimed)]
     }
 
@@ -311,25 +313,14 @@ public final class ImageService: Sendable {
         ]]
         try docker.encoded().write(to: dir.appending(path: "manifest.json"))
 
-        guard Self.tar(["-cf", file.path, "-C", dir.path, "manifest.json", "index.json", "oci-layout", "blobs"]) else {
-            throw APIError(500, "cannot write image archive")
+        do { try Tar.create(file, base: dir, names: ["manifest.json", "index.json", "oci-layout", "blobs"]) } catch {
+            throw APIError(500, "cannot write image archive: \(error)")
         }
         return img
     }
 
     static func isDigest(_ s: String) -> Bool {
         s.count == 71 && s.hasPrefix("sha256:") && s.dropFirst(7).allSatisfy { $0.isHexDigit && !$0.isUppercase }
-    }
-
-    static func tar(_ args: [String]) -> Bool {
-        let p = Process()
-        p.executableURL = URL(filePath: "/usr/bin/tar")
-        p.arguments = args
-        p.standardOutput = FileHandle.nullDevice
-        p.standardError = FileHandle.nullDevice
-        guard (try? p.run()) != nil else { return false }
-        p.waitUntilExit()
-        return p.terminationStatus == 0
     }
 
     private static func emitter(_ conn: Connection) -> @Sendable (JSON) -> Void {

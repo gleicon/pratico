@@ -2,28 +2,28 @@ import Foundation
 import PraticoCore
 import ServiceManagement
 
-/// The daemon's launch agent, `~/Library/LaunchAgents/dev.pratico.daemon.plist`, written by
-/// the menubar with this bundle's daemon path (SPEC D-13). Not `SMAppService`: with ad-hoc
-/// signing (D-10) its Background Task Management record pins the daemon's code signature,
-/// and launchd refuses the daemon after any rebuild or update ("Launch Constraint
-/// Violation"). A plain agent runs as the user, so nothing is gained by root or lost.
+/// Runs the bundled daemon (SPEC D-13), natively: no `launchctl`, no shell. Start spawns it
+/// in its own session, so it outlives the menubar, and writes
+/// `~/Library/LaunchAgents/dev.pratico.daemon.plist`, which launchd reads at the next login.
+/// Stop sends it SIGTERM (a clean `docker`-style shutdown) and removes the plist.
+/// Not `SMAppService`: with ad-hoc signing (D-10) its record pins the daemon's code
+/// signature, and launchd refuses the daemon after any rebuild or update.
 struct LaunchAgent {
     static let label = "dev.pratico.daemon"
     let plist = FileManager.default.homeDirectoryForCurrentUser.appending(path: "Library/LaunchAgents/\(label).plist")
-    private var domain: String { "gui/\(getuid())" }
+    private var daemon: String { Bundle.main.bundleURL.appending(path: "Contents/MacOS/pratico-daemon").path }
 
-    /// Writes the plist for this copy of the app and (re)starts the daemon; nil on success.
+    /// nil on success.
     func start() -> String? {
         // Agents registered through SMAppService by older builds hold the same label.
         try? SMAppService.agent(plistName: "\(Self.label).plist").unregister()
         rotateLog()
-        let daemon = Bundle.main.bundleURL.appending(path: "Contents/MacOS/pratico-daemon").path
         let log = Pratico.logPath().path
         let job: [String: Any] = [
             "Label": Self.label,
             "ProgramArguments": [daemon],
-            // At login too; no KeepAlive: a crashed daemon stays stopped and the menubar
-            // shows it (SPEC AC-35).
+            // At login; no KeepAlive: a crashed daemon stays stopped and the menubar shows
+            // it (SPEC AC-35).
             "RunAtLoad": true,
             "StandardOutPath": log,
             "StandardErrorPath": log,
@@ -36,14 +36,38 @@ struct LaunchAgent {
         } catch {
             return "cannot write \(plist.path): \(error.localizedDescription)"
         }
-        _ = launchctl("bootout", "\(domain)/\(Self.label)")
-        return launchctl("bootstrap", domain, plist.path)
+        return spawn(log: log)
     }
 
-    /// Stops the daemon, if running, and removes the plist, so it does not start at login either.
-    func stop() {
-        _ = launchctl("bootout", "\(domain)/\(Self.label)")
+    /// SIGTERM to the running daemon, then no start at login.
+    func stop(pid: Int32?) {
+        if let pid, pid > 0 { kill(pid, SIGTERM) }
         try? FileManager.default.removeItem(at: plist)
+    }
+
+    /// The daemon in its own session, output appended to the log, nothing inherited.
+    private func spawn(log: String) -> String? {
+        var attr: posix_spawnattr_t?
+        posix_spawnattr_init(&attr)
+        defer { posix_spawnattr_destroy(&attr) }
+        posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETSID | POSIX_SPAWN_CLOEXEC_DEFAULT))
+        var actions: posix_spawn_file_actions_t?
+        posix_spawn_file_actions_init(&actions)
+        defer { posix_spawn_file_actions_destroy(&actions) }
+        posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0)
+        posix_spawn_file_actions_addopen(&actions, 1, log, O_WRONLY | O_CREAT | O_APPEND, 0o644)
+        posix_spawn_file_actions_adddup2(&actions, 1, 2)
+        var pid: pid_t = 0
+        let argv: [UnsafeMutablePointer<CChar>?] = [strdup(daemon), nil]
+        defer { argv.forEach { free($0) } }
+        let rc = posix_spawn(&pid, daemon, &actions, &attr, argv, environ)
+        guard rc == 0 else { return "cannot start \(daemon): \(String(cString: strerror(rc)))" }
+        // Reaped here, or its exit would leave a zombie while the menubar runs.
+        DispatchQueue.global().async { [pid] in
+            var status: Int32 = 0
+            waitpid(pid, &status, 0)
+        }
+        return nil
     }
 
     /// One old generation, so the log never grows past about 20 MB.
@@ -53,19 +77,5 @@ struct LaunchAgent {
         let old = log.appendingPathExtension("1")
         try? FileManager.default.removeItem(at: old)
         try? FileManager.default.moveItem(at: log, to: old)
-    }
-
-    private func launchctl(_ args: String...) -> String? {
-        let p = Process()
-        p.executableURL = URL(filePath: "/bin/launchctl")
-        p.arguments = args
-        let err = Pipe()
-        p.standardError = err
-        p.standardOutput = FileHandle.nullDevice
-        do { try p.run() } catch { return "\(error)" }
-        p.waitUntilExit()
-        if p.terminationStatus == 0 { return nil }
-        let message = String(decoding: err.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-        return message.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

@@ -24,6 +24,7 @@ let package = Package(
                 "PraticoCore",
                 .product(name: "Containerization", package: "containerization"),
                 .product(name: "ContainerizationOCI", package: "containerization"),
+                .product(name: "ContainerizationArchive", package: "containerization"),
                 .product(name: "ContainerizationExtras", package: "containerization"),
                 .product(name: "ContainerizationOS", package: "containerization"),
                 .product(name: "Crypto", package: "swift-crypto"),
@@ -34,6 +35,8 @@ let package = Package(
         .executableTarget(name: "pratico-shim", dependencies: ["PraticoDaemonKit"]),
         .executableTarget(name: "pratico-runtime-probe", dependencies: ["PraticoDaemonKit"]),
         .testTarget(name: "PraticoCoreTests", dependencies: ["PraticoCore"]),
-        .testTarget(name: "PraticoDaemonKitTests", dependencies: ["PraticoCore", "PraticoDaemonKit"]),
+        .testTarget(name: "PraticoDaemonKitTests", dependencies: [
+            "PraticoCore", "PraticoDaemonKit", .product(name: "ContainerizationArchive", package: "containerization"),
+        ]),
     ]
 )

@@ -374,7 +374,25 @@ out=$(docker run --rm -v /var/run/docker.sock:/var/run/docker.sock docker:cli do
 expect_eq "-v /var/run/docker.sock reaches pratico" "$out" "linux"
 out=$(docker run --rm --mount "type=bind,source=$SOCK,target=/run/d.sock" docker:cli docker -H unix:///run/d.sock ps --format '{{.Image}}' 2>&1)
 expect_eq "any host Unix socket can be mounted" "$out" "docker:cli"
-docker rmi docker:cli >/dev/null 2>&1
+
+# Disk use and cleanup: running containers and the images they use are kept.
+docker pull -q busybox >/dev/null 2>&1
+docker run -d --name d-keep alpine sleep 300 >/dev/null
+docker run --name d-gone alpine sh -c 'head -c 5000000 /dev/urandom >/big' >/dev/null
+disk=$(curl -s --unix-socket "$SOCK" http://d/pratico/disk)
+check "disk use counts a stopped container's written data" python3 -c "import json,sys; d=json.loads(sys.argv[1]); assert d['Containers']['Stopped'] >= 5000000 and d['Images']['Unused'] > 0 and d['Total'] > 0" "$disk"
+check "disk use slices add up to the total" python3 -c "import json,sys; d=json.loads(sys.argv[1]); i,c=d['Images'],d['Containers']; assert d['Total'] == i['Size']+c['Running']+c['Stopped']+c['Logs']+d['Runtime']+d['Scans']" "$disk"
+df=$(docker system df --format '{{.Type}} {{.TotalCount}} {{.Active}}' 2>&1)
+expect_has "docker system df counts images" "$df" "Images $(docker images -q | sort -u | wc -l | tr -d ' ') 1"
+expect_has "docker system df counts containers" "$df" "Containers 2 1"
+docker container prune -f >/dev/null 2>&1
+check "container prune removes stopped containers" sh -c "! docker inspect d-gone >/dev/null 2>&1"
+check "container prune keeps running ones" docker inspect d-keep
+docker image prune -a -f >/dev/null 2>&1
+check "image prune -a removes unused images" sh -c "! docker image inspect busybox >/dev/null 2>&1"
+check "image prune -a keeps images in use" docker image inspect alpine
+check "docker system prune finishes" docker system prune -f
+docker rm -f d-keep >/dev/null
 
 check "rmi removes the image" docker rmi alpine
 if [ -s "$HOME_DIR/apple-calls" ]; then bad "no Apple container CLI calls" "$(head -3 "$HOME_DIR/apple-calls")"; else ok "no Apple container CLI calls"; fi

@@ -2,20 +2,15 @@ import Observation
 import PraticoCore
 import SwiftUI
 
-/// `config.toml` as a form (SPEC FR-34): each key's effective value and where it comes from.
-/// Saving rewrites only the keys changed here, so comments and the rest of the file stay.
+/// `config.toml` behind a standard Settings window (SPEC FR-34). A change is written at once
+/// and only to its own key, so comments and the rest of the file stay.
 @MainActor @Observable
 final class SettingsModel {
     private(set) var file = Config()
     private(set) var text = ""
-    /// Values on screen, by key; saved ones equal `file`'s effective values.
-    var values: [String: Config.Value] = [:]
-    /// List keys as typed, one entry per line; re-joining the parsed list would eat the
-    /// newline that starts the next entry.
-    private var drafts: [String: String] = [:]
     private(set) var loadError: String?
     private(set) var saveError: String?
-    /// Saved since the daemon started: it reads `config.toml` only at startup.
+    /// Changed since the daemon started: it reads `config.toml` only at startup.
     private(set) var needsRestart = false
 
     init() { reload() }
@@ -29,44 +24,23 @@ final class SettingsModel {
             file = Config()
             loadError = "\(error)"
         }
-        values = Dictionary(uniqueKeysWithValues: Config.keys.map { ($0.name, file.value($0.name)!) })
-        drafts = values.compactMapValues { if case .strings(let v) = $0 { v.joined(separator: "\n") } else { nil } }
-        saveError = nil
     }
 
-    func list(_ name: String) -> Binding<String> {
-        Binding(get: { self.drafts[name] ?? "" }, set: {
-            self.drafts[name] = $0
-            self.values[name] = .strings($0.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty })
-        })
-    }
+    func value(_ name: String) -> Config.Value { file.value(name)! }
+    func isOverridden(_ name: String) -> Bool { file.overrides[name] != nil }
 
-    func isOverridden(_ key: Config.Key) -> Bool { file.overrides[key.name] != nil }
-    func isEdited(_ key: Config.Key) -> Bool { values[key.name] != file.value(key.name) }
-    var hasEdits: Bool { Config.keys.contains(where: isEdited) }
-
-    func save() {
+    /// `nil` removes the key, back to its default.
+    func set(_ name: String, _ value: Config.Value?) {
+        guard value != file.overrides[name] else { return }
         do {
-            var out = text
-            for key in Config.keys where isEdited(key) { out = try Config.setting(key.name, to: values[key.name], in: out) }
             try FileManager.default.createDirectory(at: Pratico.home(), withIntermediateDirectories: true)
-            try out.write(to: Config.path(), atomically: true, encoding: .utf8)
-            reload()
+            try Config.setting(name, to: value, in: text).write(to: Config.path(), atomically: true, encoding: .utf8)
+            saveError = nil
             needsRestart = true
         } catch {
             saveError = "\(error)"
         }
-    }
-
-    /// Removes the key from the file, back to its default.
-    func reset(_ key: Config.Key) {
-        do {
-            try Config.setting(key.name, to: nil, in: text).write(to: Config.path(), atomically: true, encoding: .utf8)
-            reload()
-            needsRestart = true
-        } catch {
-            saveError = "\(error)"
-        }
+        reload()
     }
 
     func restarted() { needsRestart = false }
@@ -77,101 +51,135 @@ struct SettingsView: View {
     let daemon: DaemonController
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            if let error = model.loadError {
-                Label("config.toml has an error, so the daemon will not start: \(error)", systemImage: "exclamationmark.triangle")
-                    .foregroundStyle(.red).padding()
+        VStack(spacing: 0) {
+            TabView {
+                pane(["start_at_login", "default_cpus", "default_memory"])
+                    .tabItem { Label("General", systemImage: "gearshape") }
+                pane(["scan", "scan_block", "scan_allow"])
+                    .tabItem { Label("Scanning", systemImage: "checkmark.shield") }
+                pane(["registry_keep_logins", "registry_http_loopback", "registry_http", "registry_system_roots", "registry_ca"])
+                    .tabItem { Label("Registries", systemImage: "shippingbox") }
             }
-            Form {
-                ForEach(Config.keys, id: \.name) { key in
-                    row(key)
-                }
-            }
-            .formStyle(.grouped)
-            .disabled(model.loadError != nil)
-            footer.padding()
+            status
         }
-        .frame(minWidth: 620, minHeight: 520)
+        .frame(width: 560)
+        .disabled(model.loadError != nil)
         .onAppear { model.reload() }
     }
 
-    @ViewBuilder private func row(_ key: Config.Key) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text(key.name).font(.body.monospaced())
-                Spacer()
-                if model.isEdited(key) {
-                    Text("edited").foregroundStyle(.orange)
-                } else if model.isOverridden(key) {
-                    Text("config.toml").foregroundStyle(.secondary)
-                    Button("Reset") { model.reset(key) }.buttonStyle(.link)
-                } else {
-                    Text("default").foregroundStyle(.secondary)
+    private func pane(_ names: [String]) -> some View {
+        Form {
+            ForEach(names.compactMap { n in Config.keys.first { $0.name == n } }, id: \.name) { key in
+                LabeledContent(Self.labels[key.name] ?? key.name) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        control(key)
+                        Text(key.summary).font(.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        // FR-34: where the value comes from.
+                        if model.isOverridden(key.name) {
+                            HStack(spacing: 6) {
+                                Text("Set in config.toml").font(.caption).foregroundStyle(.secondary)
+                                Button("Use Default") { model.set(key.name, nil) }.buttonStyle(.link).font(.caption)
+                            }
+                        }
+                    }
                 }
+                .padding(.bottom, 6)
             }
-            control(key)
-            Text(key.summary).font(.caption).foregroundStyle(.secondary)
         }
+        .formStyle(.columns)
+        .padding(20)
     }
 
     @ViewBuilder private func control(_ key: Config.Key) -> some View {
-        switch key.defaultValue {
-        case .bool:
-            Toggle("On", isOn: Binding(
-                get: { if case .bool(let v) = model.values[key.name] { v } else { false } },
-                set: { model.values[key.name] = .bool($0) }))
-        case .int:
-            let range = key.range ?? Int.min...Int.max
-            HStack {
-                TextField("", value: Binding(
-                    get: { if case .int(let v) = model.values[key.name] { v } else { 0 } },
-                    set: { model.values[key.name] = .int(min(max($0, range.lowerBound), range.upperBound)) }),
-                    format: .number.grouping(.never))
-                    .frame(width: 120)
-                if let r = key.range { Text("\(r.lowerBound)–\(r.upperBound)").foregroundStyle(.secondary) }
+        let name = key.name
+        switch model.value(name) {
+        case .bool(let v):
+            Toggle(Self.toggleTitles[name] ?? "On", isOn: Binding(get: { v }, set: { model.set(name, .bool($0)) }))
+        case .int(let v):
+            let range = key.range ?? 0...Int.max
+            Stepper(value: Binding(get: { v }, set: { model.set(name, .int($0)) }), in: range, step: name == "default_memory" ? 256 : 1) {
+                Text(name == "default_memory" ? "\(v) MiB" : "\(v)").monospacedDigit()
             }
-        case .string:
-            if let choices = key.choices {
-                Picker("", selection: Binding(
-                    get: { if case .string(let v) = model.values[key.name] { v } else { "" } },
-                    set: { model.values[key.name] = .string($0) })) {
-                    ForEach(choices, id: \.self) { Text($0) }
-                }
-                .labelsHidden().pickerStyle(.segmented)
-            } else {
-                TextField("", text: Binding(
-                    get: { if case .string(let v) = model.values[key.name] { v } else { "" } },
-                    set: { model.values[key.name] = .string($0) }))
+        case .string(let v):
+            Picker("", selection: Binding(get: { v }, set: { model.set(name, .string($0)) })) {
+                ForEach(key.choices ?? [v], id: \.self) { Text($0) }
             }
-        case .strings:
-            // One entry per line.
-            TextEditor(text: model.list(key.name))
-                .font(.body.monospaced())
-                .frame(height: 48)
+            .labelsHidden().fixedSize()
+        case .strings(let v):
+            ListField(entries: v) { model.set(name, .strings($0)) }
         }
     }
 
-    private var footer: some View {
-        HStack {
-            if let error = model.saveError {
-                Text(error).foregroundStyle(.red).lineLimit(2)
-            } else if model.needsRestart && daemon.isRunning {
-                Text("Saved. The daemon reads config.toml when it starts.")
+    @ViewBuilder private var status: some View {
+        if let error = model.loadError {
+            notice("config.toml has an error, so the daemon will not start: \(error)", color: .red)
+        } else if let error = model.saveError {
+            notice(error, color: .red)
+        } else if model.needsRestart && daemon.isRunning {
+            HStack {
+                Text("The daemon reads these settings when it starts.").font(.callout)
+                Spacer()
                 Button("Restart Daemon") {
-                    daemon.stop()
                     Task {
-                        try? await Task.sleep(for: .seconds(1))
-                        daemon.start()
+                        await daemon.restart()
                         model.restarted()
                     }
                 }
             }
+            .padding([.horizontal, .bottom], 20)
+        }
+    }
+
+    private func notice(_ text: String, color: Color) -> some View {
+        HStack {
+            Text(text).foregroundStyle(color).font(.callout)
             Spacer()
             Button("Open config.toml") { daemon.openConfig() }
-            Button("Revert") { model.reload() }.disabled(!model.hasEdits)
-            Button("Save") { model.save() }
-                .keyboardShortcut("s")
-                .disabled(!model.hasEdits)
         }
+        .padding([.horizontal, .bottom], 20)
+    }
+
+    private static let labels: [String: String] = [
+        "start_at_login": "Startup:",
+        "default_cpus": "CPUs:",
+        "default_memory": "Memory:",
+        "scan": "Image scanning:",
+        "scan_block": "Block on:",
+        "scan_allow": "Allowed images:",
+        "registry_keep_logins": "Logins:",
+        "registry_http_loopback": "Loopback:",
+        "registry_http": "Plain HTTP:",
+        "registry_system_roots": "Trust:",
+        "registry_ca": "Extra CAs:",
+    ]
+
+    private static let toggleTitles: [String: String] = [
+        "start_at_login": "Start the daemon at login",
+        "scan": "Scan pulled images",
+        "registry_keep_logins": "Keep docker login credentials",
+        "registry_http_loopback": "Allow plain HTTP to localhost",
+        "registry_system_roots": "Trust the system's roots",
+    ]
+}
+
+/// A comma-separated list, written when the user presses Return or leaves the field.
+private struct ListField: View {
+    let entries: [String]
+    let commit: ([String]) -> Void
+    @State private var text = ""
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        TextField("none", text: $text)
+            .focused($focused)
+            .onAppear { text = entries.joined(separator: ", ") }
+            .onChange(of: entries) { if !focused { text = entries.joined(separator: ", ") } }
+            .onChange(of: focused) { if !focused { save() } }
+            .onSubmit(save)
+    }
+
+    private func save() {
+        commit(text.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty })
     }
 }

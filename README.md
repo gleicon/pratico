@@ -40,6 +40,13 @@ behind a flag (see [Runtimes](#runtimes)).
    path needs an administrator and gives the `sudo` commands to copy into Terminal (link
    now, optionally at every startup, undo). Pratico itself never asks for root.
 
+The menubar's **Disk** menu shows what pratico uses, sized by blocks actually allocated
+and with shared layers counted once: images (and how much is unused), leftover image
+data, running and stopped containers, logs, the guest init, scan data, the largest items,
+and the Mac's free space. Its cleanup actions list what they remove and ask first;
+running containers and the images they use are kept. `docker system df` and
+`docker system prune` work too.
+
 Pratico has no CLI of its own: `docker` is the CLI, the menubar is the control panel.
 
 ## Runtimes
@@ -97,9 +104,10 @@ network beyond image pulls.
 
 ## Configure
 
-**Settings…** (⌘, from the menubar) edits `~/.pratico/config.toml` as a form: each key
-shows its value and whether it comes from the file or the default, and saving rewrites
-only the keys you changed, keeping your comments. The daemon reads the file when it
+**Settings…** (⌘, from the menubar) is a standard settings window over
+`~/.pratico/config.toml`, with General, Scanning and Registries tabs. A change is written
+at once and only to its own key, keeping your comments; a key set in the file says so,
+with **Use Default** to remove it. The daemon reads the file when it
 starts; Settings offers the restart. The file holds overrides only; unknown keys stop
 the daemon with the key and line named.
 

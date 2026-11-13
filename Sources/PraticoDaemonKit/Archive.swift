@@ -77,7 +77,7 @@ final class ArchiveService: @unchecked Sendable {
         try embedded.shim.call(containers.shimFiles(rec.id), "POST", "/copy-out?src=\(q(path))&dst=\(q(host.path))")
     }
 
-    /// `GET` on the embedded runtime: the agent copies the path out to the host, which tars it.
+    /// `GET` on the embedded runtime: the agent copies the path out to the host, where it is tarred.
     private func getEmbedded(_ rec: ContainerRecord, path: String, header: String, _ embedded: EmbeddedContainers, _ conn: Connection) throws {
         let trimmed = path.count > 1 && path.hasSuffix("/") ? String(path.dropLast()) : path
         let work = containers.shimFiles(rec.id).dir.appending(path: "cp-\(randomHexID().prefix(8))")
@@ -87,40 +87,31 @@ final class ArchiveService: @unchecked Sendable {
         do { try copyOut(rec, trimmed, to: work.appending(path: name), embedded) } catch {
             throw APIError(404, "Could not find the file \(path) in container \(rec.name)")
         }
-        let tar = Process()
-        tar.executableURL = URL(filePath: "/usr/bin/tar")
-        tar.arguments = ["-cf", "-", "-C", work.path, name]
-        let out = Pipe()
-        tar.standardOutput = out
-        tar.standardError = FileHandle.nullDevice
-        try tar.run()
+        let archive = work.appending(path: "out.tar")
+        try Tar.create(archive, base: work, names: [name])
+        let handle = try FileHandle(forReadingFrom: archive)
+        defer { try? handle.close() }
         conn.beginChunked(contentType: "application/x-tar", extra: [("X-Docker-Container-Path-Stat", header)])
-        while case let data = out.fileHandleForReading.availableData, !data.isEmpty {
+        while let data = try handle.read(upToCount: 1 << 20), !data.isEmpty {
             if !conn.chunk(data) { break }
         }
-        tar.waitUntilExit()
         conn.endChunked()
     }
 
-    /// `PUT` on the embedded runtime: the tar is unpacked on the host (bsdtar refuses
+    /// `PUT` on the embedded runtime: the tar is unpacked on the host (`Tar.extract` refuses
     /// `..` and writing through symlinks), then each top entry is copied in by the agent.
     /// Files end up owned by root, as with Docker's default `cp`, where the image has `chown`.
     private func putEmbedded(_ rec: ContainerRecord, path: String, tar data: Data, _ embedded: EmbeddedContainers) throws {
         let files = containers.shimFiles(rec.id)
-        let work = files.dir.appending(path: "cp-\(randomHexID().prefix(8))")
-        defer { try? FileManager.default.removeItem(at: work) }
+        let scratch = files.dir.appending(path: "cp-\(randomHexID().prefix(8))")
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        let work = scratch.appending(path: "tree")
         try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
-        let tar = Process()
-        tar.executableURL = URL(filePath: "/usr/bin/tar")
-        tar.arguments = ["-xf", "-", "-C", work.path, "--no-same-owner"]
-        let input = Pipe()
-        tar.standardInput = input
-        tar.standardError = FileHandle.nullDevice
-        try tar.run()
-        try? input.fileHandleForWriting.write(contentsOf: data)
-        try? input.fileHandleForWriting.close()
-        tar.waitUntilExit()
-        guard tar.terminationStatus == 0 else { throw APIError(400, "invalid tar archive") }
+        let archive = scratch.appending(path: "in.tar")
+        try data.write(to: archive)
+        do { try Tar.extract(archive, to: work) } catch let e as APIError { throw e } catch {
+            throw APIError(400, "invalid tar archive")
+        }
         let q = { (s: String) in s.addingPercentEncoding(withAllowedCharacters: .alphanumerics.union(CharacterSet(charactersIn: "/._-"))) ?? s }
         var targets: [String] = []
         for entry in try FileManager.default.contentsOfDirectory(atPath: work.path) {
