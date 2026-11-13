@@ -43,7 +43,7 @@ final class DaemonController {
         var ContainersRunning: Int
     }
 
-    struct Alert: Decodable, Identifiable {
+    struct Alert: Decodable, Identifiable, Equatable {
         var time: String
         var level: String  // serious | warning
         var title: String
@@ -106,7 +106,7 @@ final class DaemonController {
         let latest = (try? JSONDecoder().decode([Alert].self, from: data)) ?? []
         let known = Set(alerts.map(\.id))
         let fresh = latest.filter { $0.level == "serious" && !known.contains($0.id) && $0.time > seenUntil }
-        alerts = latest
+        update(\.alerts, latest)
         guard !fresh.isEmpty else { return }
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, _ in
             guard granted else { return }
@@ -224,7 +224,7 @@ final class DaemonController {
     }
 
     private func refreshDefaultSocket() {
-        defaultSocket = DefaultSocket.state(target: socketPath)
+        update(\.defaultSocket, DefaultSocket.state(target: socketPath))
     }
 
     /// Refreshes once a second, so state changes show within 2 s (SPEC FR-30).
@@ -234,7 +234,7 @@ final class DaemonController {
                 let (version, status) = await Task.detached { (DaemonController.probeVersion(), DaemonController.probeStatus()) }.value
                 guard let self else { return }
                 self.apply(version)
-                self.status = status
+                self.update(\.status, status)
                 self.refreshAlerts()
                 self.refreshRegistries()
                 self.refreshDefaultSocket()
@@ -243,15 +243,20 @@ final class DaemonController {
         }
     }
 
+    /// Writes only changes: every write re-renders the open menu, which closes its submenus.
+    private func update<T: Equatable>(_ field: ReferenceWritableKeyPath<DaemonController, T>, _ value: T) {
+        if self[keyPath: field] != value { self[keyPath: field] = value }
+    }
+
     private func apply(_ version: String?) {
         if let version {
-            state = .running(apiVersion: version)
-            error = nil
+            update(\.state, .running(apiVersion: version))
+            update(\.error, nil)
             return
         }
         if let reason = try? String(contentsOf: Pratico.startupErrorPath(), encoding: .utf8) {
-            error = reason.trimmingCharacters(in: .whitespacesAndNewlines)
-            state = .stopped
+            update(\.error, reason.trimmingCharacters(in: .whitespacesAndNewlines))
+            update(\.state, .stopped)
             return
         }
         switch state {
@@ -261,7 +266,7 @@ final class DaemonController {
             error = "The daemon did not start in 30 s. View Daemon Log for why."
             state = .stopped
         default:
-            state = .stopped
+            update(\.state, .stopped)
         }
     }
 
