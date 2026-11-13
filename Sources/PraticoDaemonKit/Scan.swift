@@ -256,6 +256,35 @@ final class ScanService: @unchecked Sendable {
 
     // MARK: Scanning
 
+    /// `POST /pratico/scans`: every local image, now (the menubar's Scan Now).
+    func rescanAll() -> JSON {
+        guard config.scan else { return ["Queued": 0, "Enabled": false] }
+        let all = images.localImages()
+        for img in all { enqueue(img.id) }
+        return ["Queued": .int(Int64(all.count)), "Enabled": true]
+    }
+
+    /// `GET /pratico/scans`: each local image's latest report, verdict, and which scanner
+    /// reported each finding (`sources`); images still queued or running are `Scanning`.
+    func results() -> JSON {
+        lock.lock()
+        let scanning = pending
+        lock.unlock()
+        let enc = JSONEncoder()
+        enc.dateEncodingStrategy = .iso8601
+        return .array(images.localImages().map { img in
+            var out: [String: JSON] = ["Id": .string(img.id), "Tags": JSON(img.tags), "Scanning": .bool(scanning.contains(img.id))]
+            if let r = report(img.id), let data = try? enc.encode(r), let json = JSON.parse(data) {
+                let (verdict, reasons) = ScanVerdict.judge(r.findings, ran: r.scanners.contains(where: \.ran), block: config.scanBlock)
+                out["Report"] = json
+                out["Verdict"] = .string(verdict.rawValue)
+                out["Reasons"] = JSON(reasons)
+                out["Blocked"] = .bool(blockReason(imageId: img.id) != nil)
+            }
+            return .object(out)
+        })
+    }
+
     func enqueue(_ nameOrId: String) {
         guard config.scan, let img = images.resolve(nameOrId)?.image else { return }
         lock.lock()

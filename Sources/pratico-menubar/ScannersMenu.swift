@@ -36,16 +36,49 @@ struct ScannersMenu: View {
                     }
                 }
                 Divider()
+                Button("Scan All Images Now") { daemon.scanNow() }.disabled(!r.enabled)
+                ScanResultsButton()
+                Divider()
                 Button("Install Missing Scanners…") { daemon.showScannerInstall() }
                     .disabled(r.missing.allSatisfy { !$0.builtin })
-                Button("Add Your Own Scanner…") { daemon.showCustomScannerHelp() }
+                ManageScannersButton()
                 Button("Check Again") { Task { await daemon.refreshScanners() } }
             }
         }
     }
 }
 
+/// Settings › Scanners, where your own scanners are added and removed.
+struct ManageScannersButton: View {
+    @Environment(\.openSettings) private var openSettings
+
+    var body: some View {
+        Button("Add or Remove Scanners…") {
+            UserDefaults.standard.set("scanners", forKey: SettingsView.tabKey)
+            NSApp.activate()
+            openSettings()
+        }
+    }
+}
+
+/// Opens the Scan Results window in front: a menubar app is never frontmost on its own.
+struct ScanResultsButton: View {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button("Scan Results…") {
+            NSApp.activate()
+            openWindow(id: "scan-results")
+        }
+    }
+}
+
 extension DaemonController {
+    /// Every image, with every installed scanner, now.
+    func scanNow() {
+        Task.detached { _ = DaemonProbe.request("POST", "/pratico/scans", timeout: 10) }
+    }
+
     /// Homebrew commands for what is missing, or how to get Homebrew, or each project's page.
     func showScannerInstall() {
         guard let r = scanners else { return }
@@ -78,8 +111,8 @@ extension DaemonController {
         showCommands(
             title: "Add your own scanner",
             text: """
-                Any executable can scan images: list its path under Settings › Scanning › Your \
-                scanners (scan_custom). Pratico runs it as `<path> <image.tar>` (a Docker archive) \
+                Any executable can scan images: add it under Settings › Scanners (it is scan_custom \
+                in config.toml). Pratico runs it as `<path> <image.tar>` (a Docker archive) \
                 with PRATICO_IMAGE_ID and PRATICO_IMAGE_REFS set. It must exit 0 and print JSON \
                 findings; severity is critical, high, medium, low, or unknown, and "malicious": true \
                 marks malware. Its findings join the others and follow scan_block.

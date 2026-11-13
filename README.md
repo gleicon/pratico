@@ -120,20 +120,41 @@ the daemon with the key and line named.
 | `registry_system_roots` | `true` | `false` trusts only `registry_ca` |
 | `registry_keep_logins` | `true` | keep `docker login` credentials in pratico's Keychain items for clients that send none; `false` only checks them, as `dockerd` does, and never reads the Keychain |
 
-Image scanning uses osv-scanner, grype and trivy when installed, your own scanners, and
-CISA's KEV list; the menubar's **Scanners** menu shows which are found and how to install
-the rest (Homebrew). A scanner of your own is any executable: pratico runs it as
-`<path> <image.tar>` (a Docker archive) with `PRATICO_IMAGE_ID` and `PRATICO_IMAGE_REFS`
-set, and it exits 0 printing
+## Image scanners
+
+Every pulled image is scanned in the background, and again daily, with each scanner
+pratico finds, plus CISA's list of exploited vulnerabilities. An image with malware or an
+exploited CVE (`scan_block`) is stopped and blocked, and the menubar says why.
+
+- **Scanners menu**: which scanners are found, with versions; **Install Missing
+  Scanners…** gives the Homebrew command (or how to get Homebrew); **Scan All Images Now**;
+  **Scan Results…**.
+- **Scan Results** window: per image, which scanners ran (or why not), and every finding
+  with the scanners that reported it, severity, KEV and malware flags, and fixed versions.
+- **Settings › Scanners**: the built-in ones (osv-scanner, grype, trivy) and your own. **+**
+  adds any executable, **−** removes one (after asking), **Format…** shows the contract
+  below. Your scanners are `scan_custom` in `config.toml`; the daemon picks up changes when
+  it restarts.
+
+### Your own scanner
+
+pratico runs it as `<path> <image.tar>`, where the archive is a Docker archive of the
+image, with `PRATICO_IMAGE_ID` and `PRATICO_IMAGE_REFS` set. It must exit 0 and print:
 
 ```json
-{"findings": [{"id": "CVE-2024-0001", "package": "openssl", "version": "3.0.1",
-               "severity": "high", "fixed": ["3.0.2"], "cvss": 7.5, "malicious": false}]}
+{"findings": [
+  {"id": "CVE-2024-0001", "package": "openssl", "version": "3.0.1",
+   "severity": "high", "fixed": ["3.0.2"], "cvss": 7.5},
+  {"id": "MAL-ACME-7", "package": "evil-pkg", "version": "6.6.6",
+   "severity": "critical", "malicious": true}
+]}
 ```
 
-with `severity` one of `critical`, `high`, `medium`, `low`, `unknown`. Its findings merge
-with the others and follow `scan_block`. Design:
-[docs/design/image-scanning.md](docs/design/image-scanning.md).
+`id` and `package` are required. `severity` is `critical`, `high`, `medium`, `low` or
+`unknown`; `aliases`, `fixed`, `cvss` and `malicious` are optional. A non-zero exit, or
+output that is not this JSON, counts as a failed run: earlier findings from that scanner
+are kept, so an outage never lifts a block. Its findings merge with the other scanners'
+and follow `scan_block`. Design: [docs/design/image-scanning.md](docs/design/image-scanning.md).
 
 ## Layout
 

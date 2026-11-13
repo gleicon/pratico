@@ -12,6 +12,11 @@ struct PraticoMenubarApp: App {
             Image(systemName: daemon.hasUnseenSerious ? "exclamationmark.shield.fill"
                   : daemon.isRunning ? "shippingbox.fill" : "shippingbox")
         }
+        // Which scanner found what, per image.
+        Window("Scan Results", id: "scan-results") {
+            ScanResultsView(daemon: daemon)
+        }
+        .defaultLaunchBehavior(.suppressed)  // only from the menu
         // ⌘, (SPEC FR-34): config.toml as a form.
         Settings {
             SettingsView(daemon: daemon)
@@ -62,6 +67,8 @@ struct StatusMenu: View {
                 Button((a.level == "serious" ? "⛔︎ " : "⚠︎ ") + a.title) {}
                     .help(a.detail)
             }
+            Button("Scan Now") { daemon.scanNow() }
+            ScanResultsButton()
             Button("Clear Alerts") { daemon.clearAlerts() }
         }
         // D-29: trust beyond the system's roots, and kept logins, in plain view.

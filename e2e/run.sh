@@ -408,6 +408,10 @@ docker pull busybox:uclibc >/dev/null 2>&1
 docker create --name e2e-custom busybox:uclibc true >/dev/null
 for _ in $(seq 100); do docker start e2e-custom 2>&1 | grep -q MAL-CUSTOM-1 && break; sleep 0.1; done
 expect_has "a custom scanner's finding blocks the image" "$(docker start e2e-custom 2>&1)" "MAL-CUSTOM-1"
+results=$(curl -s --unix-socket "$SOCK" http://d/pratico/scans)
+check "scan results say which scanner found what" python3 -c "import json,sys; r={t: i for i in json.loads(sys.argv[1]) for t in i['Tags']}['busybox:uclibc']; f=[f for f in r['Report']['findings'] if f['id']=='MAL-CUSTOM-1'][0]; assert f['sources']==['my-scanner'] and r['Blocked'] and {s['name'] for s in r['Report']['scanners'] if s['ran']} >= {'osv-scanner','grype','trivy','my-scanner'}" "$results"
+queued=$(curl -s -X POST --unix-socket "$SOCK" http://d/pratico/scans)
+check "Scan Now queues every image" python3 -c "import json,sys; q=json.loads(sys.argv[1]); assert q['Enabled'] and q['Queued'] >= 2" "$queued"
 docker rm -f e2e-custom >/dev/null
 rm -f "$HOME_DIR/config.toml"
 

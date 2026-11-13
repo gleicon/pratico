@@ -74,8 +74,9 @@ menubar is planned.
 Pulled images are scanned in the background with whichever of osv-scanner, grype and
 trivy are installed. The menubar's **Scanners** menu checks which ones pratico finds, with
 their versions, and **Install Missing Scanners…** gives the Homebrew command (or, without
-Homebrew, how to get it and each scanner's page). **Add Your Own Scanner…** explains how
-to plug in any executable through `scan_custom`. An image with a known-malicious package or
+Homebrew, how to get it and each scanner's page). **Scan Results…** shows which scanner found
+what, **Scan All Images Now** rescans, and **Add or Remove Scanners…** opens Settings ›
+Scanners to plug in your own (see the README's "Your own scanner"). An image with a known-malicious package or
 a CVE in CISA's exploited list is stopped and blocked: starting it fails with the
 finding named, and the menubar shows an alert. To run it anyway, add its ID to
 `scan_allow` in **Settings…** (⌘,), or in `~/.pratico/config.toml`:

@@ -49,16 +49,21 @@ final class SettingsModel {
 struct SettingsView: View {
     @State private var model = SettingsModel()
     let daemon: DaemonController
+    /// Remembered, and set by the menu's Add Your Own Scanner… to open on Scanners.
+    @AppStorage(SettingsView.tabKey) private var tab = "general"
+    static let tabKey = "settingsTab"
 
     var body: some View {
         VStack(spacing: 0) {
-            TabView {
+            TabView(selection: $tab) {
                 pane(["start_at_login", "default_cpus", "default_memory"])
-                    .tabItem { Label("General", systemImage: "gearshape") }
-                pane(["scan", "scan_block", "scan_allow", "scan_custom"])
-                    .tabItem { Label("Scanning", systemImage: "checkmark.shield") }
+                    .tabItem { Label("General", systemImage: "gearshape") }.tag("general")
+                pane(["scan", "scan_block", "scan_allow"])
+                    .tabItem { Label("Scanning", systemImage: "checkmark.shield") }.tag("scanning")
+                ScannersPane(model: model, daemon: daemon)
+                    .tabItem { Label("Scanners", systemImage: "magnifyingglass") }.tag("scanners")
                 pane(["registry_keep_logins", "registry_http_loopback", "registry_http", "registry_system_roots", "registry_ca"])
-                    .tabItem { Label("Registries", systemImage: "shippingbox") }
+                    .tabItem { Label("Registries", systemImage: "shippingbox") }.tag("registries")
             }
             status
         }
@@ -147,7 +152,6 @@ struct SettingsView: View {
         "scan": "Image scanning:",
         "scan_block": "Block on:",
         "scan_allow": "Allowed images:",
-        "scan_custom": "Your scanners:",
         "registry_keep_logins": "Logins:",
         "registry_http_loopback": "Loopback:",
         "registry_http": "Plain HTTP:",
@@ -182,5 +186,100 @@ private struct ListField: View {
 
     private func save() {
         commit(text.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty })
+    }
+}
+
+/// Settings › Scanners: the built-in scanners pratico looks for, and your own, which are
+/// `scan_custom` in config.toml. Each says whether pratico can run it.
+private struct ScannersPane: View {
+    let model: SettingsModel
+    let daemon: DaemonController
+    @State private var selected: String?
+
+    private var custom: [String] { if case .strings(let v) = model.value("scan_custom") { v } else { [] } }
+
+    var body: some View {
+        Form {
+            Section("Built in") {
+                ForEach((daemon.scanners?.scanners ?? []).filter(\.builtin)) { s in
+                    LabeledContent(s.name) {
+                        if let path = s.path {
+                            Text("✓ \(s.version ?? "") ").help(path)
+                        } else {
+                            HStack {
+                                Text("not installed").foregroundStyle(.secondary)
+                                Button("Install…") { daemon.showScannerInstall() }
+                            }
+                        }
+                    }
+                }
+            }
+            Section {
+                List(custom, id: \.self, selection: $selected) { path in
+                    HStack {
+                        Text(status(path))
+                        Text((path as NSString).abbreviatingWithTildeInPath).lineLimit(1).truncationMode(.middle)
+                    }
+                }
+                .frame(minHeight: 90)
+                HStack {
+                    Button { add() } label: { Image(systemName: "plus") }.help("Add a scanner: any executable")
+                    Button { remove() } label: { Image(systemName: "minus") }.disabled(selected == nil)
+                    Spacer()
+                    Button("Format…") { daemon.showCustomScannerHelp() }
+                    Button("Check Again") { Task { await daemon.refreshScanners() } }
+                }
+            } header: {
+                Text("Your scanners")
+            } footer: {
+                Text("Run as <path> <image.tar>; they print findings as JSON (Format…). The daemon picks up changes when it restarts.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+        .frame(minHeight: 380)
+        .task { await daemon.refreshScanners() }
+    }
+
+    /// What the daemon reported; a scanner added since its start is checked here.
+    private func status(_ path: String) -> String {
+        if let s = daemon.scanners?.scanners.first(where: { !$0.builtin && $0.name == URL(filePath: path).lastPathComponent }) {
+            return s.path != nil ? "✓" : "✗ not executable"
+        }
+        return FileManager.default.isExecutableFile(atPath: (path as NSString).expandingTildeInPath) ? "✓ (after restart)" : "✗ not executable"
+    }
+
+    private func add() {
+        let panel = NSOpenPanel()
+        panel.message = "Choose a scanner: an executable pratico runs as <path> <image.tar>"
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        NSApp.activate()
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard FileManager.default.isExecutableFile(atPath: url.path) else {
+            let alert = NSAlert()
+            alert.messageText = "\(url.lastPathComponent) is not executable"
+            alert.informativeText = "Make it executable first, for example: chmod +x \((url.path as NSString).abbreviatingWithTildeInPath)"
+            alert.runModal()
+            return
+        }
+        let path = (url.path as NSString).abbreviatingWithTildeInPath
+        guard !custom.contains(path) else { return }
+        model.set("scan_custom", .strings(custom + [path]))
+    }
+
+    /// Asks first, as every removal does.
+    private func remove() {
+        guard let path = selected else { return }
+        let alert = NSAlert()
+        alert.messageText = "Remove \(URL(filePath: path).lastPathComponent) from your scanners?"
+        alert.informativeText = "Pratico stops running it. The file itself is not touched."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Remove")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let rest = custom.filter { $0 != path }
+        model.set("scan_custom", rest.isEmpty ? nil : .strings(rest))
+        selected = nil
     }
 }
