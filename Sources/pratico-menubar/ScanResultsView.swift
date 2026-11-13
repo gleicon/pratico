@@ -9,7 +9,7 @@ struct ScanResult: Decodable, Identifiable, Equatable {
         var note: String
     }
     struct Finding: Decodable, Identifiable, Equatable {
-        var id: String
+        var advisory: String
         var sources: [String]
         var package: String
         var version: String
@@ -18,7 +18,14 @@ struct ScanResult: Decodable, Identifiable, Equatable {
         var cvss: Double?
         var malicious: Bool
         var kev: Bool
-        var rowID: String { id + package + version }
+        /// One advisory often hits several packages; a row is the three together, which the
+        /// daemon reports once each. Keyed by the advisory alone, the table repeated rows.
+        var id: String { "\(advisory) \(package) \(version)" }
+
+        enum CodingKeys: String, CodingKey {
+            case advisory = "id"
+            case sources, package, version, fixed, severity, cvss, malicious, kev
+        }
     }
     struct Report: Decodable, Equatable {
         var time: Date
@@ -107,9 +114,9 @@ struct ScanResultsView: View {
                             .foregroundStyle(run.ran ? Color.primary : Color.secondary)
                     }
                 }
-                ForEach(r.Reasons ?? [], id: \.self) { Text("⚠︎ " + $0) }
+                ForEach(Array((r.Reasons ?? []).enumerated()), id: \.offset) { Text("⚠︎ " + $0.element) }
                 Table(report.findings.sorted { rank($0) > rank($1) }) {
-                    TableColumn("Advisory") { f in Text(f.id).textSelection(.enabled) }
+                    TableColumn("Advisory") { f in Text(f.advisory).textSelection(.enabled) }
                     TableColumn("Package") { f in Text("\(f.package) \(f.version)") }
                     TableColumn("Severity") { f in Text(f.severity + (f.cvss.map { String(format: " %.1f", $0) } ?? "")) }
                         .width(90)
