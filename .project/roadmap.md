@@ -7,7 +7,7 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 ## Skeleton
 
 - [x] `make` builds daemon and menubar app; `make test` and `make e2e` run unit and end-to-end suites
-- [~] Menubar Start/Stop runs the bundled daemon helper (per-user launch agent); menu shows state, socket path, API version; socket answers `docker version` against a pinned API version; e2e suite drives the real `docker` CLI (AC-1, AC-2, AC-5, AC-6, AC-34, AC-40, AC-53)
+- [x] Menubar Start/Stop runs the bundled daemon helper (per-user launch agent); menu shows state, socket path, API version; socket answers `docker version` against a pinned API version; e2e suite drives the real `docker` CLI (AC-1, AC-2, AC-5, AC-6, AC-34, AC-40, AC-53)
 - [x] Start refuses, menubar error naming the Apple container runtime, when it is not running (AC-3)
 - [x] Daemon refuses to start on an unknown or invalid `config.toml` key; menubar names key and line (AC-41)
 - [x] Unimplemented endpoints return 501 naming the endpoint; missing objects return Docker-format 404 (AC-29, AC-7)
@@ -65,17 +65,17 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 
 ## Login
 
-- [ ] Daemon starts at login when `start_at_login = true` (AC-4)
+- [~] Daemon starts at login when `start_at_login = true` (AC-4): the launch agent always starts it at login; `start_at_login = false` is not honored yet
 
 ## Menubar
 
-- [ ] Status item shows daemon state and `N Docker + M Apple`, updating within 2 s, including on daemon death (AC-31, AC-32, AC-35)
+- [~] Status item shows daemon state and the running-container count, updating within 2 s, including on daemon death (AC-31, AC-32, AC-35; "N Docker + M Apple" went with the `container` CLI backend): state and Status › Containers done, no count on the icon
 - [ ] Clicking lists running containers with origin, name, image (AC-33)
 - [ ] Usage measure shows total CPU % and memory of Docker containers (AC-43)
 - [ ] Alert on a port published on a non-loopback address; none for loopback (AC-36)
 - [ ] Alert on a container turning `unhealthy` (AC-52, menubar part)
 - [x] View logs: daemon log in `~/.pratico/daemon.log`, opened in Console; Status submenu and Copy Diagnostics (FR-32)
-- [ ] View alerts quick action (FR-32)
+- [x] View alerts quick action (FR-32): blocks notify once per image; Scan Results shows every image and finding
 - [x] Scanners menu: which scanners are found (osv-scanner, grype, trivy, `scan_custom`), versions, Homebrew install help; your own scanners through a JSON contract, managed in Settings › Scanners; Scan Now and a Scan Results window showing which scanner found what (D-24)
 - [x] Disk menu: allocated sizes by kind, running vs stopped, leftovers, largest items, free space; cleanup that lists and confirms; `docker system df` / `prune` (D-31)
 - [x] Preferences panel (⌘,) shows effective values and source; saving writes only the changed key (AC-37)
@@ -100,11 +100,22 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 
 ## Release
 
-- [~] `make dmg` produces an ad-hoc signed `.dmg` (with virtualization entitlement) that installs `Pratico.app` (menubar + bundled daemon helper); AC-1 and AC-10 pass on the installed build
+- [x] `make dmg` produces an ad-hoc signed `.dmg` (with virtualization entitlement) that installs `Pratico.app` (menubar + bundled daemon helper); AC-1 and AC-10 pass on the installed build
 - [~] DMG background and bundled README walk the user through Gatekeeper approval ("Open Anyway" or `xattr -dr com.apple.quarantine`)
 - [x] `make release VERSION=x.y.z` refuses non-semver or mismatched versions and a dirty tree, then tags `vX.Y.Z` and publishes the DMG + SHA-256 to GitHub
-- [ ] `make install` copies `Pratico.app` to `/Applications` with no Gatekeeper prompt
+- [x] `make install` copies `Pratico.app` to `/Applications` with no Gatekeeper prompt (`make run` installs and opens it)
 - [ ] When a Developer ID identity and notary credentials are configured, `make dmg` signs with it and notarizes; ad-hoc remains the fallback (blocked until a paid Apple Developer account exists)
+
+## Known gaps (found while building, not yet scheduled)
+
+- [ ] More than 4 networks per container (Virtualization.framework allows 4 NICs per VM)
+- [ ] IPv6 on pratico-net
+- [ ] `docker cp` with a stopped container (the guest agent needs a running VM)
+- [ ] `docker save` of several images at once
+- [ ] A per-install CA for egress interception (with the egress task)
+- [ ] `docker build` (BuildKit or an equivalent)
+- [ ] Hot-connect and uplink e2e checks are flaky when the Mac is under load; make them wait on state, not time
+- [ ] The menubar's new windows (Settings, Scan Results) need a visual pass on a real screen
 
 ## Backlog
 

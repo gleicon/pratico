@@ -66,6 +66,13 @@ carries the Linux kernel and init, so nothing else needs installing.
 Design: [docs/design/runtime.md](docs/design/runtime.md); checklist:
 [.project/roadmap.md](.project/roadmap.md).
 
+## Not yet
+
+Volumes (named volumes; bind mounts work), `docker build`, snapshot and restore, egress
+interception, more than 4 networks per container, IPv6, `docker cp` with a stopped
+container, `docker save` of several images at once, Developer ID signing. The checklist,
+with what is done: [.project/roadmap.md](.project/roadmap.md).
+
 ## Build from source
 
 Requires an Apple silicon Mac with macOS 26 and Xcode 26 (Swift 6.2+).
