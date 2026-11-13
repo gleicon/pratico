@@ -1,4 +1,5 @@
 import Foundation
+import PraticoCore
 
 /// A Docker network (SPEC FR-23, D-25). The built-in `bridge` is Apple's `default`
 /// network and `none` is Apple's `none`; every other network is an Apple network pratico
@@ -637,7 +638,7 @@ final class NetworkService: @unchecked Sendable {
         let r = runtime.run(["run", "-d", "--name", Self.anchorName, "-m", "200M", "-c", "1",
                              "-l", "dev.pratico.anchor=1", Self.anchorImage], timeout: 60)
         guard r.ok else {
-            FileHandle.standardError.write(Data("pratico: cannot start the default-network anchor: \(r.errorText)\n".utf8))
+            Pratico.log("pratico: cannot start the default-network anchor: \(r.errorText)")
             return true
         }
         anchorRunning = true
@@ -667,7 +668,7 @@ final class NetworkService: @unchecked Sendable {
                 guard !custom.isDisjoint(with: active(rec).keys) else { continue }
                 let r = runtime.run(["exec", "-i", "-u", "0", rec.appleId, "sh", "-c", "cat > /etc/hosts"],
                                     input: Data(hosts(for: rec, among: running).utf8), timeout: 10)
-                if !r.ok { FileHandle.standardError.write(Data("pratico: /etc/hosts of \(rec.name): \(r.errorText)\n".utf8)) }
+                if !r.ok { Pratico.log("pratico: /etc/hosts of \(rec.name): \(r.errorText)") }
             }
         }
         if wait { hostsQueue.sync(execute: work) } else { hostsQueue.async(execute: work) }

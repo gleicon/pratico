@@ -16,6 +16,7 @@ public final class Daemon: @unchecked Sendable {
     let scans: ScanService
     /// Registry trust and kept logins; embedded runtime only.
     let registries: Registries?
+    let startedAt = Date()
     private var server: HTTPServer?
     /// Embedded runtime asked for but could not open: refuse to serve rather than fall back.
     let embeddedStartupFailed: Bool
@@ -39,14 +40,14 @@ public final class Daemon: @unchecked Sendable {
             case .success(let (e, store, content)):
                 embedded = e
                 let r = Registries(policy: policy, home: home)
-                for w in policy.warnings { FileHandle.standardError.write(Data("pratico-daemon: \(w)\n".utf8)) }
+                for w in policy.warnings { Pratico.log("pratico-daemon: \(w)") }
                 r.writeState()
                 registries = r
                 let backend = EmbeddedImageBackend(store: store, content: content, registries: r)
                 embeddedImages = backend
                 images = ImageService(backend: backend)
             case .failure(let error):
-                FileHandle.standardError.write(Data("pratico-daemon: embedded runtime unavailable: \(error.message)\n".utf8))
+                Pratico.log("pratico-daemon: embedded runtime unavailable: \(error.message)")
             }
         }
         self.embeddedStartupFailed = ProcessInfo.processInfo.environment["PRATICO_RUNTIME"] == "embedded" && embedded == nil
@@ -134,7 +135,14 @@ public final class Daemon: @unchecked Sendable {
             try images.backend.login(auth)
             conn.json(200, ["Status": "Login Succeeded", "IdentityToken": ""])
             return .keepAlive
-        // pratico's own endpoints (not Docker's): the menubar's view of registry trust and logins.
+        // pratico's own endpoints (not Docker's): the menubar's status, and its view of
+        // registry trust and logins.
+        case ("GET", "pratico") where parts.count == 2 && parts[1] == "status":
+            let c = containers.counts
+            conn.json(200, ["Version": .string(Pratico.version), "Runtime": containers.embedded == nil ? "container" : "embedded",
+                            "StartedAt": .string(startedAt.ISO8601Format()), "Socket": .string(socketPath),
+                            "Containers": .int(Int64(c.total)), "ContainersRunning": .int(Int64(c.running))])
+            return .keepAlive
         case ("GET", "pratico") where parts.count == 2 && parts[1] == "registries":
             conn.json(200, try embeddedRegistries().state)
             return .keepAlive

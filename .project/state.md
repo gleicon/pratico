@@ -5,7 +5,7 @@
 - Users approve downloaded builds through Gatekeeper ("Open Anyway" or `xattr -dr com.apple.quarantine`); the app cannot prompt for this itself because Gatekeeper blocks before any code runs. A helper script inside the DMG does not help: it is quarantined too.
 - v0.1.0 is built via Makefiles and shipped as a `.dmg` (`SPEC.md` D-9).
 - No pratico CLI (SPEC D-12). Pratico is a Mac app: menubar item, config window, listeners. `docker` is the CLI. Daemon control lives in the menubar.
-- Listeners run in `pratico-daemon`, a background helper bundled in `Pratico.app` and registered via `SMAppService` (SPEC D-13).
+- Listeners run in `pratico-daemon`, a background helper bundled in `Pratico.app` and started by a launch agent the menubar writes to `~/Library/LaunchAgents` (SPEC D-13).
 - Users must not need Apple's `container` installed (2026-11-09). The embedded runtime (SPEC D-26, `docs/design/runtime.md`) replaces the CLI backend; limitations of the CLI are bugs to remove, not documented behavior.
 - Behave like Docker by default and go beyond it where that helps (agents especially); never ship a weaker approximation because an acceptance criterion is literally met.
 - Embedded networking is pure Swift with no extra binaries (SPEC D-27). Kernel and `vminit` are bundled, not downloaded by users.
@@ -26,6 +26,6 @@
 - The shim's `GuestAddresses`, not the daemon, records which addresses a guest slot holds: the shim outlives daemon restarts, and vminitd's `addressAdd` (netlink `NLM_F_EXCL`) fails on a duplicate without an errno the daemon can see.
 - vminitd has no address or route delete RPC: a hot-disconnected slot keeps its address on a down link. The switch, not the guest, is what cuts traffic; keep every delivery path behind its port registry (`NetSwitch.deliver`).
 - `SSL_CERT_FILE` replaces the daemon registry client's trust roots (Docker Hub stops verifying). macOS rejects a self-signed CA cert used directly as a TLS server cert; test registries need a CA plus a leaf.
-- Never run pratico code as root from `Pratico.app`: the bundle is the user's (drag install), `/Applications` is group-writable by `admin`, and ad-hoc signing gives launchd nothing to verify, so a root job with `BundleProgram` is a user-to-root escalation. The `/var/run/docker.sock` job (D-30) is a root-owned plist in `/Library/LaunchDaemons` running only `/bin/ln -s`; its content travels inside the admin-prompt script, never through a user-writable file.
-- Deleting `Pratico.app` with that option on leaves the plist; it keeps linking a dead path at boot until removed.
+- Never run pratico code as root from `Pratico.app`: the bundle is the user's (drag install), `/Applications` is group-writable by `admin`, and ad-hoc signing gives launchd nothing to verify, so a root job with `BundleProgram` is a user-to-root escalation. For `/var/run/docker.sock` (D-30) pratico only shows `sudo` commands; the user runs them (2026-11-12: keep it simple, no admin prompt from the app).
+- Do not go back to `SMAppService` for the daemon while builds are ad-hoc signed: its Background Task Management record pins the daemon's code signature, and after a rebuild, a move, or an update launchd refuses it (`OS_REASON_CODESIGNING | Launch Constraint Violation`, job `spawn failed`, `needs LWCR update`). The menubar just showed "starting…" forever. `LaunchAgent.start()` still unregisters an old SMAppService registration of the same label.
 - `bash` reads scripts while running: never edit `e2e/*.sh` during a run.

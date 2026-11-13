@@ -2,7 +2,6 @@ import AppKit
 import Foundation
 import Observation
 import PraticoCore
-import ServiceManagement
 import UserNotifications
 
 /// Starts, stops, and watches the bundled `pratico-daemon` helper (SPEC D-13).
@@ -17,22 +16,32 @@ final class DaemonController {
 
     private(set) var state: State = .stopped
     private(set) var error: String?
-    private(set) var needsApproval = false
+    private(set) var status: Status?
     private(set) var alerts: [Alert] = []
     private(set) var registries = Registries()
     /// Time of the newest alert the user has seen (menu opened or notified).
     private var seenUntil = UserDefaults.standard.string(forKey: "alertsSeenUntil") ?? ""
     let socketPath = Pratico.socketPath().path
 
-    private let service = SMAppService.agent(plistName: "dev.pratico.daemon.plist")
+    private let agent = LaunchAgent()
+    /// Until when `starting` waits for the daemon before saying it did not come up.
+    private var startDeadline = Date.distantPast
     private(set) var defaultSocket: DefaultSocket.State = .absent
-    /// The root-owned launchd job that links `/var/run/docker.sock` to `socketPath` at boot.
-    private(set) var usesDefaultSocket = false
     private var pollTask: Task<Void, Never>?
 
     var isRunning: Bool { if case .running = state { true } else { false } }
 
     var apiVersion: String? { if case .running(let v) = state { v } else { nil } }
+
+    /// `GET /pratico/status`.
+    struct Status: Decodable, Equatable {
+        var Version: String
+        var Runtime: String
+        var StartedAt: Date
+        var Socket: String
+        var Containers: Int
+        var ContainersRunning: Int
+    }
 
     struct Alert: Decodable, Identifiable {
         var time: String
@@ -114,78 +123,118 @@ final class DaemonController {
     init() {
         poll()
         Task {
-            // FR-1: launching the app starts the daemon when it is not running.
-            try? await Task.sleep(for: .milliseconds(300))
-            if !isRunning { start() }
+            // FR-1: launching the app starts the daemon when it is not running. Asked
+            // directly: restarting a live daemon would cost its containers' supervision.
+            let alive = await Task.detached { DaemonController.probeVersion() != nil }.value
+            if !alive && !isRunning { start() }
         }
     }
 
     func start() {
         error = nil
         state = .starting
+        startDeadline = Date() + 30
         try? FileManager.default.removeItem(at: Pratico.startupErrorPath())
-        do {
-            // Re-registering kicks a registered-but-dead agent (RunAtLoad).
-            if service.status == .enabled { try service.unregister() }
-            try service.register()
-        } catch {
-            if service.status == .requiresApproval {
-                needsApproval = true
-                self.error = "Allow Pratico in System Settings › General › Login Items."
-            } else {
-                self.error = "Could not start daemon: \(error.localizedDescription)"
-            }
+        if let failure = agent.start() {
+            error = "Could not start daemon: \(failure)"
             state = .stopped
         }
     }
 
     func stop() {
         state = .stopping
-        Task {
-            do { try await service.unregister() } catch { self.error = "Could not stop daemon: \(error.localizedDescription)" }
+        agent.stop()
+    }
+
+    /// Console follows the file as it grows; no terminal needed.
+    func openLog() {
+        let log = Pratico.logPath()
+        if !FileManager.default.fileExists(atPath: log.path) { FileManager.default.createFile(atPath: log.path, contents: nil) }
+        NSWorkspace.shared.open([log], withApplicationAt: URL(filePath: "/System/Applications/Utilities/Console.app"),
+                                configuration: NSWorkspace.OpenConfiguration())
+    }
+
+    /// Version, runtime, status, config, and the log's tail, for a bug report.
+    func copyDiagnostics() {
+        let log = (try? String(contentsOf: Pratico.logPath(), encoding: .utf8)) ?? ""
+        let config = (try? String(contentsOf: Config.path(), encoding: .utf8)) ?? "(none)"
+        let text = """
+            Pratico \(Pratico.version), macOS \(ProcessInfo.processInfo.operatingSystemVersionString)
+            Daemon: \(statusLine)\(error.map { " (\($0))" } ?? "")
+            Runtime: \(status?.Runtime ?? "?"), containers: \(status.map { "\($0.ContainersRunning) running of \($0.Containers)" } ?? "?")
+            \(DefaultSocket.path): \(defaultSocket)
+            config.toml:
+            \(config)
+            daemon.log (last 50 lines):
+            \(log.split(separator: "\n", omittingEmptySubsequences: false).suffix(50).joined(separator: "\n"))
+            """
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    var statusLine: String {
+        switch state {
+        case .running: "Daemon running"
+        case .starting: "Daemon starting…"
+        case .stopping: "Daemon stopping…"
+        case .stopped: "Daemon stopped"
         }
     }
 
-    func openLoginItems() { SMAppService.openSystemSettingsLoginItems() }
+    /// Help for `/var/run/docker.sock`: why it needs root, and the commands to run.
+    func showDefaultSocketHelp() {
+        let commands = """
+            # Link it now (until the next restart):
+            \(DefaultSocket.linkCommand(target: socketPath))
 
-    /// Asks for an admin's password each way: macOS's own prompt runs the script as root.
-    func setUseDefaultSocket(_ on: Bool) {
-        let script = on ? DefaultSocket.installScript(target: socketPath) : DefaultSocket.removeScript(target: socketPath)
-        Task {
-            if let failure = await Task.detached(operation: { Self.runAsAdmin(script) }).value {
-                error = "Could not \(on ? "link" : "unlink") \(DefaultSocket.path): \(failure)"
-            }
-            refreshDefaultSocket()
+            # Optional: link it at every startup:
+            \(DefaultSocket.persistCommands(target: socketPath))
+
+            # Undo both:
+            \(DefaultSocket.removeCommands)
+            """
+        let alert = NSAlert()
+        alert.messageText = "Use \(DefaultSocket.path)"
+        alert.informativeText = """
+            Pratico serves Docker at \(socketPath). That needs no password and works with \
+            DOCKER_HOST or a Docker context.
+
+            Some tools only look at \(DefaultSocket.path). That folder belongs to the system, \
+            so a link there needs an administrator: run these commands in Terminal yourself. \
+            Pratico never asks for your password. macOS empties /var/run at every restart; the \
+            optional startup job only runs /bin/ln. If Docker Desktop or Colima already uses the \
+            path, leave it to them.
+            """
+        let text = NSTextView(frame: NSRect(x: 0, y: 0, width: 520, height: 300))
+        text.string = commands
+        text.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        text.isEditable = false
+        let scroll = NSScrollView(frame: text.frame)
+        scroll.documentView = text
+        scroll.hasVerticalScroller = true
+        alert.accessoryView = scroll
+        alert.addButton(withTitle: "Copy Commands")
+        alert.addButton(withTitle: "Close")
+        NSApp.activate()
+        if alert.runModal() == .alertFirstButtonReturn {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(commands, forType: .string)
         }
+        refreshDefaultSocket()
     }
 
     private func refreshDefaultSocket() {
-        usesDefaultSocket = FileManager.default.fileExists(atPath: DefaultSocket.plistPath)
         defaultSocket = DefaultSocket.state(target: socketPath)
-    }
-
-    /// nil on success or when the user cancels the prompt.
-    nonisolated private static func runAsAdmin(_ script: String) -> String? {
-        let quoted = script.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
-        let p = Process()
-        p.executableURL = URL(filePath: "/usr/bin/osascript")
-        p.arguments = ["-e", "do shell script \"\(quoted)\" with prompt \"Pratico wants to manage \(DefaultSocket.path).\" with administrator privileges"]
-        let err = Pipe()
-        p.standardError = err
-        do { try p.run() } catch { return "\(error)" }
-        p.waitUntilExit()
-        let message = String(decoding: err.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-        if p.terminationStatus == 0 || message.contains("-128") { return nil }  // -128: canceled
-        return message.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Refreshes once a second, so state changes show within 2 s (SPEC FR-30).
     private func poll() {
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
-                let version = await Task.detached { DaemonController.probeVersion() }.value
+                let (version, status) = await Task.detached { (DaemonController.probeVersion(), DaemonController.probeStatus()) }.value
                 guard let self else { return }
                 self.apply(version)
+                self.status = status
                 self.refreshAlerts()
                 self.refreshRegistries()
                 self.refreshDefaultSocket()
@@ -198,7 +247,6 @@ final class DaemonController {
         if let version {
             state = .running(apiVersion: version)
             error = nil
-            needsApproval = false
             return
         }
         if let reason = try? String(contentsOf: Pratico.startupErrorPath(), encoding: .utf8) {
@@ -207,11 +255,21 @@ final class DaemonController {
             return
         }
         switch state {
-        case .starting where service.status == .enabled:
+        case .starting where Date() < startDeadline:
             break  // still coming up
+        case .starting:
+            error = "The daemon did not start in 30 s. View Daemon Log for why."
+            state = .stopped
         default:
             state = .stopped
         }
+    }
+
+    nonisolated static func probeStatus() -> Status? {
+        guard let r = DaemonProbe.get("/pratico/status"), r.status == 200 else { return nil }
+        let dec = JSONDecoder()
+        dec.dateDecodingStrategy = .iso8601
+        return try? dec.decode(Status.self, from: r.body)
     }
 
     nonisolated static func probeVersion() -> String? {

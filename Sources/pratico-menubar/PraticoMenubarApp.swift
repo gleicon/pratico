@@ -20,21 +20,29 @@ struct StatusMenu: View {
 
     var body: some View {
         // FR-5: state, socket path, API version.
-        Text(statusLine)
-        if let v = daemon.apiVersion {
-            Text("Docker API \(v)")
-            Text(daemon.socketPath)
-        }
+        Text(daemon.statusLine)
         if let error = daemon.error {
             Text("⚠︎ \(error)")
         }
-        if daemon.needsApproval {
-            Button("Open Login Items…") { daemon.openLoginItems() }
+        Menu("Status") {
+            if let s = daemon.status {
+                Text("Up since \(s.StartedAt.formatted(date: .abbreviated, time: .shortened))")
+                Text(s.Runtime == "embedded" ? "Runtime: Pratico (embedded)" : "Runtime: Apple container")
+                Text("Containers: \(s.ContainersRunning) running, \(s.Containers) in all")
+            }
+            if let v = daemon.apiVersion { Text("Docker API \(v)") }
+            Text("Socket: \(daemon.socketPath)")
+            switch daemon.defaultSocket {
+            case .ours: Text("Also at \(DefaultSocket.path)")
+            case .other(let owner): Text("\(DefaultSocket.path) is another daemon's: \(owner)")
+            case .absent: EmptyView()
+            }
+            Divider()
+            Button("View Daemon Log…") { daemon.openLog() }
+            Button("Copy Diagnostics") { daemon.copyDiagnostics() }
         }
-        Toggle("Use \(DefaultSocket.path)", isOn: Binding(get: { daemon.usesDefaultSocket }, set: { daemon.setUseDefaultSocket($0) }))
-        if let note = defaultSocketNote {
-            Text(note)
-        }
+        // ~/.pratico/docker.sock is the default; this path needs root, which pratico never asks for.
+        Button("Use \(DefaultSocket.path)…") { daemon.showDefaultSocketHelp() }
         // D-24: image scan alerts, newest first.
         if !daemon.alerts.isEmpty {
             Divider()
@@ -75,24 +83,5 @@ struct StatusMenu: View {
         Button("Quit Pratico") { NSApplication.shared.terminate(nil) }
             .keyboardShortcut("q")
             .onAppear { daemon.markAlertsSeen() }
-    }
-
-    /// Why the toggle is on but the path is not pratico's.
-    private var defaultSocketNote: String? {
-        guard daemon.usesDefaultSocket else { return nil }
-        switch daemon.defaultSocket {
-        case .ours: return nil
-        case .other(let owner): return "⚠︎ \(DefaultSocket.path) is taken: \(owner)"
-        case .absent: return "⚠︎ \(DefaultSocket.path) is not linked; turn this off and on"
-        }
-    }
-
-    private var statusLine: String {
-        switch daemon.state {
-        case .running: "Daemon running"
-        case .starting: "Daemon starting…"
-        case .stopping: "Daemon stopping…"
-        case .stopped: "Daemon stopped"
-        }
     }
 }

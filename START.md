@@ -23,6 +23,9 @@ Today's default runtime also needs Apple's
 ## 2. Start
 
 Open Pratico. Its menubar item shows the daemon state; pick **Start** if it is stopped.
+If it does not come up, **Status › View Daemon Log** opens `~/.pratico/daemon.log` in
+Console, and **Copy Diagnostics** puts version, config, and the log's tail on the
+clipboard for an issue.
 The daemon is a background helper inside the app, so containers keep running when the
 menubar quits.
 
@@ -42,12 +45,16 @@ docker context use pratico
 ```
 
 Or for tools that only look at `/var/run/docker.sock` (Testcontainers, some IDE
-plugins): turn on **Use /var/run/docker.sock** in the menubar and enter an admin
-password. That installs `/Library/LaunchDaemons/dev.pratico.socket.plist`, which runs
-`/bin/ln -s ~/.pratico/docker.sock /var/run/docker.sock` at every boot; no pratico code
-runs as root. If Docker Desktop or Colima owns the path, the menubar says so and pratico
-leaves it alone. Turn the option off before deleting the app (it asks for the password
-again), or remove that plist by hand.
+plugins): pick **Use /var/run/docker.sock…** in the menubar. It explains why that path
+needs an administrator and shows the commands to run in Terminal, with a Copy button:
+
+```sh
+sudo ln -s ~/.pratico/docker.sock /var/run/docker.sock   # until the next restart
+```
+
+plus an optional startup job (a root-owned plist that runs only `/bin/ln -s`) and the
+undo. Pratico never asks for your password. If Docker Desktop or Colima owns the path,
+leave it to them.
 
 Containers that mount the Docker socket (`-v /var/run/docker.sock:/var/run/docker.sock`)
 reach pratico, with or without the link.

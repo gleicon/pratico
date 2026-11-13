@@ -17,7 +17,8 @@ behind a flag (see [Runtimes](#runtimes)).
    Applications, and approve it once in Gatekeeper ("Open Anyway" in System Settings →
    Privacy & Security, or `xattr -dr com.apple.quarantine /Applications/Pratico.app`).
    The build is ad-hoc signed; `READ ME FIRST.txt` in the DMG walks through it.
-2. Start the daemon from the menubar item.
+2. Start the daemon from the menubar item. **Status › View Daemon Log** shows what it is
+   doing (`~/.pratico/daemon.log`).
 3. Point Docker clients at it:
 
    ```sh
@@ -25,10 +26,10 @@ behind a flag (see [Runtimes](#runtimes)).
    docker run --rm alpine echo hello
    ```
 
-   Tools that only know `/var/run/docker.sock` work too once the menubar's
-   **Use /var/run/docker.sock** is on. It asks for an admin password once and installs
-   a root-owned launchd job that runs `/bin/ln -s` at every boot. No pratico code runs
-   as root, and a link owned by Docker Desktop or Colima is left alone.
+   That is the default and needs no password. For tools that only know
+   `/var/run/docker.sock`, the menubar's **Use /var/run/docker.sock…** explains why that
+   path needs an administrator and gives the `sudo` commands to copy into Terminal (link
+   now, optionally at every startup, undo). Pratico itself never asks for root.
 
 Pratico has no CLI of its own: `docker` is the CLI, the menubar is the control panel.
 

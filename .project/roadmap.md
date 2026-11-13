@@ -7,7 +7,7 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 ## Skeleton
 
 - [x] `make` builds daemon and menubar app; `make test` and `make e2e` run unit and end-to-end suites
-- [~] Menubar Start/Stop runs the bundled daemon helper (`SMAppService`); menu shows state, socket path, API version; socket answers `docker version` against a pinned API version; e2e suite drives the real `docker` CLI (AC-1, AC-2, AC-5, AC-6, AC-34, AC-40, AC-53)
+- [~] Menubar Start/Stop runs the bundled daemon helper (per-user launch agent); menu shows state, socket path, API version; socket answers `docker version` against a pinned API version; e2e suite drives the real `docker` CLI (AC-1, AC-2, AC-5, AC-6, AC-34, AC-40, AC-53)
 - [x] Start refuses, menubar error naming the Apple container runtime, when it is not running (AC-3)
 - [x] Daemon refuses to start on an unknown or invalid `config.toml` key; menubar names key and line (AC-41)
 - [x] Unimplemented endpoints return 501 naming the endpoint; missing objects return Docker-format 404 (AC-29, AC-7)
@@ -73,7 +73,8 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 - [ ] Usage measure shows total CPU % and memory of Docker containers (AC-43)
 - [ ] Alert on a port published on a non-loopback address; none for loopback (AC-36)
 - [ ] Alert on a container turning `unhealthy` (AC-52, menubar part)
-- [ ] View logs and view alerts quick actions (FR-32)
+- [x] View logs: daemon log in `~/.pratico/daemon.log`, opened in Console; Status submenu and Copy Diagnostics (FR-32)
+- [ ] View alerts quick action (FR-32)
 - [ ] Preferences panel shows effective values and source; saving writes only the changed key (AC-37)
 
 ## Snapshot
@@ -88,7 +89,7 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 - [ ] Connection and request-body limits hold: 65th connection handled cleanly, RSS ≤ 100 MiB (AC-47)
 - [ ] 100 start/stop cycles leave idle fd count unchanged (AC-48)
 - [ ] Oldest allowed and current Docker CLI both pass; 20.10 rejected like Docker Engine (AC-49)
-- [x] `/var/run/docker.sock` on request: menubar toggle, root-owned `/bin/ln` launchd job, never takes another daemon's link (D-30)
+- [x] `/var/run/docker.sock` on request: help popup with the `sudo ln -s` and optional boot-job commands; pratico never asks for root (D-30)
 - [x] Containers mounting `/var/run/docker.sock` reach pratico; any host Unix socket bind is relayed (D-30, embedded)
 - [ ] `docker run --rm alpine true` P99 ≤ 1500 ms (AC-44)
 - [ ] Control calls P99 ≤ 50 ms with 100 containers (AC-45)

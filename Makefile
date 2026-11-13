@@ -46,9 +46,8 @@ e2e-registry: build
 
 app: build
 	rm -rf "$(APP)"
-	mkdir -p "$(APP)/Contents/MacOS" "$(APP)/Contents/Library/LaunchAgents"
+	mkdir -p "$(APP)/Contents/MacOS"
 	cp Support/Info.plist "$(APP)/Contents/Info.plist"
-	cp Support/dev.pratico.daemon.plist "$(APP)/Contents/Library/LaunchAgents/"
 	cp "$(BIN_DIR)/pratico-menubar" "$(BIN_DIR)/pratico-daemon" "$(APP)/Contents/MacOS/"
 	$(MAKE) sign
 

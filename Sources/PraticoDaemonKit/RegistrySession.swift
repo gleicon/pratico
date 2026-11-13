@@ -205,7 +205,7 @@ final class RegistrySession: NSObject, ContentClient, URLSessionTaskDelegate, @u
         lock.unlock()
         guard first else { return }
         note(message)
-        FileHandle.standardError.write(Data("pratico-daemon: \(message)\n".utf8))
+        Pratico.log("pratico-daemon: \(message)")
     }
 
     // MARK: Scheme

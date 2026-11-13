@@ -9,6 +9,14 @@ public enum Pratico {
         user.appending(path: ".pratico", directoryHint: .isDirectory)
     }
 
+    /// The daemon's own output, written by launchd: `~/.pratico/daemon.log`.
+    public static func logPath(home: URL = home()) -> URL { home.appending(path: "daemon.log") }
+
+    /// One timestamped line of the daemon log.
+    public static func log(_ message: String) {
+        FileHandle.standardError.write(Data("\(Date().ISO8601Format()) \(message)\n".utf8))
+    }
+
     /// Docker Remote API socket: `~/.pratico/docker.sock`.
     public static func socketPath(home: URL = home()) -> URL {
         home.appending(path: "docker.sock", directoryHint: .notDirectory)

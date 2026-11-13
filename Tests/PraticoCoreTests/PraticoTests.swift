@@ -27,14 +27,16 @@ import Testing
     #expect(DefaultSocket.state(link: link, target: ours) == .other("a file that is not a link"))
 }
 
-/// The job runs only `/bin/ln -s`, never `-f`, with the target as one argument whatever its characters.
+/// The commands the menubar shows parse, and the boot job runs only `/bin/ln -s`, never
+/// `-f`, with the target as one argument whatever its characters.
 @Test func defaultSocketJobOnlyLinksAndScriptsParse() throws {
     let target = "/Users/o'b <&>\nPRATICO_PLIST/.pratico/docker.sock"
     let plist = try #require(PropertyListSerialization.propertyList(
         from: Data(DefaultSocket.launchdPlist(target: target).utf8), format: nil) as? [String: Any])
     #expect(plist["ProgramArguments"] as? [String] == ["/bin/ln", "-s", target, "/var/run/docker.sock"])
     #expect(plist["Label"] as? String == "dev.pratico.socket")
-    for script in [DefaultSocket.installScript(target: target), DefaultSocket.removeScript(target: target)] {
+    let commands = [DefaultSocket.linkCommand(target: target), DefaultSocket.persistCommands(target: target), DefaultSocket.removeCommands]
+    for script in commands {
         let p = Process()
         p.executableURL = URL(filePath: "/bin/sh")
         p.arguments = ["-n", "-c", script]
@@ -42,5 +44,5 @@ import Testing
         p.waitUntilExit()
         #expect(p.terminationStatus == 0)
     }
-    #expect(DefaultSocket.installScript(target: target).components(separatedBy: "\n").filter { $0 == "PRATICO_PLIST" }.count == 1)
+    #expect(DefaultSocket.persistCommands(target: target).components(separatedBy: "\n").filter { $0 == "PRATICO_PLIST" }.count == 1)
 }
