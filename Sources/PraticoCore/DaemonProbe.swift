@@ -41,9 +41,19 @@ public enum DaemonProbe {
         let request = Array("\(method) \(path) HTTP/1.1\r\nHost: pratico\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".utf8)
         guard write(fd, request, request.count) == request.count else { return nil }
 
+        // Up to Content-Length when the reply has one, else until the daemon closes.
         var data = Data()
         var chunk = [UInt8](repeating: 0, count: 16 * 1024)
-        while data.count < 1_048_576 {
+        var expected: Int?
+        while data.count < 16 << 20 {
+            if expected == nil, let split = data.range(of: Data("\r\n\r\n".utf8)),
+                let head = String(data: data[..<split.lowerBound], encoding: .utf8)
+            {
+                let length = head.split(separator: "\r\n").first { $0.lowercased().hasPrefix("content-length:") }
+                    .flatMap { Int($0.split(separator: ":")[1].trimmingCharacters(in: .whitespaces)) }
+                expected = length.map { split.upperBound + $0 } ?? Int.max
+            }
+            if let expected, data.count >= expected { break }
             let n = read(fd, &chunk, chunk.count)
             if n <= 0 { break }
             data.append(contentsOf: chunk[0..<n])

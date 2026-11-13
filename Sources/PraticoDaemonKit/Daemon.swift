@@ -142,6 +142,9 @@ public final class Daemon: @unchecked Sendable {
             try registries.logout(parts[3].removingPercentEncoding ?? parts[3])
             conn.respond(204)
             return .keepAlive
+        case ("GET", "pratico") where parts.count == 3 && parts[1] == "scans" && parts[2] == "summary":
+            conn.json(200, scans.summary())
+            return .keepAlive
         case ("GET", "pratico") where parts.count == 2 && parts[1] == "scans":
             conn.json(200, scans.results())
             return .keepAlive

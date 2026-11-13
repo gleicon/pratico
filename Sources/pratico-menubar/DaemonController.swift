@@ -19,9 +19,10 @@ final class DaemonController {
     private(set) var status: Status?
     private(set) var disk: DiskUsage?
     var scanners: ScannerReport?
+    private(set) var scanSummary: ScanSummary?
     private(set) var alerts: [Alert] = []
     private(set) var registries = Registries()
-    /// Time of the newest alert the user has seen (menu opened or notified).
+    /// Time of the newest alert already notified, so a relaunch does not repeat it.
     private var seenUntil = UserDefaults.standard.string(forKey: "alertsSeenUntil") ?? ""
     let socketPath = Pratico.socketPath().path
     /// The socket as people read it: `~/.pratico/docker.sock`, not one user's home.
@@ -93,18 +94,29 @@ final class DaemonController {
         registries = r
     }
 
-    var hasUnseenSerious: Bool { alerts.contains { $0.level == "serious" && $0.time > seenUntil } }
-
-    func markAlertsSeen() {
-        guard let newest = alerts.last?.time, newest > seenUntil else { return }
-        seenUntil = newest
-        UserDefaults.standard.set(newest, forKey: "alertsSeenUntil")
+    /// The menubar icon: a blocked image, then images with vulnerabilities, then the daemon.
+    var menubarSymbol: String {
+        if let s = scanSummary, s.Blocked > 0 { return "exclamationmark.shield.fill" }
+        if let s = scanSummary, s.Vulnerable > 0 { return "exclamationmark.shield" }
+        return isRunning ? "shippingbox.fill" : "shippingbox"
     }
 
-    func clearAlerts() {
-        guard confirm("Clear \(alerts.count) alert\(alerts.count == 1 ? "" : "s")?", "Blocked images stay blocked; only the list is cleared.", button: "Clear") else { return }
-        try? FileManager.default.removeItem(at: Pratico.alertsPath())
-        alerts = []
+    /// "Scan Results…" with what needs a look beside it.
+    var scanResultsTitle: String {
+        guard let s = scanSummary else { return "Scan Results…" }
+        var parts: [String] = []
+        if s.Blocked > 0 { parts.append("⛔︎ \(s.Blocked) blocked") }
+        if s.Vulnerable > 0 { parts.append("⚠︎ \(s.Vulnerable) with vulnerabilities") }
+        if s.Scanning > 0 { parts.append("\(s.Scanning) scanning") }
+        return parts.isEmpty ? "Scan Results…" : "Scan Results…   " + parts.joined(separator: " · ")
+    }
+
+    private func refreshScanSummary() async {
+        let summary = await Task.detached { () -> ScanSummary? in
+            guard let r = DaemonProbe.request("GET", "/pratico/scans/summary", timeout: 5), r.status == 200 else { return nil }
+            return try? JSONDecoder().decode(ScanSummary.self, from: r.body)
+        }.value
+        update(\.scanSummary, summary)
     }
 
     /// New serious alerts also become a notification: the daemon stopped containers.
@@ -115,6 +127,10 @@ final class DaemonController {
         let fresh = latest.filter { $0.level == "serious" && !known.contains($0.id) && $0.time > seenUntil }
         update(\.alerts, latest)
         guard !fresh.isEmpty else { return }
+        if let newest = fresh.map(\.time).max(), newest > seenUntil {
+            seenUntil = newest
+            UserDefaults.standard.set(newest, forKey: "alertsSeenUntil")
+        }
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, _ in
             guard granted else { return }
             let center = UNUserNotificationCenter.current()
@@ -349,6 +365,7 @@ final class DaemonController {
                 self.refreshRegistries()
                 self.refreshDefaultSocket()
                 if tick % 10 == 0 { await self.refreshDisk() }
+                if tick % 3 == 0 { await self.refreshScanSummary() }
                 // Each check runs every scanner's --version: once a minute is plenty.
                 if tick % 60 == 0 { await self.refreshScanners() }
                 tick += 1

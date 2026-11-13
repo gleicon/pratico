@@ -54,7 +54,8 @@ struct ScanResultsView: View {
     @State private var selection: String?
 
     var body: some View {
-        NavigationSplitView {
+        // A plain split: NavigationSplitView came up blank in a window a menubar app opens.
+        HStack(spacing: 0) {
             List(results, selection: $selection) { r in
                 HStack {
                     Text(badge(r))
@@ -62,13 +63,17 @@ struct ScanResultsView: View {
                 }
                 .tag(r.id)
             }
-            .navigationSplitViewColumnWidth(min: 200, ideal: 240)
-        } detail: {
-            if let r = results.first(where: { $0.id == selection }) {
-                detail(r)
-            } else {
-                Text(results.isEmpty ? "No images yet" : "Select an image").foregroundStyle(.secondary)
+            .frame(width: 240)
+            Divider()
+            Group {
+                if let r = results.first(where: { $0.id == selection }) {
+                    detail(r)
+                } else {
+                    Text(results.isEmpty ? "No images yet" : "Select an image").foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .toolbar {
             Button {

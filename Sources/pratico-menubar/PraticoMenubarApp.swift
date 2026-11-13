@@ -9,8 +9,7 @@ struct PraticoMenubarApp: App {
         MenuBarExtra {
             StatusMenu(daemon: daemon)
         } label: {
-            Image(systemName: daemon.hasUnseenSerious ? "exclamationmark.shield.fill"
-                  : daemon.isRunning ? "shippingbox.fill" : "shippingbox")
+            Image(systemName: daemon.menubarSymbol)
         }
         // Which scanner found what, per image.
         Window("Scan Results", id: "scan-results") {
@@ -59,17 +58,10 @@ struct StatusMenu: View {
         // ~/.pratico/docker.sock is the default; this path needs root, which pratico never asks for.
         Button("Use with docker…") { daemon.showDockerSetup() }
         Button("Use \(DefaultSocket.path)…") { daemon.showDefaultSocketHelp() }
-        // D-24: image scan alerts, newest first.
-        if !daemon.alerts.isEmpty {
+        // D-24: one line however many images; the details are in the Scan Results window.
+        if daemon.isRunning {
             Divider()
-            Text("Image scan alerts")
-            ForEach(daemon.alerts.suffix(5).reversed()) { a in
-                Button((a.level == "serious" ? "⛔︎ " : "⚠︎ ") + a.title) {}
-                    .help(a.detail)
-            }
-            Button("Scan Now") { daemon.scanNow() }
-            ScanResultsButton()
-            Button("Clear Alerts") { daemon.clearAlerts() }
+            ScanResultsButton(title: daemon.scanResultsTitle)
         }
         // D-29: trust beyond the system's roots, and kept logins, in plain view.
         if daemon.isRunning {
@@ -107,6 +99,5 @@ struct StatusMenu: View {
         .keyboardShortcut(",")
         Button("Quit Pratico") { NSApplication.shared.terminate(nil) }
             .keyboardShortcut("q")
-            .onAppear { daemon.markAlertsSeen() }
     }
 }

@@ -192,6 +192,7 @@ final class ScanService: @unchecked Sendable {
     private let lock = NSLock()
     private var pending: Set<String> = []
     private var blocked: [String: String] = [:]  // image ID → reason
+    private var verdicts: [String: ScanVerdict] = [:]  // image ID → latest verdict, for the summary
     let env = ProcessInfo.processInfo.environment
     static let kevURL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
     static let rescanInterval: TimeInterval = 24 * 3600
@@ -240,6 +241,7 @@ final class ScanService: @unchecked Sendable {
         for file in (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
         where file.pathExtension == "json" {
             guard let r = Self.decode(file) else { continue }
+            setVerdict(r)
             if let reason = gateReason(r) { setBlocked(r.imageId, reason) }
         }
     }
@@ -342,15 +344,34 @@ final class ScanService: @unchecked Sendable {
         act(report)
     }
 
+    private func setVerdict(_ r: ScanReport) {
+        let (verdict, _) = ScanVerdict.judge(r.findings, ran: r.scanners.contains(where: \.ran), block: config.scanBlock)
+        lock.lock()
+        verdicts[r.imageId] = verdict
+        lock.unlock()
+    }
+
+    /// `GET /pratico/scans/summary`: counts the menubar polls, from memory.
+    func summary() -> JSON {
+        let ids = images.localImages().map(\.id)
+        lock.lock()
+        defer { lock.unlock() }
+        let blockedCount = ids.filter { blocked[$0] != nil }.count
+        // Findings worth a look, short of a block: warnings, and serious ones scan_allow lets run.
+        let flagged = ids.filter { blocked[$0] == nil && (verdicts[$0] == .warning || verdicts[$0] == .serious) }.count
+        return ["Images": .int(Int64(ids.count)), "Blocked": .int(Int64(blockedCount)), "Vulnerable": .int(Int64(flagged)),
+                "Scanning": .int(Int64(ids.filter { pending.contains($0) }.count)),
+                "Unscanned": .int(Int64(ids.filter { verdicts[$0] == nil }.count))]
+    }
+
+    /// Findings short of a block show in Scan Results; only a block raises an alert, the one
+    /// that becomes a notification.
     private func act(_ r: ScanReport) {
         let name = r.refs.first.map(ImageRef.familiar) ?? r.imageId
-        let (verdict, reasons) = ScanVerdict.judge(r.findings, ran: r.scanners.contains(where: \.ran), block: config.scanBlock)
+        let (_, reasons) = ScanVerdict.judge(r.findings, ran: r.scanners.contains(where: \.ran), block: config.scanBlock)
+        setVerdict(r)
         guard let reason = gateReason(r) else {
             setBlocked(r.imageId, nil)
-            if verdict == .serious || verdict == .warning {
-                // Serious here means allowed by scan_allow: warn, never stop.
-                alert(level: "warning", title: "\(name): \(reasons.count) finding(s)", detail: reasons.prefix(5).joined(separator: "\n"))
-            }
             return
         }
         setBlocked(r.imageId, reason)
@@ -358,7 +379,7 @@ final class ScanService: @unchecked Sendable {
         for rec in containers.all() where rec.imageId == r.imageId && rec.state.running {
             if (try? containers.stop(rec.id, timeout: 10)) == true { stopped.append(rec.name) }
         }
-        alert(level: "serious", title: "\(name) blocked: \(reasons.first ?? "serious finding")",
+        alert(image: r.imageId, level: "serious", title: "\(name) blocked: \(reasons.first ?? "serious finding")",
               detail: (reasons.prefix(5) + (stopped.isEmpty ? [] : ["stopped: " + stopped.joined(separator: ", ")]))
                   .joined(separator: "\n"))
     }
@@ -388,11 +409,13 @@ final class ScanService: @unchecked Sendable {
     }
 
     /// `~/.pratico/alerts.json`, newest last, capped at 50; the menubar shows them.
-    private func alert(level: String, title: String, detail: String) {
+    /// One alert per image: a rescan replaces the image's earlier alert instead of piling up.
+    private func alert(image: String, level: String, title: String, detail: String) {
         lock.lock()
         defer { lock.unlock() }
         var list = (try? Data(contentsOf: alertsPath)).flatMap { JSON.parse($0)?.array } ?? []
-        list.append(["time": .string(Timestamp.format(Date())), "level": .string(level),
+        list.removeAll { $0["image"]?.string == image }
+        list.append(["time": .string(Timestamp.format(Date())), "level": .string(level), "image": .string(image),
                      "title": .string(title), "detail": .string(detail)])
         if list.count > 50 { list.removeFirst(list.count - 50) }
         try? JSON.array(list).encoded().write(to: alertsPath, options: .atomic)

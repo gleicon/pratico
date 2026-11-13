@@ -347,6 +347,8 @@ public final class HTTPServer: @unchecked Sendable {
     private func serve(_ conn: Connection) {
         while let req = conn.readRequest() {
             switch handler(req, conn) {
+            // HTTP/1.1: the client asked for the connection to end with this response.
+            case .keepAlive where req.headers["connection"]?.lowercased() == "close": conn.close(); return
             case .keepAlive: continue
             case .close: conn.close(); return
             case .detached: return

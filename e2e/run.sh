@@ -106,6 +106,12 @@ expect_has "AC-7 docker inspect nope" "$(docker inspect nope 2>&1)" "no such obj
 resp=$(curl -s -w ' %{http_code}' --unix-socket "$SOCK" http://d/v1.55/swarm)
 expect_has "AC-29 unimplemented endpoint is 501" "$resp" " 501$"
 expect_has "AC-29 501 names the endpoint" "$resp" "/swarm"
+check "Connection: close ends the connection after the reply" python3 -c "
+import socket,sys,time
+s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); s.settimeout(3); t=time.time()
+s.sendall(b'GET /_ping HTTP/1.1\\r\\nHost: d\\r\\nConnection: close\\r\\n\\r\\n')
+while s.recv(4096): pass
+assert time.time()-t < 1" "$SOCK"
 
 # --- First container --------------------------------------------------------
 pull=$(docker pull busybox 2>&1)

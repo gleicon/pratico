@@ -37,7 +37,6 @@ struct ScannersMenu: View {
                 }
                 Divider()
                 Button("Scan All Images Now") { daemon.scanNow() }.disabled(!r.enabled)
-                ScanResultsButton()
                 Divider()
                 Button("Install Missing Scanners…") { daemon.showScannerInstall() }
                     .disabled(r.missing.allSatisfy { !$0.builtin })
@@ -63,14 +62,24 @@ struct ManageScannersButton: View {
 
 /// Opens the Scan Results window in front: a menubar app is never frontmost on its own.
 struct ScanResultsButton: View {
+    var title = "Scan Results…"
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        Button("Scan Results…") {
+        Button(title) {
             NSApp.activate()
             openWindow(id: "scan-results")
         }
     }
+}
+
+/// `GET /pratico/scans/summary`.
+struct ScanSummary: Decodable, Equatable {
+    var Images: Int
+    var Blocked: Int
+    var Vulnerable: Int
+    var Scanning: Int
+    var Unscanned: Int
 }
 
 extension DaemonController {
