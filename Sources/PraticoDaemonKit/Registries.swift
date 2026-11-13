@@ -3,7 +3,7 @@ import ContainerizationOS
 import Foundation
 import PraticoCore
 
-/// What the embedded runtime trusts and keeps for registries (SPEC D-29): the policy from
+/// What pratico trusts and keeps for registries (SPEC D-29): the policy from
 /// `config.toml` and the logins `docker login` kept in pratico's Keychain items. It
 /// mirrors both, never a password, to `~/.pratico/registries.json` for the menubar, and
 /// serves the same view at `GET /pratico/registries`.

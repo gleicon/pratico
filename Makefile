@@ -33,10 +33,11 @@ probe: build assets
 test:
 	swift test
 
-e2e: build
+# The Docker API behavior.
+e2e: build assets
 	e2e/run.sh "$(BIN_DIR)"
 
-# The embedded runtime, with Apple's `container` CLI replaced by a fake that must stay unused.
+# The runtime underneath: shims, the guest agent, pratico-net, registries.
 e2e-embedded: build assets
 	e2e/embedded.sh "$(BIN_DIR)"
 

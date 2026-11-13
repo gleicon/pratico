@@ -2,7 +2,7 @@ import Containerization
 import ContainerizationOCI
 import Foundation
 
-/// The embedded runtime (docs/design/runtime.md): one VM per container through
+/// pratico's runtime (docs/design/runtime.md): one VM per container through
 /// apple/containerization, with the kernel and `vminit` shipped inside pratico, so no
 /// other software is needed. Images live in pratico's own store, `~/.pratico/store`.
 public actor EmbeddedRuntime {

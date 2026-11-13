@@ -115,6 +115,38 @@ enum ScanParsers {
         }
     }
 
+    /// `trivy image --input <archive> --format json`.
+    static func trivy(_ data: Data) -> [ScanFinding] {
+        guard let json = JSON.parse(data) else { return [] }
+        return (json["Results"]?.array ?? []).flatMap { result in
+            (result["Vulnerabilities"]?.array ?? []).compactMap { v -> ScanFinding? in
+                guard let id = v["VulnerabilityID"]?.string else { return nil }
+                let cvss = (v["CVSS"]?.object ?? [:]).values.compactMap { $0["V3Score"]?.double }.max()
+                return ScanFinding(
+                    id: id, sources: ["trivy"], package: v["PkgName"]?.string ?? "?",
+                    version: v["InstalledVersion"]?.string ?? "?",
+                    fixed: (v["FixedVersion"]?.string).map { $0.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) } } ?? [],
+                    severity: (v["Severity"]?.string ?? "unknown").lowercased(), cvss: cvss, malicious: id.hasPrefix("MAL-"))
+            }
+        }
+    }
+
+    /// A `scan_custom` scanner's output: `{"findings": [{"id", "package", "version",
+    /// "severity", "fixed"?, "aliases"?, "cvss"?, "malicious"?}]}`; nil if it is not that.
+    static func custom(_ data: Data, source: String) -> [ScanFinding]? {
+        guard let items = JSON.parse(data)?["findings"]?.array else { return nil }
+        let severities: Set<String> = ["critical", "high", "medium", "low", "unknown"]
+        return items.compactMap { f in
+            guard let id = f["id"]?.string, let package = f["package"]?.string else { return nil }
+            let severity = (f["severity"]?.string ?? "unknown").lowercased()
+            return ScanFinding(
+                id: id, aliases: f["aliases"]?.strings ?? [], sources: [source], package: package,
+                version: f["version"]?.string ?? "?", fixed: f["fixed"]?.strings ?? [],
+                severity: severities.contains(severity) ? severity : "unknown", cvss: f["cvss"]?.double,
+                malicious: f["malicious"]?.bool ?? id.hasPrefix("MAL-"))
+        }
+    }
+
     /// Previous findings a now-failed scanner contributed to; kept so a scanner outage
     /// (osv-scanner offline, say) cannot drop a malicious flag or a higher severity and
     /// lift a block. `merge` keeps the strictest values when the other scanner re-reports.
@@ -146,7 +178,7 @@ enum ScanParsers {
 }
 
 /// Background image scanning (SPEC D-24, docs/design/image-scanning.md): after a pull,
-/// export the image, run osv-scanner and grype if installed, mark CISA KEV CVEs, and judge
+/// export the image, run every installed scanner (`Scanners.swift`), mark CISA KEV CVEs, and judge
 /// by `scan_block`. A serious verdict stops the image's running Docker containers and
 /// blocks new starts until the image is in `scan_allow`.
 final class ScanService: @unchecked Sendable {
@@ -160,7 +192,7 @@ final class ScanService: @unchecked Sendable {
     private let lock = NSLock()
     private var pending: Set<String> = []
     private var blocked: [String: String] = [:]  // image ID → reason
-    private let env = ProcessInfo.processInfo.environment
+    let env = ProcessInfo.processInfo.environment
     static let kevURL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
     static let rescanInterval: TimeInterval = 24 * 3600
 
@@ -249,36 +281,27 @@ final class ScanService: @unchecked Sendable {
         var runs: [ScannerRun] = []
         var lists: [[ScanFinding]] = []
         var packages: [String] = []
-        if let osv = tool("osv-scanner", env: "PRATICO_OSV_BIN") {
-            // Exit 1 means "vulnerabilities found"; other codes are failures.
-            let r = Self.run(osv, ["scan", "image", "--archive", archive.path, "--format", "json", "--all-packages"])
-            if r.status == 0 || r.status == 1 {
-                let parsed = ScanParsers.osv(r.stdout)
-                lists.append(parsed.findings)
-                packages = parsed.packages
-                runs.append(ScannerRun(name: "osv-scanner", ran: true))
-            } else {
-                runs.append(ScannerRun(name: "osv-scanner", ran: false, note: Self.firstLine(r.stderr)))
+        var failed: Set<String> = []
+        for (scanner, path) in scanners {
+            guard let path else {
+                runs.append(ScannerRun(name: scanner.name, ran: false, note: "not installed"))
+                failed.insert(scanner.source)
+                continue
             }
-        } else {
-            runs.append(ScannerRun(name: "osv-scanner", ran: false, note: "not installed"))
-        }
-        if let grype = tool("grype", env: "PRATICO_GRYPE_BIN") {
-            let r = Self.run(grype, ["docker-archive:\(archive.path)", "-o", "json", "-q"])
-            if r.status == 0 {
-                lists.append(ScanParsers.grype(r.stdout))
-                runs.append(ScannerRun(name: "grype", ran: true))
-            } else {
-                runs.append(ScannerRun(name: "grype", ran: false, note: Self.firstLine(r.stderr)))
+            switch scanner.scan(path, archive, img) {
+            case .success(let r):
+                lists.append(r.findings)
+                if packages.isEmpty { packages = r.packages }
+                runs.append(ScannerRun(name: scanner.name, ran: true))
+            case .failure(let f):
+                runs.append(ScannerRun(name: scanner.name, ran: false, note: f.note))
+                failed.insert(scanner.source)
             }
-        } else {
-            runs.append(ScannerRun(name: "grype", ran: false, note: "not installed"))
         }
 
         // A failed run is no new information: never let it clear findings or a block.
         let prior = report(img.id)
         guard runs.contains(where: \.ran) || prior == nil else { return }
-        let failed = Set(runs.filter { !$0.ran }.map { $0.name == "osv-scanner" ? "osv" : $0.name })
         lists.append(ScanParsers.carryOver(prior?.findings ?? [], failed: failed))
 
         let (kev, kevDate) = knownExploited()
@@ -369,23 +392,13 @@ final class ScanService: @unchecked Sendable {
         return (Set(ids), json["dateReleased"]?.string)
     }
 
-    /// The daemon runs with a minimal PATH under launchd, so tools are looked up explicitly.
-    private func tool(_ name: String, env key: String) -> String? {
-        if let path = env[key] { return FileManager.default.isExecutableFile(atPath: path) ? path : nil }
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        return ["/opt/homebrew/bin", "/usr/local/bin", "\(home)/go/bin", "\(home)/.local/bin"]
-            .map { "\($0)/\(name)" }.first { FileManager.default.isExecutableFile(atPath: $0) }
-    }
-
-    private static func firstLine(_ d: Data) -> String {
-        String(decoding: d, as: UTF8.self).split(separator: "\n").first.map(String.init) ?? "failed"
-    }
-
-    /// Runs a scanner with a 15-minute bound (grype's first run downloads its database).
-    static func run(_ path: String, _ args: [String]) -> ProcessResult {
+    /// Runs a scanner, by default with a 15-minute bound (grype's first run downloads its
+    /// database). `environment` adds to the daemon's own.
+    static func run(_ path: String, _ args: [String], environment: [String: String] = [:], timeout: Int = 900) -> ProcessResult {
         let p = Process()
         p.executableURL = URL(filePath: path)
         p.arguments = args
+        if !environment.isEmpty { p.environment = ProcessInfo.processInfo.environment.merging(environment) { _, new in new } }
         let out = Pipe()
         let err = Pipe()
         p.standardOutput = out
@@ -402,7 +415,7 @@ final class ScanService: @unchecked Sendable {
                 group.leave()
             }
         }
-        if group.wait(timeout: .now() + 900) == .timedOut { p.terminate() }
+        if group.wait(timeout: .now() + .seconds(timeout)) == .timedOut { p.terminate() }
         p.waitUntilExit()
         return ProcessResult(status: p.terminationStatus, stdout: outData.value, stderr: errData.value)
     }

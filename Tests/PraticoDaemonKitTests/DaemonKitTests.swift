@@ -41,11 +41,6 @@ func normalizesImageRefs(input: String, expected: String) {
     #expect(ContainerService.parseFilters(#"{"label":{"a=1":true}}"#) == ["label": ["a=1"]])
 }
 
-@Test func portBindingsDefaultToAllInterfaces() {
-    let b: JSON = ["80/tcp": [["HostIp": "", "HostPort": "8080"]], "53/udp": [["HostIp": "127.0.0.1", "HostPort": "5353"]]]
-    #expect(ContainerService.publishSpecs(b) == ["127.0.0.1:5353:53/udp", "0.0.0.0:8080:80/tcp"])
-}
-
 @Test func stdcopyFrameHeader() {
     let f = StdCopy.frame(stream: 2, Data("hi".utf8))
     #expect(Array(f) == [2, 0, 0, 0, 0, 0, 0, 2, 0x68, 0x69])
@@ -142,10 +137,7 @@ func normalizesImageRefs(input: String, expected: String) {
     #expect(RegistryAuth.header("e30=") == nil)  // {} from an anonymous pull
 }
 
-@Test func loopbackRegistriesUseHTTPLikeDocker() {
-    #expect(RegistryAuth.schemeArgs("localhost:5000") == ["--scheme", "http"])
-    #expect(RegistryAuth.schemeArgs("127.0.0.1:15000") == ["--scheme", "http"])
-    #expect(RegistryAuth.schemeArgs("ghcr.io").isEmpty)
+@Test func registryHostOfAnImage() {
     #expect(RegistryAuth.host(ofImage: "127.0.0.1:15000/e2e/bb:1") == "127.0.0.1:15000")
     #expect(RegistryAuth.host(ofImage: "alpine") == "docker.io")
 }
@@ -229,26 +221,6 @@ private let grypeSample = Data(#"""
     #expect(IPv4.freeSubnet(avoiding: []) == "172.18.0.0/24")
     #expect(IPv4.freeSubnet(avoiding: ["172.18.0.0/24", "172.18.1.9/16"]) == nil)
     #expect(IPv4.freeSubnet(avoiding: ["172.18.0.0/23", "192.168.64.0/24"]) == "172.18.2.0/24")
-}
-
-@Test func hostsFileListsPeersOnceWithAliases() {
-    let text = NetworkService.hostsFile(
-        hostname: "abc123", ownIP: "172.18.0.2",
-        peers: [("172.18.0.2", ["a", "abc123"]), ("172.18.0.3", ["b", "db", "def456"]), ("172.18.0.3", ["b"])])
-    #expect(text == """
-        127.0.0.1\tlocalhost
-        ::1\tlocalhost ip6-localhost ip6-loopback
-        172.18.0.2\tabc123
-        # pratico: containers on shared networks
-        172.18.0.2\ta abc123
-        172.18.0.3\tb db def456
-
-        """)
-}
-
-@Test func networkFlagsFollowTheContainerName() {
-    let args = ContainerService.withNetworks(["create", "--name", "x", "-e", "A=1", "--", "img"], ["pratico-n", "default"])
-    #expect(args == ["create", "--name", "x", "--network", "pratico-n", "--network", "default", "-e", "A=1", "--", "img"])
 }
 
 @Test func startErrorsUseDockerWording() {
@@ -439,7 +411,6 @@ private let grypeSample = Data(#"""
     // DNS names that merely look like loopback must never get plain HTTP with credentials.
     for h in ["127.attacker.example", "127.0.0.1.nip.io:5000", "localhost.example.com", "128.0.0.1", "10.0.0.1:5000"] {
         #expect(!RegistryPolicy.isLoopback(h), "\(h)")
-        #expect(RegistryAuth.schemeArgs(h).isEmpty, "\(h)")
     }
 }
 
@@ -523,4 +494,18 @@ private let grypeSample = Data(#"""
     try w.finishEncoding()
     #expect(throws: APIError.self) { try Tar.extract(evil, to: root.appending(path: "dst2")) }
     #expect(!fm.fileExists(atPath: root.appending(path: "escaped").path))
+}
+
+@Test func trivyAndCustomScannerOutputBecomeFindings() throws {
+    let trivy = Data(#"{"Results":[{"Vulnerabilities":[{"VulnerabilityID":"CVE-2024-1","PkgName":"openssl","InstalledVersion":"3.0.1","FixedVersion":"3.0.2, 3.1.0","Severity":"HIGH","CVSS":{"nvd":{"V3Score":7.5}}}]}]}"#.utf8)
+    let t = ScanParsers.trivy(trivy)
+    #expect(t.count == 1 && t[0].id == "CVE-2024-1" && t[0].package == "openssl" && t[0].fixed == ["3.0.2", "3.1.0"])
+    #expect(t[0].severity == "high" && t[0].cvss == 7.5 && t[0].sources == ["trivy"])
+
+    let custom = Data(#"{"findings":[{"id":"MAL-X","package":"p","version":"1","severity":"Critical","malicious":true},{"id":"CVE-2","package":"q","severity":"bogus"},{"package":"no-id"}]}"#.utf8)
+    let c = try #require(ScanParsers.custom(custom, source: "mine"))
+    #expect(c.map(\.id) == ["MAL-X", "CVE-2"])
+    #expect(c[0].malicious && c[0].severity == "critical" && c[0].sources == ["mine"])
+    #expect(c[1].severity == "unknown")
+    #expect(ScanParsers.custom(Data("not json".utf8), source: "mine") == nil)
 }

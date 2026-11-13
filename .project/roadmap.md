@@ -42,7 +42,7 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 
 ## Embedded runtime (design: docs/design/runtime.md) — replaces the `container` CLI backend
 
-- [x] Kernel and vminit assets pinned and verified; images (pull, list, inspect, tag, rm, save) on the ContainerizationOCI store (`PRATICO_RUNTIME=embedded`, `make e2e-embedded`)
+- [x] Kernel and vminit assets pinned and verified; images (pull, list, inspect, tag, rm, save) on the ContainerizationOCI store (`make e2e-embedded`)
 - [x] Per-container shim owns the VM: create/start/stop/kill/wait/logs/rm, VM-level pause; exit codes survive a daemon restart
 - [x] `docker run -i/-it` and attach stdin through the shim, TTY resize; healthchecks on the agent; start errors in Docker's wording
 - [x] Exec, cp, stats, pause through the guest agent (the CLI backend's freezer agent and `container stats` sampler go with that backend in the last step)
@@ -55,7 +55,7 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 - [x] Registry trust you choose and can see: plain HTTP for loopback (as Docker) and listed hosts, extra CAs added to the system's roots, system proxy/PAC; `docker info`, pull/push output and the menubar say so; kept logins removable from the menubar
 - [ ] Egress intercept: sandwich-proxy engine on container HTTP/HTTPS flows, per-container opt-in, log/replay/HAR/threat feeds
 - [x] Embedded is the default: the app bundles `pratico-shim`, the kernel and `vminit`; acknowledgements (licenses) in the app and DMG
-- [ ] `container` CLI adapter, `/etc/hosts` sync and default-network anchor removed; SPEC and docs updated
+- [x] `container` CLI adapter, `/etc/hosts` sync, freezer agent and default-network anchor removed; SPEC and docs updated
 
 ## Networks and volumes
 
@@ -76,6 +76,7 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 - [ ] Alert on a container turning `unhealthy` (AC-52, menubar part)
 - [x] View logs: daemon log in `~/.pratico/daemon.log`, opened in Console; Status submenu and Copy Diagnostics (FR-32)
 - [ ] View alerts quick action (FR-32)
+- [x] Scanners menu: which scanners are found (osv-scanner, grype, trivy, `scan_custom`), versions, Homebrew install help; your own scanners through a JSON contract (D-24)
 - [x] Disk menu: allocated sizes by kind, running vs stopped, leftovers, largest items, free space; cleanup that lists and confirms; `docker system df` / `prune` (D-31)
 - [x] Preferences panel (⌘,) shows effective values and source; saving writes only the changed key (AC-37)
 

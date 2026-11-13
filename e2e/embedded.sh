@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# End-to-end checks for the embedded runtime (docs/design/runtime.md): the real
-# `docker` CLI against pratico-daemon with PRATICO_RUNTIME=embedded. Apple's `container`
-# CLI is replaced by a fake that records any call, and the suite fails if one happens.
+# End-to-end checks for pratico's runtime (docs/design/runtime.md): the real `docker` CLI
+# against pratico-daemon, covering shims, the guest agent, pratico-net, and registries.
 # Usage: e2e/embedded.sh <bin-dir>     (or: make e2e-embedded)
 set -uo pipefail
 
@@ -18,12 +17,8 @@ export DOCKER_HOST="unix://$SOCK"
 export DOCKER_CONFIG="$HOME_DIR/docker-config"
 mkdir -p "$DOCKER_CONFIG"
 echo '{"auths":{"pratico.invalid":{}}}' >"$DOCKER_CONFIG/config.json"
-# Any use of Apple's CLI is a failure of this runtime.
-FAKE="$HOME_DIR/fake-container"
-printf '#!/bin/sh\necho "$@" >>"%s/apple-calls"\nexit 1\n' "$HOME_DIR" >"$FAKE"
-chmod +x "$FAKE"
-export PRATICO_RUNTIME=embedded PRATICO_RUNTIME_ASSETS="$ASSETS" PRATICO_CONTAINER_BIN="$FAKE"
-export PRATICO_OSV_BIN=/nonexistent PRATICO_GRYPE_BIN=/nonexistent  # no scanning here
+export PRATICO_RUNTIME_ASSETS="$ASSETS"
+export PRATICO_OSV_BIN=/nonexistent PRATICO_GRYPE_BIN=/nonexistent PRATICO_TRIVY_BIN=/nonexistent  # no scanning here
 DAEMON_PID=""
 
 pass=0
@@ -395,7 +390,6 @@ check "docker system prune finishes" docker system prune -f
 docker rm -f d-keep >/dev/null
 
 check "rmi removes the image" docker rmi alpine
-if [ -s "$HOME_DIR/apple-calls" ]; then bad "no Apple container CLI calls" "$(head -3 "$HOME_DIR/apple-calls")"; else ok "no Apple container CLI calls"; fi
 
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ] || { echo "--- daemon log"; tail -20 "$HOME_DIR/daemon.log"; exit 1; }

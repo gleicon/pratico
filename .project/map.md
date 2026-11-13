@@ -2,7 +2,7 @@
 
 ## Overview
 
-Pratico is a Docker Remote API daemon plus SwiftUI menubar app for Apple silicon Macs. It serves the Docker API (1.55, min 1.44) on `unix://~/.pratico/docker.sock` and runs each container in its own lightweight VM, so developers keep `docker` / `docker compose` without Docker Desktop. Two runtimes exist: the default, embedded runtime links apple/containerization and runs each VM in a `pratico-shim` process; `PRATICO_RUNTIME=container` drives Apple's `container` CLI (`AppleContainer.swift`) until its removal.
+Pratico is a Docker Remote API daemon plus SwiftUI menubar app for Apple silicon Macs. It serves the Docker API (1.55, min 1.44) on `unix://~/.pratico/docker.sock` and runs each container in its own lightweight VM, so developers keep `docker` / `docker compose` without Docker Desktop. It links apple/containerization and runs each VM in a `pratico-shim` process.
 
 ## Stack
 

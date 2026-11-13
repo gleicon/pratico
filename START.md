@@ -71,8 +71,11 @@ menubar is planned.
 
 ## Image scanning
 
-Pulled images are scanned in the background with osv-scanner and grype if they are
-installed (`brew install osv-scanner grype`). An image with a known-malicious package or
+Pulled images are scanned in the background with whichever of osv-scanner, grype and
+trivy are installed. The menubar's **Scanners** menu checks which ones pratico finds, with
+their versions, and **Install Missing Scanners…** gives the Homebrew command (or, without
+Homebrew, how to get it and each scanner's page). **Add Your Own Scanner…** explains how
+to plug in any executable through `scan_custom`. An image with a known-malicious package or
 a CVE in CISA's exploited list is stopped and blocked: starting it fails with the
 finding named, and the menubar shows an alert. To run it anyway, add its ID to
 `scan_allow` in **Settings…** (⌘,), or in `~/.pratico/config.toml`:
@@ -96,8 +99,7 @@ export DOCKER_HOST=unix:///tmp/pratico-try/docker.sock
 docker run --rm alpine uname -a
 ```
 
-`PRATICO_RUNTIME=container` selects the old backend on Apple's `container` CLI, until it
-is removed. Progress: [docs/design/runtime.md](docs/design/runtime.md).
+Design: [docs/design/runtime.md](docs/design/runtime.md).
 
 ## Troubleshooting
 
@@ -105,7 +107,6 @@ is removed. Progress: [docs/design/runtime.md](docs/design/runtime.md).
 |---|---|
 | "Pratico can't be opened" | Gatekeeper; approve it as in step 1 |
 | `Cannot connect to the Docker daemon` | daemon stopped: start it from the menubar; the reason it stopped is in `~/.pratico/daemon.err` and **Status › View Daemon Log** |
-| menubar says the embedded runtime is unavailable | the kernel or `pratico-shim` is missing from the app; reinstall it. Status › View Daemon Log has the details |
+| menubar says the runtime is unavailable | the kernel or `pratico-shim` is missing from the app; reinstall it. Status › View Daemon Log has the details |
 | daemon refuses to start, naming a key and line | `~/.pratico/config.toml` has an unknown key or bad value |
 | `docker start` fails naming `MAL-…` or a CVE | the image scan blocked it; see Image scanning |
-| `docker cp`, `exec`, healthcheck fail on one image | it lacks `/bin/sh` or `tar` (`PRATICO_RUNTIME=container` only) |

@@ -50,21 +50,22 @@ public enum DefaultSocket {
         """
     }
 
+    /// pratico's socket as the user's shell writes it: each user's own home, no fixed path.
+    public static let shellTarget = "$HOME/.pratico/docker.sock"
+
     /// What the menubar's help shows the user to paste into Terminal; pratico itself never
     /// asks for root.
-    public static func linkCommand(target: String) -> String {
-        "sudo ln -s \(shellQuoted(target)) \(path)"
-    }
+    public static let linkCommand = "sudo ln -s \"\(shellTarget)\" \(path)"
 
     /// Keeps the link after restarts: a root-owned job that runs only `/bin/ln -s` at boot.
-    public static func persistCommands(target: String) -> String {
-        """
-        sudo tee \(plistPath) >/dev/null <<'PRATICO_PLIST'
-        \(launchdPlist(target: target))
+    /// The heredoc is unquoted so the user's shell writes their own home into the plist,
+    /// which launchd needs as an absolute path.
+    public static let persistCommands = """
+        sudo tee \(plistPath) >/dev/null <<PRATICO_PLIST
+        \(launchdPlist(target: shellTarget))
         PRATICO_PLIST
         sudo launchctl bootstrap system \(plistPath)
         """
-    }
 
     public static let removeCommands = """
         sudo launchctl bootout system/\(label) 2>/dev/null; sudo rm -f \(plistPath) \(path)
@@ -75,5 +76,4 @@ public enum DefaultSocket {
             .replacingOccurrences(of: "\n", with: "&#10;")  // no line can end the heredoc
     }
 
-    static func shellQuoted(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
 }

@@ -32,11 +32,11 @@ struct StatusMenu: View {
         Menu("Status") {
             if let s = daemon.status {
                 Text("Up since \(s.StartedAt.formatted(date: .abbreviated, time: .shortened))")
-                Text(s.Runtime == "embedded" ? "Engine: built in (Virtualization.framework)" : "Engine: Apple container CLI (external)")
+                Text("Engine: built in (Virtualization.framework)")
                 Text("Containers: \(s.ContainersRunning) running, \(s.Containers) in all")
             }
             if let v = daemon.apiVersion { Text("Docker API \(v)") }
-            Text("Socket: \(daemon.socketPath)")
+            Text("Socket: \(daemon.socketDisplay)")
             switch daemon.defaultSocket {
             case .ours: Text("Also at \(DefaultSocket.path)")
             case .other(let owner): Text("\(DefaultSocket.path) is another daemon's: \(owner)")
@@ -47,7 +47,10 @@ struct StatusMenu: View {
             Button("Copy Diagnostics") { daemon.copyDiagnostics() }
         }
         // Space used and cleanup, better than `docker system df` and `prune`.
-        if daemon.isRunning { DiskMenu(daemon: daemon) }
+        if daemon.isRunning {
+            DiskMenu(daemon: daemon)
+            ScannersMenu(daemon: daemon)
+        }
         // ~/.pratico/docker.sock is the default; this path needs root, which pratico never asks for.
         Button("Use with docker…") { daemon.showDockerSetup() }
         Button("Use \(DefaultSocket.path)…") { daemon.showDefaultSocketHelp() }

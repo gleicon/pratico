@@ -1,7 +1,7 @@
 import Foundation
 import PraticoCore
 
-/// Label set on every Apple container pratico creates (SPEC FR-27).
+/// Labels marking what pratico created (SPEC FR-27).
 public enum PraticoLabel {
     public static let managed = "dev.pratico.docker"
     public static let id = "dev.pratico.id"
@@ -11,6 +11,8 @@ public enum PraticoLabel {
 struct ContainerRecord: Codable, Sendable {
     var id: String
     var name: String
+    /// The short ID: VM name and default hostname. (Named for the CLI backend it once fed;
+    /// kept so stored records still decode.)
     var appleId: String
     var image: String  // as the client asked for it
     var imageId: String
@@ -22,9 +24,6 @@ struct ContainerRecord: Codable, Sendable {
     var state = ContainerState()
     /// Network ID → endpoint; nil for records older than networks (on `bridge`).
     var endpoints: [String: Endpoint]?
-    /// `container create` arguments without `--network`, kept so a container that never
-    /// ran can be recreated with other networks (D-25). nil for older records.
-    var createArgs: [String]?
 
     var tty: Bool { config["Tty"]?.bool ?? false }
     var autoRemove: Bool { hostConfig["AutoRemove"]?.bool ?? false }
@@ -52,21 +51,15 @@ public struct APIError: Error, Sendable {
     static func noContainer(_ ref: String) -> APIError { APIError(404, "No such container: \(ref)") }
 }
 
-/// Docker containers mapped one-to-one onto Apple containers (SPEC FR-10).
-///
-/// Each running container has a supervisor: a `container start --attach` child process.
-/// The Apple runtime reports no exit codes, but that process exits with the container's
-/// code, and its stdout/stderr are the container's streams, kept separate.
+/// Docker containers, each in its own VM owned by a `pratico-shim` (SPEC FR-10, D-26).
 public final class ContainerService: @unchecked Sendable {
-    let runtime: AppleContainer
     let images: ImageService
     let root: URL
     let config: Config
     let events: EventBus
     let networks: NetworkService
-    /// Set when the embedded runtime runs containers (docs/design/runtime.md); nil means
-    /// Apple's `container` CLI.
-    let embedded: EmbeddedContainers?
+    /// The runtime: kernel, init, and the shim that owns each VM (docs/design/runtime.md).
+    let embedded: EmbeddedContainers
     /// The daemon's own API socket: what `-v /var/run/docker.sock:...` gives a container.
     let dockerSocket: String
     let health = HealthMonitor()
@@ -76,20 +69,17 @@ public final class ContainerService: @unchecked Sendable {
     private let lock = NSLock()
     private var records: [String: ContainerRecord] = [:]
     private var logs: [String: LogStore] = [:]
-    private var supervisors: [String: Process] = [:]
     private var exitWaiters: [String: [@Sendable (Int) -> Void]] = [:]
     private var removeWaiters: [String: [@Sendable (Int) -> Void]] = [:]
     private var attached: [String: [Connection]] = [:]
-    private var pauseAgents: [String: PauseAgent] = [:]
-    private var pausedVMs: Set<String> = []  // embedded: paused through the shim
-    private var published: [String: [String: [(ip: String, port: String)]]] = [:]  // embedded: bound host ports
+    private var pausedVMs: Set<String> = []
+    private var published: [String: [String: [(ip: String, port: String)]]] = [:]  // bound host ports
     /// Serializes network connect and disconnect, which read, check, and write a
     /// container's endpoints and NIC slots.
     let membership = NSLock()
 
-    init(runtime: AppleContainer, images: ImageService, root: URL, networks: NetworkService, config: Config = Config(),
-         events: EventBus = EventBus(), embedded: EmbeddedContainers? = nil, dockerSocket: String = "") {
-        self.runtime = runtime
+    init(images: ImageService, root: URL, networks: NetworkService, config: Config = Config(),
+         events: EventBus = EventBus(), embedded: EmbeddedContainers, dockerSocket: String = "") {
         self.dockerSocket = dockerSocket
         self.embedded = embedded
         self.events = events
@@ -111,61 +101,34 @@ public final class ContainerService: @unchecked Sendable {
         let dec = JSONDecoder()
         dec.dateDecodingStrategy = .iso8601
         let ids = (try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? []
-        if let embedded {
-            for id in ids {
-                guard let data = try? Data(contentsOf: dir(id).appending(path: "config.json")),
-                    var rec = try? dec.decode(ContainerRecord.self, from: data)
-                else { continue }
-                let files = ShimFiles(dir: dir(id))
-                let pid = rec.state.running ? ShimClient.livePid(files) : nil
-                if rec.state.running && pid == nil {
-                    // Exited while the daemon was down; the shim recorded how.
-                    let status = ShimClient.exitStatus(files)
-                    rec.state.status = "exited"
-                    rec.state.exitCode = status?.code ?? 0
-                    rec.state.error = status?.error ?? ""
-                    rec.state.finishedAt = status?.finishedAt ?? Date()
-                    save(rec)
-                }
-                records[id] = rec
-                let log = LogStore(path: files.log)
-                logs[id] = log
-                if let pid {
-                    if let data = try? Data(contentsOf: files.spec), let spec = try? JSONDecoder().decode(ShimSpec.self, from: data) {
-                        networks.attach(rec, spec.nics)
-                        // The daemon's listeners died with it; bind them again.
-                        if let ports = try? networks.publish(rec, spec.nics) { published[id] = ports }
-                    }
-                    if ShimClient.read(files.state)?["status"]?.string == "paused" { pausedVMs.insert(id) }
-                    log.tailExternalWriter()
-                    track(id, pid: pid, log: log, shim: embedded.shim)
-                    health.started(rec)
-                }
-            }
-            return
-        }
-        let live = Dictionary(runtime.containers().compactMap { c in c["id"]?.string.map { ($0, c) } },
-                              uniquingKeysWith: { a, _ in a })
         for id in ids {
             guard let data = try? Data(contentsOf: dir(id).appending(path: "config.json")),
                 var rec = try? dec.decode(ContainerRecord.self, from: data)
             else { continue }
-            guard live[rec.appleId] != nil else {
-                // The Apple container vanished while the daemon was down.
-                try? FileManager.default.removeItem(at: dir(id))
-                continue
-            }
-            let appleRunning = live[rec.appleId]?["status"]?["state"]?.string == "running"
-            if rec.state.running && !appleRunning {
+            let files = ShimFiles(dir: dir(id))
+            let pid = rec.state.running ? ShimClient.livePid(files) : nil
+            if rec.state.running && pid == nil {
+                // Exited while the daemon was down; the shim recorded how.
+                let status = ShimClient.exitStatus(files)
                 rec.state.status = "exited"
-                rec.state.finishedAt = rec.state.finishedAt ?? Date()
+                rec.state.exitCode = status?.code ?? 0
+                rec.state.error = status?.error ?? ""
+                rec.state.finishedAt = status?.finishedAt ?? Date()
+                save(rec)
             }
             records[id] = rec
-            logs[id] = LogStore(path: dir(id).appending(path: "log"))
-            if rec.state.running {
-                watch(id)
+            let log = LogStore(path: files.log)
+            logs[id] = log
+            if let pid {
+                if let data = try? Data(contentsOf: files.spec), let spec = try? JSONDecoder().decode(ShimSpec.self, from: data) {
+                    networks.attach(rec, spec.nics)
+                    // The daemon's listeners died with it; bind them again.
+                    if let ports = try? networks.publish(rec, spec.nics) { published[id] = ports }
+                }
+                if ShimClient.read(files.state)?["status"]?.string == "paused" { pausedVMs.insert(id) }
+                log.tailExternalWriter()
+                track(id, pid: pid, log: log, shim: embedded.shim)
                 health.started(rec)
-                networks.started(rec)
             }
         }
     }
@@ -257,60 +220,23 @@ public final class ContainerService: @unchecked Sendable {
         config["Labels"] = body["Labels"] ?? [:]
         config["Healthcheck"] = body["Healthcheck"] ?? imageConfig["Healthcheck"]
 
-        var args = ["create", "--name", appleId,
-                    "-l", "\(PraticoLabel.managed)=1", "-l", "\(PraticoLabel.id)=\(id)"]
-        for (k, v) in (body["Labels"]?.object ?? [:]) { args += ["-l", "\(k)=\(v.string ?? "")"] }
-        for e in userEnv { args += ["-e", e] }
-        if let w = body["WorkingDir"]?.string, !w.isEmpty { args += ["-w", w] }
-        if let u = body["User"]?.string, !u.isEmpty { args += ["-u", u] }
-        if body["Tty"]?.bool == true { args.append("-t") }
-        // Docker limits win; otherwise config.toml defaults apply (D-14).
-        if let mem = host["Memory"]?.int, mem > 0 {
-            args += ["-m", "\(max(mem / 1_048_576, 1))M"]
-        } else {
-            args += ["-m", "\(self.config.defaultMemoryMiB)M"]
+        // `-v` creates a missing host directory, as Docker does.
+        for m in try Self.mounts(host) where m.createSource {
+            try? FileManager.default.createDirectory(atPath: m.source, withIntermediateDirectories: true)
         }
-        if let nano = host["NanoCpus"]?.int, nano > 0 {
-            args += ["-c", "\(max((nano + 999_999_999) / 1_000_000_000, 1))"]
-        } else {
-            args += ["-c", "\(self.config.defaultCPUs)"]
-        }
-        let mounts = try Self.mounts(host)
-        for m in mounts {
-            if m.createSource {
-                try? FileManager.default.createDirectory(atPath: m.source, withIntermediateDirectories: true)
-            }
-            args += ["-v", "\(m.source):\(m.destination)\(m.readOnly ? ":ro" : "")"]
-        }
-        for spec in Self.publishSpecs(host["PortBindings"]) { args += ["-p", spec] }
-        if let userEntry {
-            args += ["--entrypoint", userEntry[0]]
-        }
-        args += ["--", ImageRef.normalize(imageRef)]
-        if let userEntry {
-            args += Array(userEntry.dropFirst()) + cmd
-        } else if userCmd != nil {
-            args += cmd
-        }
-
-        if let embedded {
-            try FileManager.default.createDirectory(at: dir(id), withIntermediateDirectories: true)
-            do {
-                try embedded.prepareRootfs(image: ImageRef.normalize(imageRef), at: dir(id).appending(path: "rootfs.ext4"))
-            } catch {
-                try? FileManager.default.removeItem(at: dir(id))
-                throw APIError(500, "container create failed: \(error)")
-            }
-        } else {
-            let r = runtime.run(Self.withNetworks(args, attach.map(\.0.appleName)))
-            guard r.ok else { throw APIError(500, "container create failed: \(r.errorText)") }
+        try FileManager.default.createDirectory(at: dir(id), withIntermediateDirectories: true)
+        do {
+            try embedded.prepareRootfs(image: ImageRef.normalize(imageRef), at: dir(id).appending(path: "rootfs.ext4"))
+        } catch {
+            try? FileManager.default.removeItem(at: dir(id))
+            throw APIError(500, "container create failed: \(error)")
         }
 
         let rec = ContainerRecord(
             id: id, name: shortName, appleId: appleId, image: imageRef, imageId: ImageService.id(img),
             created: Date(), path: full.first ?? "", args: Array(full.dropFirst()),
             config: .object(config), hostConfig: host,
-            endpoints: Dictionary(attach.map { ($0.0.id, $0.1) }, uniquingKeysWith: { a, _ in a }), createArgs: args)
+            endpoints: Dictionary(attach.map { ($0.0.id, $0.1) }, uniquingKeysWith: { a, _ in a }))
         lock.lock()
         records[id] = rec
         lock.unlock()
@@ -320,34 +246,12 @@ public final class ContainerService: @unchecked Sendable {
         return rec
     }
 
-    /// Apple fixes networks at create; `--network` goes right after the name.
-    static func withNetworks(_ args: [String], _ appleNames: [String]) -> [String] {
-        var a = args
-        a.insert(contentsOf: appleNames.flatMap { ["--network", $0] }, at: min(3, a.count))
-        return a
-    }
-
     private func uniqueName() -> String {
         for _ in 0..<32 {
             let n = Names.random()
             if (try? resolve(n)) == nil { return n }
         }
         return "pratico_\(randomHexID().prefix(8))"
-    }
-
-    /// Docker PortBindings → `container -p [ip:]host:container/proto`. A missing host IP
-    /// binds every interface, as Docker does (SPEC FR-13, D-8).
-    static func publishSpecs(_ bindings: JSON?) -> [String] {
-        var out: [String] = []
-        for (port, list) in (bindings?.object ?? [:]).sorted(by: { $0.key < $1.key }) {
-            let (num, proto) = port.splitOnce("/")
-            for b in list.array ?? [] {
-                let hostPort = b["HostPort"]?.string.flatMap { $0.isEmpty ? nil : $0 } ?? num
-                let ip = b["HostIp"]?.string.flatMap { $0.isEmpty ? nil : $0 } ?? "0.0.0.0"
-                out.append("\(ip):\(hostPort):\(num)/\(proto ?? "tcp")")
-            }
-        }
-        return out
     }
 
     struct Mount: Equatable {
@@ -418,64 +322,9 @@ public final class ContainerService: @unchecked Sendable {
         return true
     }
 
-    private func launch(_ rec: ContainerRecord) throws {
-        if let embedded { return try launchEmbedded(rec, embedded) }
-        let anchored = networks.raiseDefaultIfNeeded(rec)
-        defer { if anchored { networks.dropAnchor() } }
-        let p = runtime.process(["start", "--attach", rec.appleId])
-        let out = Pipe()
-        let err = Pipe()
-        p.standardOutput = out
-        p.standardError = err
-        do { try p.run() } catch { throw APIError(500, "cannot start container: \(error)") }
-
-        lock.lock()
-        supervisors[rec.id] = p
-        let log = logs[rec.id] ?? LogStore(path: dir(rec.id).appending(path: "log"))
-        logs[rec.id] = log
-        lock.unlock()
-        update(rec.id) {
-            $0.state = ContainerState(status: "running", startedAt: Date())
-        }
-
-        let id = rec.id
-        let tty = rec.tty
-        let group = DispatchGroup()
-        for (stream, pipe) in [(UInt8(1), out), (UInt8(2), err)] {
-            group.enter()
-            Thread.detachNewThread { [self] in
-                let h = pipe.fileHandleForReading
-                while case let data = h.availableData, !data.isEmpty {
-                    log.append(stream: stream, data)
-                    broadcast(id, tty ? data : StdCopy.frame(stream: stream, data))
-                }
-                group.leave()
-            }
-        }
-        Thread.detachNewThread { [self] in
-            group.wait()
-            p.waitUntilExit()
-            finished(id, code: Int(p.terminationStatus))
-        }
-
-        // Docker's start returns once the container runs. Without this, a stop that
-        // lands while the VM boots is a no-op in the Apple runtime and the VM comes up
-        // anyway. Short-lived containers may exit before ever reporting running.
-        let deadline = Date().addingTimeInterval(30)
-        while Date() < deadline && p.isRunning && runtime.state(rec.appleId) != "running" {
-            Thread.sleep(forTimeInterval: 0.1)
-        }
-        if p.isRunning {
-            networks.started(rec)
-            networks.sync(Set(networks.active(rec).keys), wait: true)
-        }
-        emit(rec, "start")
-        health.started(rec)
-    }
-
     /// Starts the container's shim. Its output reaches attached clients and log followers
     /// through the log file the shim writes.
-    private func launchEmbedded(_ rec: ContainerRecord, _ embedded: EmbeddedContainers) throws {
+    private func launch(_ rec: ContainerRecord) throws {
         let files = ShimFiles(dir: dir(rec.id))
         let mounts = try Self.mounts(rec.hostConfig).map { Self.shimMount($0, dockerSocket: dockerSocket) }
         let mem = rec.hostConfig["Memory"]?.int.flatMap { $0 > 0 ? Int($0 / 1_048_576) : nil } ?? config.defaultMemoryMiB
@@ -493,7 +342,7 @@ public final class ContainerService: @unchecked Sendable {
             tty: rec.tty, openStdin: openStdin, hostname: hostname, cpus: max(cpus, 1), memoryMiB: max(mem, 64),
             mounts: mounts)
         spec.nics = nics
-        spec.switchSocket = networks.netSwitch?.socketPath ?? ""
+        spec.switchSocket = networks.netSwitch.socketPath ?? ""
         try JSONEncoder().encode(spec).write(to: files.spec, options: .atomic)
 
         lock.lock()
@@ -567,11 +416,6 @@ public final class ContainerService: @unchecked Sendable {
         }
     }
 
-    /// Operations still on the CLI backend's guest-agent path; see the runtime roadmap.
-    func requireCLIBackend(_ what: String) throws {
-        if embedded != nil { throw APIError(501, "pratico: \(what) is not on the embedded runtime yet") }
-    }
-
     /// Docker event attributes: the container's labels plus `image` and `name`.
     func emit(_ rec: ContainerRecord, _ action: String, _ extra: [String: String] = [:]) {
         var attrs = rec.labels
@@ -587,21 +431,6 @@ public final class ContainerService: @unchecked Sendable {
         return table[n].map(String.init) ?? name
     }
 
-    /// Container running but started by a previous daemon: poll until it stops.
-    /// Its exit code is unknown to the Apple runtime, so it is reported as 0.
-    private func watch(_ id: String) {
-        Thread.detachNewThread { [self] in
-            while true {
-                Thread.sleep(forTimeInterval: 1)
-                guard let rec = try? resolve(id), rec.state.running else { return }
-                if runtime.state(rec.appleId) != "running" {
-                    finished(id, code: 0)
-                    return
-                }
-            }
-        }
-    }
-
     private func broadcast(_ id: String, _ data: Data) {
         lock.lock()
         let conns = attached[id] ?? []
@@ -611,8 +440,6 @@ public final class ContainerService: @unchecked Sendable {
 
     private func finished(_ id: String, code: Int) {
         lock.lock()
-        supervisors[id] = nil
-        pauseAgents.removeValue(forKey: id)?.release()
         let log = logs[id]
         let conns = attached.removeValue(forKey: id) ?? []
         let waiters = exitWaiters.removeValue(forKey: id) ?? []
@@ -632,14 +459,13 @@ public final class ContainerService: @unchecked Sendable {
             $0.state.exitCode = code
             $0.state.finishedAt = Date()
         }
-        if let rec = try? resolve(id) { networks.sync(Set(networks.active(rec).keys), wait: false) }
         if let rec = try? resolve(id) { emit(rec, "die", ["exitCode": "\(code)"]) }
         for c in conns { c.close() }
         if auto { removeNow(id, code: code) }
         for w in waiters { w(code) }
     }
 
-    /// Waits (bounded) for the supervisor to record the exit.
+    /// Waits (bounded) for the shim's exit to be recorded.
     private func awaitExit(_ id: String, seconds: Double) {
         let deadline = Date().addingTimeInterval(seconds)
         while Date() < deadline {
@@ -653,60 +479,40 @@ public final class ContainerService: @unchecked Sendable {
     func isPaused(_ id: String) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        return pauseAgents[id] != nil || pausedVMs.contains(id)
+        return pausedVMs.contains(id)
     }
 
     func pause(_ ref: String) throws {
         let rec = try resolve(ref)
         guard rec.state.running else { throw APIError(409, "Container \(rec.id) is not running") }
         guard !isPaused(rec.id) else { throw APIError(409, "Container \(rec.id) is already paused") }
-        if let embedded {
-            // The whole VM pauses: no guest tools, nothing runs until resume.
-            try embedded.shim.call(ShimFiles(dir: dir(rec.id)), "POST", "/pause")
-            lock.lock()
-            pausedVMs.insert(rec.id)
-            lock.unlock()
-            emit(rec, "pause")
-            return
-        }
-        let agent = try PauseAgent.freeze(rec.appleId, runtime: runtime)
+        // The whole VM pauses: no guest tools, nothing runs until resume.
+        try embedded.shim.call(ShimFiles(dir: dir(rec.id)), "POST", "/pause")
         lock.lock()
-        pauseAgents[rec.id] = agent
+        pausedVMs.insert(rec.id)
         lock.unlock()
         emit(rec, "pause")
     }
 
     func unpause(_ ref: String) throws {
         let rec = try resolve(ref)
-        if let embedded {
-            lock.lock()
-            let paused = pausedVMs.contains(rec.id)
-            lock.unlock()
-            guard paused else { throw APIError(409, "Container \(rec.id) is not paused") }
-            try embedded.shim.call(ShimFiles(dir: dir(rec.id)), "POST", "/resume")
-            lock.lock()
-            pausedVMs.remove(rec.id)
-            lock.unlock()
-            emit(rec, "unpause")
-            return
-        }
         lock.lock()
-        let agent = pauseAgents.removeValue(forKey: rec.id)
+        let paused = pausedVMs.contains(rec.id)
         lock.unlock()
-        guard let agent else { throw APIError(409, "Container \(rec.id) is not paused") }
-        agent.thaw()
-        networks.sync(Set(networks.active(rec).keys), wait: false)  // skipped while frozen
+        guard paused else { throw APIError(409, "Container \(rec.id) is not paused") }
+        try embedded.shim.call(ShimFiles(dir: dir(rec.id)), "POST", "/resume")
+        lock.lock()
+        pausedVMs.remove(rec.id)
+        lock.unlock()
         emit(rec, "unpause")
     }
 
-    /// A frozen container ignores stop and kill, so lifecycle calls thaw it first.
+    /// A paused VM ignores stop and kill, so lifecycle calls resume it first.
     private func thawIfPaused(_ id: String) {
         lock.lock()
-        let agent = pauseAgents.removeValue(forKey: id)
         let vm = pausedVMs.remove(id) != nil
         lock.unlock()
-        agent?.thaw()
-        if vm, let embedded { try? embedded.shim.call(ShimFiles(dir: dir(id)), "POST", "/resume") }
+        if vm { _ = try? embedded.shim.call(ShimFiles(dir: dir(id)), "POST", "/resume") }
     }
 
     func stop(_ ref: String, timeout: Int?) throws -> Bool {
@@ -715,12 +521,7 @@ public final class ContainerService: @unchecked Sendable {
         thawIfPaused(rec.id)
         let t = timeout ?? 10
         emit(rec, "kill", ["signal": "15"])
-        if let embedded {
-            try embedded.shim.call(ShimFiles(dir: dir(rec.id)), "POST", "/stop?t=\(t)")
-        } else {
-            let r = runtime.run(["stop", "-t", "\(t)", rec.appleId])
-            guard r.ok else { throw APIError(500, "cannot stop container: \(r.errorText)") }
-        }
+        try embedded.shim.call(ShimFiles(dir: dir(rec.id)), "POST", "/stop?t=\(t)")
         awaitExit(rec.id, seconds: Double(t) + 10)
         emit(rec, "stop")
         return true
@@ -734,13 +535,8 @@ public final class ContainerService: @unchecked Sendable {
         let sig = (signal.flatMap { $0.isEmpty ? nil : $0 } ?? "KILL").uppercased()
         thawIfPaused(rec.id)
         emit(rec, "kill", ["signal": Self.signalNumber(sig)])
-        if let embedded {
-            guard let n = Int(Self.signalNumber(sig)) else { throw APIError(400, "invalid signal: \(sig)") }
-            try embedded.shim.call(ShimFiles(dir: dir(rec.id)), "POST", "/kill?signal=\(n)")
-        } else {
-            let r = runtime.run(["kill", "-s", sig, rec.appleId])
-            guard r.ok else { throw APIError(500, "cannot kill container: \(r.errorText)") }
-        }
+        guard let n = Int(Self.signalNumber(sig)) else { throw APIError(400, "invalid signal: \(sig)") }
+        try embedded.shim.call(ShimFiles(dir: dir(rec.id)), "POST", "/kill?signal=\(n)")
         if ["KILL", "SIGKILL", "9"].contains(sig) { awaitExit(rec.id, seconds: 10) }
     }
 
@@ -760,11 +556,7 @@ public final class ContainerService: @unchecked Sendable {
             }
             thawIfPaused(rec.id)
             emit(rec, "kill", ["signal": "9"])
-            if let embedded {
-                try? embedded.shim.call(ShimFiles(dir: dir(rec.id)), "POST", "/kill?signal=9")
-            } else {
-                _ = runtime.run(["kill", "-s", "KILL", rec.appleId])
-            }
+            _ = try? embedded.shim.call(ShimFiles(dir: dir(rec.id)), "POST", "/kill?signal=9")
             awaitExit(rec.id, seconds: 10)
         }
         removeNow(rec.id, code: (try? resolve(rec.id))?.state.exitCode ?? 0)
@@ -776,9 +568,8 @@ public final class ContainerService: @unchecked Sendable {
         logs[id] = nil
         let waiters = removeWaiters.removeValue(forKey: id) ?? []
         lock.unlock()
-        if embedded == nil { _ = runtime.run(["delete", "--force", rec.appleId]) }
         try? FileManager.default.removeItem(at: ShimFiles(dir: dir(id)).socket)
-        try? FileManager.default.removeItem(at: dir(id))  // embedded: rootfs and shim files too
+        try? FileManager.default.removeItem(at: dir(id))  // rootfs and shim files too
         health.removed(id)
         emit(rec, "destroy")
         for w in waiters { w(code) }
@@ -826,7 +617,7 @@ public final class ContainerService: @unchecked Sendable {
         lock.lock()
         attached[rec.id, default: []].append(conn)
         lock.unlock()
-        if stdin, rec.config["OpenStdin"]?.bool == true, let embedded { pumpStdin(rec, conn, embedded) }
+        if stdin, rec.config["OpenStdin"]?.bool == true { pumpStdin(rec, conn, embedded) }
     }
 
     /// Client keystrokes or piped input into the shim's `/stdin`. The Docker CLI attaches
@@ -865,19 +656,19 @@ public final class ContainerService: @unchecked Sendable {
     /// `POST /containers/{id}/resize` for a TTY container.
     func resize(_ ref: String, height: Int, width: Int) throws {
         let rec = try resolve(ref)
-        guard let embedded, rec.state.running, height > 0, width > 0 else { return }
-        try? embedded.shim.call(ShimFiles(dir: dir(rec.id)), "POST", "/resize?h=\(height)&w=\(width)")
+        guard rec.state.running, height > 0, width > 0 else { return }
+        _ = try? embedded.shim.call(ShimFiles(dir: dir(rec.id)), "POST", "/resize?h=\(height)&w=\(width)")
     }
 
-    /// One healthcheck probe: through the shim's agent on the embedded runtime.
+    /// One healthcheck probe, through the shim's guest agent.
     func healthProbe(_ rec: ContainerRecord, _ check: HealthConfig) -> HealthState.Probe {
-        guard let embedded else { return HealthMonitor.probe(runtime, appleId: rec.appleId, check: check) }
         let start = Date()
         let body: JSON = ["args": JSON(check.command), "timeout": .int(Int64(max(check.timeout.rounded(.up), 1)))]
         do {
             let r = try embedded.shim.request(ShimFiles(dir: dir(rec.id)), "POST", "/exec", body: body.encoded())
             let j = JSON.parse(r.body) ?? [:]
-            return .init(start: start, end: Date(), exitCode: Int(j["exitCode"]?.int ?? -1), output: j["output"]?.string ?? "")
+            // Docker keeps at most 4 KiB of probe output.
+            return .init(start: start, end: Date(), exitCode: Int(j["exitCode"]?.int ?? -1), output: String((j["output"]?.string ?? "").prefix(4096)))
         } catch {
             return .init(start: start, end: Date(), exitCode: -1, output: "\(error)")
         }
@@ -948,7 +739,7 @@ public final class ContainerService: @unchecked Sendable {
         }
     }
 
-    /// Bound host ports (embedded runtime: `-p 80` gets a free port), else the request.
+    /// Bound host ports (`-p 80` gets a free port), else the request.
     private func bindings(_ rec: ContainerRecord) -> [String: JSON] {
         lock.lock()
         let bound = published[rec.id]
@@ -1072,85 +863,5 @@ public final class ContainerService: @unchecked Sendable {
         let a = all()
         let paused = a.filter { $0.state.running && isPaused($0.id) }.count
         return (a.count, a.filter(\.state.running).count - paused, paused)
-    }
-}
-
-/// Pause via the guest's cgroup2 freezer (SPEC FR-12.a, D-15). The Apple runtime has no
-/// pause, and a new exec joins PID 1's cgroup, so it would freeze with the container.
-/// Instead an agent exec, started before the freeze, moves itself to the namespace root,
-/// moves every other process into `pratico/`, freezes that, and holds until its stdin
-/// gets a line or closes. If the daemon dies the pipe closes and the container thaws:
-/// a frozen VM ignores stop and kill, so paused state must not outlive the daemon.
-final class PauseAgent: @unchecked Sendable {
-    static let script = """
-        r=/sys/fs/cgroup; g=$r/pratico
-        mkdir -p $g && echo $$ > $r/cgroup.procs || exit 1
-        for i in 1 2 3; do for p in $(cat $r/cgroup.procs); do
-          [ "$p" = $$ ] || echo $p > $g/cgroup.procs 2>/dev/null
-        done; done
-        echo 1 > $g/cgroup.freeze || exit 1
-        until grep -q 'frozen 1' $g/cgroup.events; do sleep 0.05; done
-        echo paused
-        read x
-        echo 0 > $g/cgroup.freeze
-        echo resumed
-        """
-
-    private let process: Process
-    private let input: FileHandle
-    private let output: FileHandle
-
-    private init(process: Process, input: FileHandle, output: FileHandle) {
-        self.process = process
-        self.input = input
-        self.output = output
-    }
-
-    static func freeze(_ appleId: String, runtime: AppleContainer) throws -> PauseAgent {
-        let p = runtime.process(["exec", "-i", "-u", "0", appleId, "sh", "-c", script])
-        let stdin = Pipe()
-        let stdout = Pipe()
-        p.standardInput = stdin
-        p.standardOutput = stdout
-        p.standardError = FileHandle.nullDevice
-        do { try p.run() } catch { throw APIError(500, "cannot pause container: \(error)") }
-        let agent = PauseAgent(process: p, input: stdin.fileHandleForWriting, output: stdout.fileHandleForReading)
-        guard agent.readLine(timeout: 10) == "paused" else {
-            agent.release()
-            throw APIError(500, "cannot pause container: the guest freezer is unavailable (the image needs /bin/sh)")
-        }
-        return agent
-    }
-
-    /// Thaws and waits (bounded) for the guest to confirm.
-    func thaw() {
-        try? input.write(contentsOf: Data("go\n".utf8))
-        _ = readLine(timeout: 10)
-        release()
-    }
-
-    /// Closing stdin thaws the guest; the host exec then exits.
-    func release() {
-        try? input.close()
-        let p = process
-        DispatchQueue.global().asyncAfter(deadline: .now() + 5) { if p.isRunning { p.terminate() } }
-    }
-
-    private func readLine(timeout: TimeInterval) -> String? {
-        let result = Box<String?>(nil)
-        let done = DispatchSemaphore(value: 0)
-        let h = output
-        Thread.detachNewThread {
-            var buf = Data()
-            while case let d = h.availableData, !d.isEmpty {
-                buf.append(d)
-                if let nl = buf.firstIndex(of: 0x0A) {
-                    result.value = String(decoding: buf[..<nl], as: UTF8.self)
-                    break
-                }
-            }
-            done.signal()
-        }
-        return done.wait(timeout: .now() + timeout) == .success ? result.value : nil
     }
 }

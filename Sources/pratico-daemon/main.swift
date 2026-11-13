@@ -39,18 +39,11 @@ Pratico.log("pratico-daemon: \(Pratico.version) starting, home \(home.path)")
 let config: Config
 do { config = try Config.load(home: home) } catch { fail("\(error)", code: 4) }
 
-let runtime = AppleContainer()
-// The embedded runtime (docs/design/runtime.md) needs no Apple `container` install.
-if !Pratico.embeddedRuntime {
-    guard runtime.isInstalled else { fail("Apple container runtime not installed (\(runtime.binary))", code: 3) }
-    guard runtime.serviceRunning else { fail("Apple container runtime is not running; run `container system start`", code: 3) }
-}
-
 // A child that exits before reading its stdin must not take the daemon down with it.
 signal(SIGPIPE, SIG_IGN)
 
 let daemon: Daemon
-do { daemon = try Daemon(home: home, config: config, runtime: runtime) } catch { fail("\(error)", code: 4) }
+do { daemon = try Daemon(home: home, config: config) } catch let e as RuntimeUnavailable { fail("\(e)", code: 3) } catch { fail("\(error)", code: 4) }
 do { try daemon.start() } catch let e as DaemonError {
     // A second copy says why in the log, but leaves no startup error: the first is fine.
     if case .alreadyServing = e { Pratico.log("pratico-daemon: \(e)"); exit(1) }

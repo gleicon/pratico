@@ -125,37 +125,4 @@ final class HealthMonitor: @unchecked Sendable {
         defer { lock.unlock() }
         return runs[id] == run
     }
-
-    static func probe(_ runtime: AppleContainer, appleId: String, check: HealthConfig) -> HealthState.Probe {
-        let start = Date()
-        let p = runtime.process(["exec", appleId] + check.command)
-        let out = Pipe()
-        p.standardOutput = out
-        p.standardError = out
-        let done = DispatchSemaphore(value: 0)
-        p.terminationHandler = { _ in done.signal() }
-        do { try p.run() } catch {
-            return .init(start: start, end: Date(), exitCode: -1, output: "\(error)")
-        }
-        let output = Box<Data>(Data())
-        let reader = DispatchSemaphore(value: 0)
-        DispatchQueue.global().async {
-            // Docker keeps at most 4 KiB of probe output; the rest is drained, never held.
-            let h = out.fileHandleForReading
-            while case let data = h.availableData, !data.isEmpty {
-                let room = 4096 - output.value.count
-                if room > 0 { output.value.append(data.prefix(room)) }
-            }
-            reader.signal()
-        }
-        try? out.fileHandleForWriting.close()
-        if done.wait(timeout: .now() + check.timeout) == .timedOut {
-            p.terminate()
-            return .init(start: start, end: Date(), exitCode: -1,
-                         output: "Health check exceeded timeout (\(Int(check.timeout))s)")
-        }
-        _ = reader.wait(timeout: .now() + 1)
-        return .init(start: start, end: Date(), exitCode: Int(p.terminationStatus),
-                     output: String(decoding: output.value, as: UTF8.self))
-    }
 }

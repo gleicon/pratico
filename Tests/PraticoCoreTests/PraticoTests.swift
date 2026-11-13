@@ -35,7 +35,7 @@ import Testing
         from: Data(DefaultSocket.launchdPlist(target: target).utf8), format: nil) as? [String: Any])
     #expect(plist["ProgramArguments"] as? [String] == ["/bin/ln", "-s", target, "/var/run/docker.sock"])
     #expect(plist["Label"] as? String == "dev.pratico.socket")
-    let commands = [DefaultSocket.linkCommand(target: target), DefaultSocket.persistCommands(target: target), DefaultSocket.removeCommands]
+    let commands = [DefaultSocket.linkCommand, DefaultSocket.persistCommands, DefaultSocket.removeCommands]
     for script in commands {
         let p = Process()
         p.executableURL = URL(filePath: "/bin/sh")
@@ -44,5 +44,23 @@ import Testing
         p.waitUntilExit()
         #expect(p.terminationStatus == 0)
     }
-    #expect(DefaultSocket.persistCommands(target: target).components(separatedBy: "\n").filter { $0 == "PRATICO_PLIST" }.count == 1)
+    #expect(DefaultSocket.persistCommands.components(separatedBy: "\n").filter { $0 == "PRATICO_PLIST" }.count == 1)
+    #expect(DefaultSocket.linkCommand == #"sudo ln -s "$HOME/.pratico/docker.sock" /var/run/docker.sock"#)
+}
+
+/// The startup job's plist gets the user's own home from their shell, as an absolute path.
+@Test func persistCommandsWriteTheUsersHomeIntoThePlist() throws {
+    let out = FileManager.default.temporaryDirectory.appending(path: "pratico-persist-\(UUID().uuidString.prefix(8)).plist")
+    defer { try? FileManager.default.removeItem(at: out) }
+    let script = DefaultSocket.persistCommands
+        .replacingOccurrences(of: "sudo tee \(DefaultSocket.plistPath) >/dev/null", with: "cat > '\(out.path)'")
+        .split(separator: "\n").filter { !$0.contains("launchctl") }.joined(separator: "\n")
+    let p = Process()
+    p.executableURL = URL(filePath: "/bin/sh")
+    p.arguments = ["-c", script]
+    p.environment = ["HOME": "/Users/someone"]
+    try p.run()
+    p.waitUntilExit()
+    let plist = try #require(PropertyListSerialization.propertyList(from: Data(contentsOf: out), format: nil) as? [String: Any])
+    #expect(plist["ProgramArguments"] as? [String] == ["/bin/ln", "-s", "/Users/someone/.pratico/docker.sock", "/var/run/docker.sock"])
 }

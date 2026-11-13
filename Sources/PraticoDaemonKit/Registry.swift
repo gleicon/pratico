@@ -38,19 +38,4 @@ struct RegistryAuth: Equatable {
     static func host(ofImage ref: String) -> String {
         String(ImageRef.normalize(ref).split(separator: "/").first ?? "docker.io")
     }
-
-    /// Docker treats `localhost` and `127.0.0.0/8` registries as insecure, speaking plain
-    /// HTTP; Apple's `auto` scheme always tries HTTPS there, so loopback gets `--scheme http`.
-    static func schemeArgs(_ host: String) -> [String] {
-        RegistryPolicy.isLoopback(host) ? ["--scheme", "http"] : []
-    }
-}
-
-extension AppleContainer {
-    /// Stores the credentials in the Apple runtime's Keychain entry for that registry.
-    func login(_ auth: RegistryAuth) -> ProcessResult {
-        run(["registry", "login"] + RegistryAuth.schemeArgs(auth.server)
-                + ["--username", auth.username, "--password-stdin", auth.server],
-            input: Data(auth.password.utf8))
-    }
 }

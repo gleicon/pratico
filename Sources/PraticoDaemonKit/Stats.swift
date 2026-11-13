@@ -1,14 +1,13 @@
 import Foundation
 
-/// `GET /containers/{id}/stats` from `container stats --format json` (SPEC FR-19, D-18).
+/// `GET /containers/{id}/stats` from each shim's guest agent (SPEC FR-19).
 ///
-/// One Apple stats call takes about 2 s, and the Docker CLI gives up on `--no-stream`
-/// after 2 s, so requests are answered from a background sampler. It polls every
-/// `idleInterval` while containers run, back to back while a client wants stats, and at
-/// once when a container starts. Paused containers are skipped: a frozen guest may not answer.
+/// A background sampler polls every `idleInterval` while containers run, back to back
+/// while a client wants stats, and at once when a container starts. Paused containers are
+/// skipped: a paused VM does not answer.
 ///
-/// The Apple runtime reports cumulative CPU time; Docker clients compute CPU % from the
-/// delta against `precpu_stats`. `system_cpu_usage` is synthesized as wall-clock time
+/// The agent reports cumulative CPU time; Docker clients compute CPU % from the delta
+/// against `precpu_stats`. `system_cpu_usage` is synthesized as wall-clock time
 /// times the container's CPUs, so 100% means one fully busy CPU, as in Docker.
 final class StatsService: @unchecked Sendable {
     struct Sample {
@@ -16,7 +15,6 @@ final class StatsService: @unchecked Sendable {
         var raw: JSON
     }
 
-    let runtime: AppleContainer
     let containers: ContainerService
     private let lock = NSLock()
     /// Latest and previous sample per Docker container ID.
@@ -28,8 +26,7 @@ final class StatsService: @unchecked Sendable {
     static let demandWindow: TimeInterval = 60
     static let epoch = Date()
 
-    init(runtime: AppleContainer, containers: ContainerService) {
-        self.runtime = runtime
+    init(containers: ContainerService) {
         self.containers = containers
         // `static let` is lazy: pin the epoch before any sample, or the first deltas
         // are negative (the Docker CLI then fails to decode them as unsigned).
@@ -71,15 +68,10 @@ final class StatsService: @unchecked Sendable {
         lock.unlock()
     }
 
-    /// One record per container, `id` = Apple/VM name. Embedded: the guest agent through
-    /// each shim (fast); CLI backend: one `container stats` call (about 2 s).
+    /// One record per container, `id` = its VM name, from the guest agent through each shim.
     private func fetch(_ targets: [ContainerRecord]) -> [JSON] {
-        guard let embedded = containers.embedded else {
-            let r = runtime.run(["stats", "--no-stream", "--format", "json"] + targets.map(\.appleId))
-            return (r.ok ? JSON.parse(r.stdout)?.array : nil) ?? []
-        }
-        return targets.compactMap { rec in
-            guard let r = try? embedded.shim.request(containers.shimFiles(rec.id), "GET", "/stats"),
+        targets.compactMap { rec in
+            guard let r = try? containers.embedded.shim.request(containers.shimFiles(rec.id), "GET", "/stats"),
                 var o = JSON.parse(r.body)?.object
             else { return nil }
             o["id"] = .string(rec.appleId)
@@ -121,7 +113,7 @@ final class StatsService: @unchecked Sendable {
             return
         }
         var c = current(rec.id)
-        if containers.embedded != nil, !stream || c == nil {
+        if !stream || c == nil {
             // Agent stats take milliseconds: sample now rather than rely on the loop, twice,
             // so CPU has a fresh delta within the CLI's 2 s patience.
             sample([rec], prune: false)

@@ -53,8 +53,6 @@ public final class ImageService: Sendable {
 
     init(backend: any ImageBackend) { self.backend = backend }
 
-    public convenience init(runtime: AppleContainer) { self.init(backend: AppleImageBackend(runtime: runtime)) }
-
     /// Finds an image by reference or by (possibly short, possibly `sha256:`-prefixed) ID.
     public func find(_ nameOrId: String) -> JSON? {
         if let img = backend.image(ImageRef.normalize(nameOrId)) { return img }

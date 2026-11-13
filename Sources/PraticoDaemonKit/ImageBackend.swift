@@ -4,9 +4,9 @@ import ContainerizationOCI
 import Foundation
 
 /// Where images live. `ImageService` keeps the Docker semantics on top; a backend
-/// stores, names, and moves image content. Records use the Apple `container` JSON shape
-/// (`id`, `configuration.name/descriptor/creationDate`, `variants[].platform/size/config`)
-/// that `ImageService` was written against.
+/// stores, names, and moves image content. Records are JSON shaped as `id`,
+/// `configuration.name/descriptor/creationDate`, `variants[].platform/size/config`, plus
+/// `blobs` (the content store digests the image holds).
 protocol ImageBackend: Sendable {
     func images() -> [JSON]
     func image(_ ref: String) -> JSON?
@@ -31,89 +31,6 @@ struct BackendError: Error, CustomStringConvertible {
     var description: String
     init(_ description: String) { self.description = description }
 }
-
-// MARK: - Apple `container` CLI
-
-/// The original backend: Apple's `container` CLI and its image store.
-struct AppleImageBackend: ImageBackend {
-    func removeUnreferencedBlobs() -> Int64 { 0 }  // Apple's store is its own
-
-    let runtime: AppleContainer
-
-    func images() -> [JSON] { runtime.images() }
-    func image(_ ref: String) -> JSON? { runtime.image(ref) }
-
-    func inUse() -> Set<String> {
-        Set(runtime.containers().compactMap { $0["configuration"]?["image"]?["descriptor"]?["digest"]?.string })
-    }
-
-    func tag(_ source: String, _ target: String) throws {
-        let r = runtime.run(["image", "tag", source, target])
-        guard r.ok else { throw BackendError(r.errorText) }
-    }
-
-    func delete(_ ref: String) throws {
-        let r = runtime.run(["image", "delete", ref])
-        guard r.ok else { throw BackendError(r.errorText) }
-    }
-
-    func pull(_ ref: String, platform: String?, auth: RegistryAuth?, progress: @escaping @Sendable (JSON) -> Void) throws {
-        try login(ref, auth)
-        var args = ["image", "pull", "--progress", "plain"] + RegistryAuth.schemeArgs(RegistryAuth.host(ofImage: ref))
-        if let platform, !platform.isEmpty { args += ["--platform", platform] }
-        try stream(args + [ref], progress)
-    }
-
-    func push(_ ref: String, auth: RegistryAuth?, progress: @escaping @Sendable (JSON) -> Void) throws {
-        try login(ref, auth)
-        try stream(["image", "push", "--progress", "plain"] + RegistryAuth.schemeArgs(RegistryAuth.host(ofImage: ref)) + [ref], progress)
-    }
-
-    func saveLayout(_ ref: String, os: String, arch: String, into dir: URL) throws {
-        let archive = dir.deletingLastPathComponent().appending(path: "oci.tar").path
-        let r = runtime.run(["image", "save", "--platform", "\(os)/\(arch)", "-o", archive, ref])
-        guard r.ok else { throw BackendError(r.errorText) }
-        do { try Tar.extract(URL(filePath: archive), to: dir) } catch { throw BackendError("cannot unpack saved image: \(error)") }
-    }
-
-    /// Apple takes credentials only from its Keychain, so a forwarded login is stored there.
-    /// Credentials named for another server are ignored, never sent elsewhere.
-    func login(_ auth: RegistryAuth) throws {
-        let r = runtime.login(auth)
-        guard r.ok else { throw APIError(401, "login to \(auth.server) failed: \(r.errorText)") }
-    }
-
-    private func login(_ ref: String, _ auth: RegistryAuth?) throws {
-        guard let auth, auth.server == RegistryAuth.host(ofImage: ref) else { return }
-        let r = runtime.login(auth)
-        guard r.ok else { throw BackendError("login to \(auth.server) failed: \(r.errorText)") }
-    }
-
-    /// Runs `container <args>`, relaying each distinct progress line as a status message.
-    private func stream(_ args: [String], _ progress: @Sendable (JSON) -> Void) throws {
-        let p = runtime.process(args)
-        let out = Pipe()
-        p.standardOutput = out
-        p.standardError = out
-        try p.run()
-        var last = ""
-        var pending = Data()
-        while case let data = out.fileHandleForReading.availableData, !data.isEmpty {
-            pending.append(data)
-            while let nl = pending.firstIndex(where: { $0 == 0x0A || $0 == 0x0D }) {
-                let line = String(decoding: pending[..<nl], as: UTF8.self).trimmingCharacters(in: .whitespaces)
-                pending.removeSubrange(...nl)
-                if line.isEmpty || line == last { continue }
-                last = line
-                progress(["status": .string(line)])
-            }
-        }
-        p.waitUntilExit()
-        guard p.terminationStatus == 0 else { throw BackendError(last) }
-    }
-}
-
-// MARK: - Embedded store
 
 /// pratico's own image store (`~/.pratico/store`, apple/containerization). No other
 /// software involved; registry credentials go straight to the registry client.

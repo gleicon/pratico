@@ -1,13 +1,12 @@
 import Foundation
 
-/// `docker cp` via `/containers/{id}/archive` (SPEC FR-18, D-17). The Apple runtime has
-/// no file API, so this runs `stat` and `tar` inside the running container.
+/// `docker cp` via `/containers/{id}/archive` (SPEC FR-18): the guest agent copies files
+/// to and from the host, where they are tarred in process.
 final class ArchiveService: @unchecked Sendable {
-    let runtime: AppleContainer
     let containers: ContainerService
+    private var embedded: EmbeddedContainers { containers.embedded }
 
-    init(runtime: AppleContainer, containers: ContainerService) {
-        self.runtime = runtime
+    init(containers: ContainerService) {
         self.containers = containers
     }
 
@@ -24,13 +23,7 @@ final class ArchiveService: @unchecked Sendable {
     func stat(_ ref: String, path: String) throws -> String {
         let rec = try running(ref)
         let script = #"stat -c '%s %f %Y' -- "$1" && readlink -- "$1"; true"#
-        let r: (ok: Bool, out: Data)
-        if let embedded = containers.embedded {
-            r = try embeddedStat(rec, path: path, script: script, embedded)
-        } else {
-            let p = runtime.run(["exec", rec.appleId, "sh", "-c", script, "_", path])
-            r = (p.ok, p.stdout)
-        }
+        let r = try guestStat(rec, path: path, script: script)
         let lines = String(decoding: r.out, as: UTF8.self).split(separator: "\n").map(String.init)
         let fields = lines.first?.split(separator: " ").map(String.init) ?? []
         guard r.ok, fields.count == 3, let size = Int64(fields[0]), let raw = UInt32(fields[1], radix: 16),
@@ -46,9 +39,9 @@ final class ArchiveService: @unchecked Sendable {
         return stat.encoded().base64EncodedString()
     }
 
-    /// Embedded stat: `stat` in the guest when the image has a shell; otherwise the path is
-    /// copied out and stat'ed on the host (correct for any image, slower for big trees).
-    private func embeddedStat(_ rec: ContainerRecord, path: String, script: String, _ embedded: EmbeddedContainers) throws
+    /// `stat` in the guest when the image has a shell; otherwise the path is copied out and
+    /// stat'ed on the host (correct for any image, slower for big trees).
+    private func guestStat(_ rec: ContainerRecord, path: String, script: String) throws
         -> (ok: Bool, out: Data)
     {
         let files = containers.shimFiles(rec.id)
@@ -63,7 +56,7 @@ final class ArchiveService: @unchecked Sendable {
         guard let name = try? Self.hostName(path) else { return (false, Data()) }
         let copy = work.appending(path: name)
         try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
-        guard (try? copyOut(rec, path, to: copy, embedded)) != nil, let a = try? FileManager.default.attributesOfItem(atPath: copy.path) else {
+        guard (try? copyOut(rec, path, to: copy)) != nil, let a = try? FileManager.default.attributesOfItem(atPath: copy.path) else {
             return (false, Data())
         }
         let mode = UInt32((a[.posixPermissions] as? Int) ?? 0o644) | ((a[.type] as? FileAttributeType) == .typeDirectory ? 0o040000 : 0o100000)
@@ -72,19 +65,22 @@ final class ArchiveService: @unchecked Sendable {
         return (true, Data("\(size) \(String(mode, radix: 16)) \(mtime)\n".utf8))
     }
 
-    private func copyOut(_ rec: ContainerRecord, _ path: String, to host: URL, _ embedded: EmbeddedContainers) throws {
+    private func copyOut(_ rec: ContainerRecord, _ path: String, to host: URL) throws {
         let q = { (s: String) in s.addingPercentEncoding(withAllowedCharacters: .alphanumerics.union(CharacterSet(charactersIn: "/._-"))) ?? s }
         try embedded.shim.call(containers.shimFiles(rec.id), "POST", "/copy-out?src=\(q(path))&dst=\(q(host.path))")
     }
 
-    /// `GET` on the embedded runtime: the agent copies the path out to the host, where it is tarred.
-    private func getEmbedded(_ rec: ContainerRecord, path: String, header: String, _ embedded: EmbeddedContainers, _ conn: Connection) throws {
+    /// `GET`: a tar whose single top entry is the path's base name. The agent copies the
+    /// path out to the host, where it is tarred.
+    func get(_ ref: String, path: String, conn: Connection) throws {
+        let header = try stat(ref, path: path)
+        let rec = try running(ref)
         let trimmed = path.count > 1 && path.hasSuffix("/") ? String(path.dropLast()) : path
         let work = containers.shimFiles(rec.id).dir.appending(path: "cp-\(randomHexID().prefix(8))")
         defer { try? FileManager.default.removeItem(at: work) }
         try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
         let name = try Self.hostName(trimmed)
-        do { try copyOut(rec, trimmed, to: work.appending(path: name), embedded) } catch {
+        do { try copyOut(rec, trimmed, to: work.appending(path: name)) } catch {
             throw APIError(404, "Could not find the file \(path) in container \(rec.name)")
         }
         let archive = work.appending(path: "out.tar")
@@ -98,10 +94,16 @@ final class ArchiveService: @unchecked Sendable {
         conn.endChunked()
     }
 
-    /// `PUT` on the embedded runtime: the tar is unpacked on the host (`Tar.extract` refuses
-    /// `..` and writing through symlinks), then each top entry is copied in by the agent.
+    /// `PUT`: extracts the tar body into the existing directory `path`. The tar is unpacked
+    /// on the host (`Tar.extract` refuses `..` and writing through symlinks), then each top
+    /// entry is copied in by the agent.
     /// Files end up owned by root, as with Docker's default `cp`, where the image has `chown`.
-    private func putEmbedded(_ rec: ContainerRecord, path: String, tar data: Data, _ embedded: EmbeddedContainers) throws {
+    func put(_ ref: String, path: String, tar data: Data) throws {
+        let rec = try running(ref)
+        // Docker refuses a destination directory that does not exist.
+        guard (try? stat(ref, path: path)) != nil else {
+            throw APIError(404, "Could not find the file \(path) in container \(rec.name)")
+        }
         let files = containers.shimFiles(rec.id)
         let scratch = files.dir.appending(path: "cp-\(randomHexID().prefix(8))")
         defer { try? FileManager.default.removeItem(at: scratch) }
@@ -174,38 +176,6 @@ final class ArchiveService: @unchecked Sendable {
             }
         }
         return out
-    }
-
-    /// `GET`: a tar whose single top entry is the path's base name.
-    func get(_ ref: String, path: String, conn: Connection) throws {
-        let header = try stat(ref, path: path)
-        let rec = try running(ref)
-        if let embedded = containers.embedded { return try getEmbedded(rec, path: path, header: header, embedded, conn) }
-        let trimmed = path.count > 1 && path.hasSuffix("/") ? String(path.dropLast()) : path
-        let dir = (trimmed as NSString).deletingLastPathComponent
-        let r = runtime.run(["exec", rec.appleId, "tar", "-cf", "-", "-C", dir.isEmpty ? "/" : dir, Self.baseName(trimmed)])
-        guard r.ok else { throw APIError(500, "cannot archive \(path): \(r.errorText)") }
-        conn.respond(200, body: r.stdout, contentType: "application/x-tar",
-                     extra: [("X-Docker-Container-Path-Stat", header)])
-    }
-
-    /// `PUT`: extracts the tar body into the existing directory `path`.
-    func put(_ ref: String, path: String, tar: Data) throws {
-        let rec = try running(ref)
-        if let embedded = containers.embedded {
-            // Docker refuses a destination directory that does not exist.
-            guard (try? stat(ref, path: path)) != nil else {
-                throw APIError(404, "Could not find the file \(path) in container \(rec.name)")
-            }
-            return try putEmbedded(rec, path: path, tar: tar, embedded)
-        }
-        let r = runtime.run(["exec", "-i", rec.appleId, "sh", "-c",
-                             #"[ -d "$1" ] || { echo "missing: $1" >&2; exit 2; }; tar -xf - -C "$1""#, "_", path],
-                            input: tar)
-        if r.status == 2 && r.errorText.contains("missing:") {
-            throw APIError(404, "Could not find the file \(path) in container \(rec.name)")
-        }
-        guard r.ok else { throw APIError(500, "cannot extract into \(path): \(r.errorText)") }
     }
 
     /// A base name that is safe as one host path component: never empty, `.`, or `..`

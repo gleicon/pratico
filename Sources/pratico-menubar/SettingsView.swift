@@ -55,7 +55,7 @@ struct SettingsView: View {
             TabView {
                 pane(["start_at_login", "default_cpus", "default_memory"])
                     .tabItem { Label("General", systemImage: "gearshape") }
-                pane(["scan", "scan_block", "scan_allow"])
+                pane(["scan", "scan_block", "scan_allow", "scan_custom"])
                     .tabItem { Label("Scanning", systemImage: "checkmark.shield") }
                 pane(["registry_keep_logins", "registry_http_loopback", "registry_http", "registry_system_roots", "registry_ca"])
                     .tabItem { Label("Registries", systemImage: "shippingbox") }
@@ -147,6 +147,7 @@ struct SettingsView: View {
         "scan": "Image scanning:",
         "scan_block": "Block on:",
         "scan_allow": "Allowed images:",
+        "scan_custom": "Your scanners:",
         "registry_keep_logins": "Logins:",
         "registry_http_loopback": "Loopback:",
         "registry_http": "Plain HTTP:",

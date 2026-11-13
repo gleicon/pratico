@@ -18,11 +18,14 @@ final class DaemonController {
     private(set) var error: String?
     private(set) var status: Status?
     private(set) var disk: DiskUsage?
+    var scanners: ScannerReport?
     private(set) var alerts: [Alert] = []
     private(set) var registries = Registries()
     /// Time of the newest alert the user has seen (menu opened or notified).
     private var seenUntil = UserDefaults.standard.string(forKey: "alertsSeenUntil") ?? ""
     let socketPath = Pratico.socketPath().path
+    /// The socket as people read it: `~/.pratico/docker.sock`, not one user's home.
+    var socketDisplay: String { (socketPath as NSString).abbreviatingWithTildeInPath }
 
     private let agent = LaunchAgent()
     /// Until when `starting` waits for the daemon before saying it did not come up.
@@ -38,7 +41,6 @@ final class DaemonController {
     struct Status: Decodable, Equatable {
         var Version: String
         var Pid: Int32
-        var Runtime: String
         var StartedAt: Date
         var Socket: String
         var Containers: Int
@@ -177,7 +179,7 @@ final class DaemonController {
         let text = """
             Pratico \(Pratico.version), macOS \(ProcessInfo.processInfo.operatingSystemVersionString)
             Daemon: \(statusLine)\(error.map { " (\($0))" } ?? "")
-            Runtime: \(status?.Runtime ?? "?"), containers: \(status.map { "\($0.ContainersRunning) running of \($0.Containers)" } ?? "?")
+            Engine: Virtualization.framework, containers: \(status.map { "\($0.ContainersRunning) running of \($0.Containers)" } ?? "?")
             \(DefaultSocket.path): \(defaultSocket)
             config.toml:
             \(config)
@@ -208,12 +210,12 @@ final class DaemonController {
                 """,
             commands: """
                 # A Docker context (remembered):
-                docker context create pratico --docker host=unix://\(socketPath)
+                docker context create pratico --docker host=unix://\(DefaultSocket.shellTarget)
                 docker context use pratico
 
                 # Or an environment variable:
-                export DOCKER_HOST=unix://\(socketPath)
-                echo 'export DOCKER_HOST=unix://\(socketPath)' >> ~/.zshrc
+                export DOCKER_HOST=unix://\(DefaultSocket.shellTarget)
+                echo 'export DOCKER_HOST=unix://\(DefaultSocket.shellTarget)' >> ~/.zshrc
 
                 # Check:
                 docker version --format '{{.Server.Version}}'
@@ -225,7 +227,7 @@ final class DaemonController {
         showCommands(
             title: "Use \(DefaultSocket.path)",
             text: """
-                Pratico serves Docker at \(socketPath). That needs no password and works with \
+                Pratico serves Docker at \(socketDisplay). That needs no password and works with \
                 DOCKER_HOST or a Docker context (Use with docker…).
 
                 Some tools only look at \(DefaultSocket.path). That folder belongs to the system, \
@@ -236,10 +238,10 @@ final class DaemonController {
                 """,
             commands: """
                 # Link it now (until the next restart):
-                \(DefaultSocket.linkCommand(target: socketPath))
+                \(DefaultSocket.linkCommand)
 
                 # Optional: link it at every startup:
-                \(DefaultSocket.persistCommands(target: socketPath))
+                \(DefaultSocket.persistCommands)
 
                 # Undo both:
                 \(DefaultSocket.removeCommands)
@@ -260,7 +262,7 @@ final class DaemonController {
     }
 
     /// An explanation and Terminal commands the user runs themselves, with a Copy button.
-    private func showCommands(title: String, text: String, commands: String) {
+    func showCommands(title: String, text: String, commands: String) {
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = text
@@ -347,6 +349,8 @@ final class DaemonController {
                 self.refreshRegistries()
                 self.refreshDefaultSocket()
                 if tick % 10 == 0 { await self.refreshDisk() }
+                // Each check runs every scanner's --version: once a minute is plenty.
+                if tick % 60 == 0 { await self.refreshScanners() }
                 tick += 1
                 try? await Task.sleep(for: .seconds(1))
             }

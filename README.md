@@ -6,9 +6,8 @@ own lightweight VM: no shared Linux VM, no Docker Desktop. Existing tools keep w
 
 *Prático* (Portuguese): the harbour pilot who guides ships through narrow channels.
 
-Status: **v0.1.0-alpha**. The Docker API is served today on Apple's `container` runtime;
-pratico's own embedded runtime, which needs nothing else installed, is being phased in
-behind a flag (see [Runtimes](#runtimes)).
+Status: **v0.1.0-alpha**. Each container runs in its own small VM on Apple's
+Virtualization.framework; nothing else needs installing (see [How it runs](#how-it-runs)).
 
 ## Use it
 
@@ -49,27 +48,22 @@ running containers and the images they use are kept. `docker system df` and
 
 Pratico has no CLI of its own: `docker` is the CLI, the menubar is the control panel.
 
-## Runtimes
+## How it runs
 
-| | Embedded (default) | Apple `container` CLI (`PRATICO_RUNTIME=container`, to be removed) |
-|---|---|---|
-| Needs installed | nothing; kernel and init ship in the app | Apple `container` 1.0 |
-| VMs | pratico, via [apple/containerization](https://github.com/apple/containerization) | Apple's services |
-| Exit codes after a daemon restart | kept (each VM has its own `pratico-shim`) | lost (reported as 0) |
-| Pause | whole-VM pause | cgroup freezer agent |
-| stdin (`-i`, `-it`), healthchecks, exec, cp, stats | yes (guest agent; no tools needed in the image) | yes |
-| `docker login` | yes: checked with the registry, kept in pratico's own Keychain items | yes |
-| Networks, DNS by name | yes: pratico-net switch and DNS, isolated networks | yes ([D-25](SPEC.md), `/etc/hosts`) |
-| Connect/disconnect a running container | yes: disconnect cuts traffic at the switch | connect 409; disconnect drops names only |
-| Internet and Mac access (`host.docker.internal`) | yes: pure-Swift uplink, no extra binaries | yes |
-| Published ports (`-p`) | yes | yes |
-| `-v /var/run/docker.sock:...`, other host Unix sockets | yes: relayed over vsock to pratico's API or the host socket | no |
+Pratico runs each container in its own small VM on Apple's Virtualization.framework,
+through [apple/containerization](https://github.com/apple/containerization). The app
+carries the Linux kernel and init, so nothing else needs installing.
 
-The embedded runtime is the default: Pratico runs each container in its own small VM on
-Apple's Virtualization.framework, and the app carries the kernel and init, so nothing
-else needs installing. The CLI backend stays behind `PRATICO_RUNTIME=container` until it
-is removed. Design and progress:
-[docs/design/runtime.md](docs/design/runtime.md); checklist:
+- Each VM has its own `pratico-shim`, so containers and their exit codes survive a daemon
+  restart.
+- A guest agent runs exec, cp, stats and healthchecks, so images need no tools of their
+  own; pause freezes the whole VM.
+- pratico-net, a user-space switch in pure Swift, gives isolated networks, DNS by name,
+  internet and Mac access (`host.docker.internal`), published ports, and connect or
+  disconnect of running containers (disconnect cuts traffic at the switch).
+- `-v /var/run/docker.sock:...` and other host Unix sockets are relayed into the VM.
+
+Design: [docs/design/runtime.md](docs/design/runtime.md); checklist:
 [.project/roadmap.md](.project/roadmap.md).
 
 ## Build from source
@@ -77,7 +71,7 @@ is removed. Design and progress:
 Requires an Apple silicon Mac with macOS 26 and Xcode 26 (Swift 6.2+).
 
 ```sh
-make assets        # kernel + vminit for the embedded runtime, pinned and verified (once; cached)
+make assets        # kernel + vminit, pinned and verified (once; cached)
 make build         # swift build, then signs pratico-shim with the virtualization entitlement
 make app           # dist/Pratico.app
 make dmg           # dist/Pratico-<version>.dmg (ad-hoc signed)
@@ -92,8 +86,8 @@ against the digest GitHub publishes) to extract its 16 MB kernel, and the
 
 ```sh
 make test           # unit tests (Swift Testing)
-make e2e            # the real docker CLI against a throwaway daemon (CLI backend)
-make e2e-embedded   # the same on the embedded runtime; fails if Apple's CLI is ever called
+make e2e            # the real docker CLI against a throwaway daemon: the Docker API
+make e2e-embedded   # the runtime underneath: shims, guest agent, pratico-net, registries
 make e2e-registry   # test harness only: a throwaway private registry for login/pull/push
 make probe ARGS="docker.io/library/alpine:latest uname -a"   # boot one VM directly
 ```
@@ -119,22 +113,35 @@ the daemon with the key and line named.
 | `scan` | `true` | scan pulled images in the background |
 | `scan_block` | `"kev"` | `off`, `malware`, `kev`, or `critical`: what stops and blocks an image |
 | `scan_allow` | `[]` | image IDs allowed despite findings |
-| `registry_http_loopback` | `true` | embedded runtime: plain HTTP, credentials included, to localhost registries, as Docker |
-| `registry_http` | `[]` | embedded runtime: other registries (`host`, `host:port`, or an IPv4 CIDR such as `10.0.0.0/8`) allowed plain HTTP, Docker's insecure-registries |
-| `registry_ca` | `[]` | embedded runtime: PEM files of extra CAs, added to the system's trusted roots |
-| `registry_system_roots` | `true` | embedded runtime: `false` trusts only `registry_ca` |
-| `registry_keep_logins` | `true` | embedded runtime: keep `docker login` credentials in pratico's Keychain items for clients that send none; `false` only checks them, as `dockerd` does, and never reads the Keychain |
+| `scan_custom` | `[]` | your own scanners: executables run as `<path> <image.tar>` that print pratico's findings JSON |
+| `registry_http_loopback` | `true` | plain HTTP, credentials included, to localhost registries, as Docker |
+| `registry_http` | `[]` | other registries (`host`, `host:port`, or an IPv4 CIDR such as `10.0.0.0/8`) allowed plain HTTP, Docker's insecure-registries |
+| `registry_ca` | `[]` | PEM files of extra CAs, added to the system's trusted roots |
+| `registry_system_roots` | `true` | `false` trusts only `registry_ca` |
+| `registry_keep_logins` | `true` | keep `docker login` credentials in pratico's Keychain items for clients that send none; `false` only checks them, as `dockerd` does, and never reads the Keychain |
 
-Image scanning uses osv-scanner and grype when installed, plus CISA's KEV list; see
+Image scanning uses osv-scanner, grype and trivy when installed, your own scanners, and
+CISA's KEV list; the menubar's **Scanners** menu shows which are found and how to install
+the rest (Homebrew). A scanner of your own is any executable: pratico runs it as
+`<path> <image.tar>` (a Docker archive) with `PRATICO_IMAGE_ID` and `PRATICO_IMAGE_REFS`
+set, and it exits 0 printing
+
+```json
+{"findings": [{"id": "CVE-2024-0001", "package": "openssl", "version": "3.0.1",
+               "severity": "high", "fixed": ["3.0.2"], "cvss": 7.5, "malicious": false}]}
+```
+
+with `severity` one of `critical`, `high`, `medium`, `low`, `unknown`. Its findings merge
+with the others and follow `scan_block`. Design:
 [docs/design/image-scanning.md](docs/design/image-scanning.md).
 
 ## Layout
 
 | Path | Holds |
 |---|---|
-| `Sources/PraticoDaemonKit` | Docker API server and services (containers, images, networks, exec, logs, events, health, stats, scanning, embedded runtime, shim) |
+| `Sources/PraticoDaemonKit` | Docker API server and services (containers, images, networks, exec, logs, events, health, stats, scanning, runtime, shim) |
 | `Sources/pratico-daemon` | daemon executable (`--home <dir>` relocates state) |
-| `Sources/pratico-shim` | one per running container on the embedded runtime; owns its VM |
+| `Sources/pratico-shim` | one per running container; owns its VM |
 | `Sources/pratico-menubar` | SwiftUI menubar app |
 | `Sources/PraticoCore` | config, paths, version |
 | `e2e/` | end-to-end suites and fakes |
@@ -163,5 +170,5 @@ pratico embeds [apple/containerization](https://github.com/apple/containerizatio
 (GPL-2.0; source and config at the
 [3.28.0 release](https://github.com/kata-containers/kata-containers/releases/tag/3.28.0))
 and `vminitd` (Apache-2.0). Planned: parts of
-[sandwich-proxy](https://github.com/gleicon/sandwich-proxy) (MIT). An acknowledgements
-file ships in the app before the embedded runtime becomes the default.
+[sandwich-proxy](https://github.com/gleicon/sandwich-proxy) (MIT). The app and DMG carry
+`Acknowledgements.txt` with every license notice.

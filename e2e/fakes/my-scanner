@@ -1,0 +1,7 @@
+#!/bin/sh
+# A scan_custom scanner for e2e: flags busybox:uclibc as malicious, passes the rest.
+# pratico runs it as `my-scanner <image.tar>` with PRATICO_IMAGE_REFS set.
+case "$PRATICO_IMAGE_REFS" in
+*busybox:uclibc*) echo '{"findings":[{"id":"MAL-CUSTOM-1","package":"backdoor","version":"1.0","severity":"critical","malicious":true}]}' ;;
+*) echo '{"findings":[]}' ;;
+esac

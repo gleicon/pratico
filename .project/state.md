@@ -6,23 +6,19 @@
 - v0.1.0 is built via Makefiles and shipped as a `.dmg` (`SPEC.md` D-9).
 - No pratico CLI (SPEC D-12). Pratico is a Mac app: menubar item, config window, listeners. `docker` is the CLI. Daemon control lives in the menubar.
 - Listeners run in `pratico-daemon`, a background helper bundled in `Pratico.app` and started by a launch agent the menubar writes to `~/Library/LaunchAgents` (SPEC D-13).
-- Users must not need Apple's `container` installed (2026-11-09). The embedded runtime (SPEC D-26, `docs/design/runtime.md`) replaces the CLI backend; limitations of the CLI are bugs to remove, not documented behavior.
+- Users must not need Apple's `container` installed (2026-11-09). The embedded runtime (SPEC D-26, `docs/design/runtime.md`) replaced the CLI backend, removed 2026-11-12; limitations of the CLI are bugs to remove, not documented behavior.
 - Behave like Docker by default and go beyond it where that helps (agents especially); never ship a weaker approximation because an acceptance criterion is literally met.
 - Embedded networking is pure Swift with no extra binaries (SPEC D-27). Kernel and `vminit` are bundled, not downloaded by users.
-- pratico runs no shell and no external program (2026-11-12): native Swift and system APIs only (tar through ContainerizationArchive, daemon start by `posix_spawn` of its own binary, stop by SIGTERM). Spawning pratico's own binaries (`pratico-daemon`, `pratico-shim`) is fine. Left to retire: the `container` CLI backend (`AppleContainer`) and the scanners (`osv-scanner`, `grype`, SPEC D-24).
+- pratico runs no shell and no external program (2026-11-12): native Swift and system APIs only (tar through ContainerizationArchive, daemon start by `posix_spawn` of its own binary, stop by SIGTERM). Spawning pratico's own binaries (`pratico-daemon`, `pratico-shim`) is fine. Scanners are the exception: external tools by design (SPEC D-24), checked by the menubar's Scanners menu.
 - Every removal the user can trigger asks first (cleanup, logins, alerts).
 
 # hazards
 
-- Embedded is the default; the CLI backend runs only with `PRATICO_RUNTIME=container` (`e2e/run.sh` sets it). Two runtimes coexist until it is removed: `ContainerService` branches on `embedded`. A change to container behavior must be made, or explicitly 501'd, on both paths; run `make e2e` and `make e2e-embedded`.
 - `pratico-shim` needs `com.apple.security.virtualization`. A plain `swift build` drops it; use `make build`, which re-signs. Symptom: `exit.json` says the process lacks the entitlement, exit 127.
 - Shim sockets live in `<home>/run/<short id>.sock`; anything under `containers/<64-hex id>/` exceeds the 104-byte Unix socket limit.
 - `blocking { }` (ImageBackend.swift) waits on a semaphore; call it only from the daemon's connection threads or plain threads, never from a Swift concurrency context.
 - Swift `case A, B where cond:` applies `where` to `B` only. A route written that way matched `A` unconditionally and sent no response, hanging `docker cp`.
 - `make probe` and an embedded daemon without `--home` use `~/.pratico`, which the installed app also uses. Test with a temporary `--home`.
-- CLI backend: each running container is supervised by a `container start --attach` child; after a daemon restart a poller marks survivors exited with code 0 (real code unknown). `start` blocks until the runtime reports `running` (30 s bound), or stop-during-boot races return.
-- CLI backend: never leave an Apple container frozen without the daemon's pause agent (D-15). `container stop`, `kill`, and `rm -f` hang on a frozen VM; recovery is killing its `container-runtime-linux` process.
-- CLI backend: Apple vmnet's `default` network reclaims `bridge100`, breaking a custom network that activated while `default` was idle; the `pratico-anchor` pause container works around it (D-25). Gone with pratico-net.
 - Virtualization.framework allows 4 network devices per VM (`VZErrorDomain Code=2 "The number of network devices is greater than the maximum number supported"`); `ShimNIC.slots` is 4 for that reason.
 - `spec.json`'s `nics` is a `NICSlots` object (`slots`, `primary`). `NICSlots.init(from:)` still reads the older plain array, and its per-NIC `primary` flag, for VMs started by an older daemon; keep it while such VMs may still run.
 - The shim's `GuestAddresses`, not the daemon, records which addresses a guest slot holds: the shim outlives daemon restarts, and vminitd's `addressAdd` (netlink `NLM_F_EXCL`) fails on a duplicate without an errno the daemon can see.

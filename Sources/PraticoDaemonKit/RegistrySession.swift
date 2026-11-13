@@ -7,7 +7,7 @@ import NIOCore
 import PraticoCore
 import Security
 
-/// How the embedded runtime reaches registries (SPEC D-29), from `config.toml`:
+/// How pratico reaches registries (SPEC D-29), from `config.toml`:
 /// `registry_http`, `registry_http_loopback`, `registry_ca`, `registry_system_roots`.
 /// Every way it departs from "HTTPS verified by the system's roots" is reported where the
 /// user sees it (`docker info`, pull and push output, the daemon log, `registries.json`),

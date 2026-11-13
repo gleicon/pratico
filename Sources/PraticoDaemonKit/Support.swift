@@ -62,3 +62,21 @@ enum Names {
 func randomHexID() -> String {
     (0..<32).map { _ in String(format: "%02x", UInt8.random(in: 0...255)) }.joined()
 }
+
+/// A scanner run's exit status and output.
+struct ProcessResult: Sendable {
+    var status: Int32
+    var stdout: Data
+    var stderr: Data
+
+    var ok: Bool { status == 0 }
+    var errorText: String {
+        String(decoding: stderr.isEmpty ? stdout : stderr, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+/// A mutable value shared with a closure.
+final class Box<T>: @unchecked Sendable {
+    var value: T
+    init(_ value: T) { self.value = value }
+}

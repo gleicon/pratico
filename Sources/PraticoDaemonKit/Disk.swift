@@ -35,7 +35,7 @@ struct DiskService {
     }
 
     /// Per image: its blobs' size, the part other images share, and its containers.
-    /// Images whose record lists no blobs (the CLI backend) fall back to their layer sizes.
+    /// An image whose blobs cannot be listed falls back to its layer sizes.
     /// `referenced`: bytes of the blobs some image holds; the rest of the store is garbage.
     func imageUse() -> (items: [ImageUse], unusedReclaimable: Int64, referenced: Int64) {
         let all = images.localImages()

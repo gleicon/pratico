@@ -1,12 +1,13 @@
 import Foundation
 import PraticoCore
 
-/// A Docker network (SPEC FR-23, D-25). The built-in `bridge` is Apple's `default`
-/// network and `none` is Apple's `none`; every other network is an Apple network pratico
-/// creates with an explicit subnet and its own labels.
+/// A Docker network (SPEC FR-23, D-27): a segment of pratico-net's switch. `bridge` and
+/// `none` are built in; every other network gets its own subnet.
 struct NetworkRecord: Codable, Sendable {
     var id: String
     var name: String
+    /// The key a container's addresses are kept under. (Named for the CLI backend's
+    /// networks; kept so stored records still decode.)
     var appleName: String
     var created: Date
     var driver: String
@@ -23,8 +24,8 @@ struct NetworkRecord: Codable, Sendable {
 /// A container's attachment to a network.
 struct Endpoint: Codable, Sendable, Equatable {
     var aliases: [String]
-    /// Disconnected after the container had run: gone from Docker's view and from name
-    /// resolution, but the interface stays until the container is recreated (D-25).
+    /// Set by the CLI backend's disconnect, which could not remove an interface; records
+    /// it left still decode, and such an endpoint counts as disconnected.
     var detached: Bool
 
     init(aliases: [String] = [], detached: Bool = false) {
@@ -33,7 +34,7 @@ struct Endpoint: Codable, Sendable, Equatable {
     }
 }
 
-/// A running container's address on one Apple network.
+/// A running container's address on one network.
 struct NetworkAddress: Equatable {
     var ip: String
     var prefix: Int
@@ -77,8 +78,7 @@ enum IPv4 {
     }
 
     /// First /24 of 172.18.0.0/16 (Docker's range for user networks) that overlaps none of
-    /// `used`. Apple 1.0.0 auto-allocates subnets that never get a host bridge, so pratico
-    /// always picks one itself.
+    /// `used`.
     static func freeSubnet(avoiding used: [String]) -> String? {
         let start = parse("172.18.0.0")!
         for i in UInt32(0)..<256 {
@@ -107,35 +107,21 @@ enum IPv4 {
     }
 }
 
-/// Docker networks over Apple networks, plus name resolution between their containers.
-///
-/// Apple's DNS resolves container names only for a domain made with `container system dns
-/// create`, which needs an administrator. So pratico writes each running member's
-/// `/etc/hosts` instead, whenever a network's membership changes (D-25).
+/// Docker networks on pratico-net: a user-space switch with DNS at every gateway (D-27).
 final class NetworkService: @unchecked Sendable {
-    let runtime: AppleContainer
     let root: URL
     let events: EventBus
     weak var containers: ContainerService?
 
     private let lock = NSLock()
     private var records: [String: NetworkRecord] = [:]
-    private var addresses: [String: [String: NetworkAddress]] = [:]  // container id → Apple network
-    private var slots: [String: NICSlots] = [:]  // container id → its VM's NIC slots (embedded)
-    private let hostsQueue = DispatchQueue(label: "pratico.hosts")
-    private let anchorLock = NSLock()
-    private var anchorRunning = false  // guarded by anchorLock
+    private var addresses: [String: [String: NetworkAddress]] = [:]  // container id → network key
+    private var slots: [String: NICSlots] = [:]  // container id → its VM's NIC slots
 
-    /// `apple` false: the embedded runtime, where no Apple networks exist (pratico-net
-    /// replaces them, docs/design/runtime.md).
-    let apple: Bool
-    /// pratico-net's switch (embedded runtime only).
-    let netSwitch: NetSwitch?
+    let netSwitch: NetSwitch
 
-    init(runtime: AppleContainer, root: URL, events: EventBus, apple: Bool = true) {
-        self.runtime = runtime
-        self.apple = apple
-        netSwitch = apple ? nil : NetSwitch(socketPath: root.deletingLastPathComponent().appending(path: "run/net.sock").path)
+    init(root: URL, events: EventBus) {
+        netSwitch = NetSwitch(socketPath: root.deletingLastPathComponent().appending(path: "run/net.sock").path)
         self.root = root
         self.events = events
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -155,29 +141,16 @@ final class NetworkService: @unchecked Sendable {
             else { continue }
             records[rec.id] = rec
         }
-        let apple = !self.apple ? [:] : Dictionary(
-            (runtime.runJSON(["network", "list", "--format", "json"])?.array ?? []).compactMap { n in
-                n["id"]?.string.map { ($0, n) }
-            }, uniquingKeysWith: { a, _ in a })
         var bridge = records.values.first { $0.name == "bridge" } ?? Self.builtin("bridge", "default")
-        if self.apple {
-            bridge.subnet = apple["default"]?["status"]?["ipv4Subnet"]?.string ?? bridge.subnet
-            bridge.gateway = apple["default"]?["status"]?["ipv4Gateway"]?.string ?? bridge.gateway
-        } else {
-            // pratico-net: Docker's default bridge addressing.
-            bridge.subnet = "172.17.0.0/16"
-            bridge.gateway = "172.17.0.1"
-        }
+        // Docker's default bridge addressing.
+        bridge.subnet = "172.17.0.0/16"
+        bridge.gateway = "172.17.0.1"
         records[bridge.id] = bridge
         save(bridge)
         if !records.values.contains(where: { $0.name == "none" }) {
             let none = Self.builtin("none", "none")
             records[none.id] = none
             save(none)
-        }
-        // A custom network deleted behind pratico's back comes back with its subnet.
-        for rec in records.values where self.apple && !rec.builtin && apple[rec.appleName] == nil {
-            _ = runtime.run(Self.appleCreateArgs(rec))
         }
     }
 
@@ -192,12 +165,6 @@ final class NetworkService: @unchecked Sendable {
         enc.dateEncodingStrategy = .iso8601
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
         try? enc.encode(rec).write(to: file(rec.id), options: .atomic)
-    }
-
-    static func appleCreateArgs(_ rec: NetworkRecord) -> [String] {
-        ["network", "create", "--subnet", rec.subnet,
-         "--label", "\(PraticoLabel.managed)=1", "--label", "\(PraticoLabel.id)=\(rec.id)"]
-            + (rec.isInternal ? ["--internal"] : []) + [rec.appleName]
     }
 
     // MARK: Lookup
@@ -277,13 +244,7 @@ final class NetworkService: @unchecked Sendable {
             id: id, name: name, appleName: "pratico-\(id.prefix(12))", created: Date(), driver: driver,
             subnet: subnet, gateway: "", isInternal: body["Internal"]?.bool ?? false,
             attachable: body["Attachable"]?.bool ?? false, labels: labels, options: options)
-        if apple {
-            let r = runtime.run(Self.appleCreateArgs(rec))
-            guard r.ok else { throw APIError(500, "cannot create network: \(r.errorText)") }
-            rec.gateway = runtime.runJSON(["network", "inspect", rec.appleName])?.array?.first?["status"]?["ipv4Gateway"]?.string ?? ""
-        } else if let c = IPv4.cidr(subnet) {
-            rec.gateway = IPv4.format(c.base + 1)
-        }
+        if let c = IPv4.cidr(subnet) { rec.gateway = IPv4.format(c.base + 1) }
         segment(rec)
         lock.lock()
         records[id] = rec
@@ -298,13 +259,6 @@ final class NetworkService: @unchecked Sendable {
         guard !rec.builtin else { throw APIError(403, "\(rec.name) is a pre-defined network and cannot be removed") }
         guard members(rec).isEmpty else {
             throw APIError(403, "error while removing network: network \(rec.name) id \(rec.id) has active endpoints")
-        }
-        if apple {
-            let r = runtime.run(["network", "delete", rec.appleName])
-            // Already gone from the Apple side counts as removed.
-            guard r.ok || runtime.runJSON(["network", "inspect", rec.appleName]) == nil else {
-                throw APIError(500, "cannot remove network \(rec.name): \(r.errorText)")
-            }
         }
         lock.lock()
         records[rec.id] = nil
@@ -364,33 +318,18 @@ final class NetworkService: @unchecked Sendable {
         return out
     }
 
-    /// Records the running container's addresses, one per Apple network.
-    func started(_ rec: ContainerRecord) {
-        var found: [String: NetworkAddress] = [:]
-        for n in runtime.container(rec.appleId)?["status"]?["networks"]?.array ?? [] {
-            guard let net = n["network"]?.string, let cidr = n["ipv4Address"]?.string else { continue }
-            let (ip, len) = cidr.splitOnce("/")
-            found[net] = NetworkAddress(ip: ip, prefix: Int(len ?? "") ?? 24, gateway: n["ipv4Gateway"]?.string ?? "",
-                                        mac: n["macAddress"]?.string ?? "")
-        }
-        lock.lock()
-        addresses[rec.id] = found
-        lock.unlock()
-    }
-
     func stopped(_ id: String) {
         lock.lock()
         addresses[id] = nil
         slots[id] = nil
         lock.unlock()
-        netSwitch?.unregister(container: id)
+        netSwitch.unregister(container: id)
     }
 
-    // MARK: pratico-net (embedded runtime)
+    // MARK: pratico-net
 
     /// Starts the switch with every network's segment and its name resolver.
     func startSwitch() throws {
-        guard let netSwitch else { return }
         try FileManager.default.createDirectory(atPath: (netSwitch.socketPath as NSString).deletingLastPathComponent,
                                                 withIntermediateDirectories: true)
         netSwitch.resolveName = { [weak self] port, name in self?.resolve(port, name) }
@@ -399,7 +338,7 @@ final class NetworkService: @unchecked Sendable {
     }
 
     private func segment(_ rec: NetworkRecord) {
-        guard let netSwitch, !rec.builtin || rec.name == "bridge", let c = IPv4.cidr(rec.subnet),
+        guard !rec.builtin || rec.name == "bridge", let c = IPv4.cidr(rec.subnet),
             let gw = IPv4.parse(rec.gateway)
         else { return }
         netSwitch.setSegment(rec.id, NetSegment(gateway: gw, prefix: c.prefix, isInternal: rec.isInternal))
@@ -408,7 +347,6 @@ final class NetworkService: @unchecked Sendable {
     /// Plans the container's NIC slots: its networks (primary first), then spares for hot
     /// connect. `--network none` gets no NICs at all.
     func allocateNICs(_ rec: ContainerRecord, runDir: URL) throws -> NICSlots {
-        guard netSwitch != nil else { return NICSlots() }
         let mode = rec.hostConfig["NetworkMode"]?.string ?? ""
         let nets = active(rec).keys.compactMap { try? resolve($0) }.filter { $0.name != "none" }
             .sorted { a, b in
@@ -458,7 +396,6 @@ final class NetworkService: @unchecked Sendable {
 
     /// The shim is up with these NICs (also after a daemon restart, from its spec).
     func attach(_ rec: ContainerRecord, _ nics: NICSlots) {
-        guard let netSwitch else { return }
         lock.lock()
         slots[rec.id] = nics
         for nic in nics.slots where !nic.isSpare {
@@ -512,7 +449,7 @@ final class NetworkService: @unchecked Sendable {
         }
         let nics = nics(rec.id)
         guard nics.slots.indices.contains(binding.slot) else { return }  // stopped meanwhile
-        if let port = Self.port(rec.id, nics.slots[binding.slot]) { netSwitch?.register(port) }
+        if let port = Self.port(rec.id, nics.slots[binding.slot]) { netSwitch.register(port) }
         if nics.primary == binding.slot { retarget(rec) }
     }
 
@@ -533,7 +470,7 @@ final class NetworkService: @unchecked Sendable {
             return (nics.slots[u.slot].socket, changes, u.wasPrimary)
         }
         guard let cut else { return }
-        netSwitch?.unregister(path: cut.socket)
+        netSwitch.unregister(path: cut.socket)
         cut.changes.forEach(guest)
         if cut.wasPrimary { retarget(rec) }
     }
@@ -542,7 +479,7 @@ final class NetworkService: @unchecked Sendable {
     /// interfaces unless a host IP is given, D-8). Returns the bound host ports per
     /// container port, or throws Docker's "port is already allocated" and unbinds all.
     func publish(_ rec: ContainerRecord, _ nics: NICSlots) throws -> [String: [(ip: String, port: String)]] {
-        guard let netSwitch, let nic = nics.primaryNIC, let port = Self.port(rec.id, nic), let gw = IPv4.parse(nic.gateway)
+        guard let nic = nics.primaryNIC, let port = Self.port(rec.id, nic), let gw = IPv4.parse(nic.gateway)
         else { return [:] }
         var out: [String: [(ip: String, port: String)]] = [:]
         for (key, list) in (rec.hostConfig["PortBindings"]?.object ?? [:]).sorted(by: { $0.key < $1.key }) {
@@ -568,13 +505,13 @@ final class NetworkService: @unchecked Sendable {
     /// Points the container's published ports at its primary NIC. With none, they stay
     /// bound (no other process can take them) and lead nowhere until the next one.
     private func retarget(_ rec: ContainerRecord) {
-        guard let netSwitch, let nic = nics(rec.id).primaryNIC, let port = Self.port(rec.id, nic),
+        guard let nic = nics(rec.id).primaryNIC, let port = Self.port(rec.id, nic),
             let gw = IPv4.parse(nic.gateway)
         else { return }
         netSwitch.uplink.retarget(container: rec.id, nic: port, gateway: gw)
     }
 
-    func unpublish(_ id: String) { netSwitch?.uplink.unpublish(container: id) }
+    func unpublish(_ id: String) { netSwitch.uplink.unpublish(container: id) }
 
     /// DNS for a container (SPEC D-27): Docker's names on user networks, plus pratico's
     /// `<name>.pratico.internal` on every network the asker shares, and the host names.
@@ -611,94 +548,6 @@ final class NetworkService: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return addresses[containerId]?[net.appleName]
-    }
-
-    // MARK: Default-network anchor
-
-    static let anchorName = "pratico-anchor"
-    static let anchorImage = "registry.k8s.io/pause:3.10"
-
-    /// Works around an Apple 1.0.0 vmnet bug. Apple's `default` network always takes
-    /// `bridge100`. A custom network that activates (its first member starts) while
-    /// `default` is idle takes the free `bridge100`, and loses its host bridge, so all
-    /// connectivity, once `default` comes back. So when a custom network is about to
-    /// activate with `default` idle, a pause container holds `default` up until the
-    /// caller's `dropAnchor`. Returns true when the caller must call it (D-25).
-    func raiseDefaultIfNeeded(_ rec: ContainerRecord) -> Bool {
-        let gateway = bridge.gateway
-        func hostHas(_ ip: String) -> Bool { IPv4.hostSubnets().contains { $0.hasPrefix(ip + "/") } }
-        let activating = active(rec).keys.compactMap { try? resolve($0) }.contains { !$0.builtin && !hostHas($0.gateway) }
-        guard activating, !gateway.isEmpty else { return false }
-        anchorLock.lock()  // held until dropAnchor, so concurrent starts share one anchor safely
-        guard !hostHas(gateway) else { return true }
-        _ = runtime.run(["delete", "--force", Self.anchorName])
-        if runtime.image(Self.anchorImage) == nil {
-            _ = runtime.run(["image", "pull", "--platform", "linux/arm64", Self.anchorImage], timeout: 120)
-        }
-        let r = runtime.run(["run", "-d", "--name", Self.anchorName, "-m", "200M", "-c", "1",
-                             "-l", "dev.pratico.anchor=1", Self.anchorImage], timeout: 60)
-        guard r.ok else {
-            Pratico.log("pratico: cannot start the default-network anchor: \(r.errorText)")
-            return true
-        }
-        anchorRunning = true
-        let deadline = Date().addingTimeInterval(5)
-        while Date() < deadline && !hostHas(gateway) { Thread.sleep(forTimeInterval: 0.1) }
-        return true
-    }
-
-    func dropAnchor() {
-        if anchorRunning { _ = runtime.run(["delete", "--force", Self.anchorName]) }
-        anchorRunning = false
-        anchorLock.unlock()
-    }
-
-    // MARK: Name resolution
-
-    /// Rewrites `/etc/hosts` in every running, unpaused member of these networks.
-    /// `wait` blocks until done, so a started container's peers resolve it on return.
-    func sync(_ networkIds: Set<String>, wait: Bool) {
-        guard apple else { return }  // pratico-net answers names over DNS instead
-        let work: @Sendable () -> Void = { [self] in
-            guard let containers else { return }
-            let custom = Set(networkIds.filter { id in (try? resolve(id)).map { !$0.builtin } ?? false })
-            guard !custom.isEmpty else { return }
-            let running = containers.all().filter { $0.state.running }
-            for rec in running where !containers.isPaused(rec.id) {
-                guard !custom.isDisjoint(with: active(rec).keys) else { continue }
-                let r = runtime.run(["exec", "-i", "-u", "0", rec.appleId, "sh", "-c", "cat > /etc/hosts"],
-                                    input: Data(hosts(for: rec, among: running).utf8), timeout: 10)
-                if !r.ok { Pratico.log("pratico: /etc/hosts of \(rec.name): \(r.errorText)") }
-            }
-        }
-        if wait { hostsQueue.sync(execute: work) } else { hostsQueue.async(execute: work) }
-    }
-
-    /// The container's own lines, then every active member of its custom networks.
-    func hosts(for rec: ContainerRecord, among running: [ContainerRecord]) -> String {
-        var peers: [(ip: String, names: [String])] = []
-        var own = ""
-        for (netId, _) in active(rec).sorted(by: { $0.key < $1.key }) {
-            guard let net = try? resolve(netId), !net.builtin else { continue }
-            if own.isEmpty { own = address(rec.id, on: net)?.ip ?? "" }
-            for peer in running {
-                guard let ep = active(peer)[netId], let addr = address(peer.id, on: net) else { continue }
-                peers.append((addr.ip, [peer.name] + ep.aliases + [String(peer.id.prefix(12))]))
-            }
-        }
-        return Self.hostsFile(hostname: rec.config["Hostname"]?.string ?? rec.appleId, ownIP: own, peers: peers)
-    }
-
-    static func hostsFile(hostname: String, ownIP: String, peers: [(ip: String, names: [String])]) -> String {
-        var lines = ["127.0.0.1\tlocalhost", "::1\tlocalhost ip6-localhost ip6-loopback"]
-        if !ownIP.isEmpty { lines.append("\(ownIP)\t\(hostname)") }
-        lines.append("# pratico: containers on shared networks")
-        var seen = Set<String>()
-        for p in peers {
-            let names = p.names.filter { !$0.isEmpty && seen.insert("\(p.ip) \($0)").inserted }
-            if !names.isEmpty { lines.append("\(p.ip)\t\(names.joined(separator: " "))") }
-        }
-        return lines.joined(separator: "\n") + "\n"
     }
 
     // MARK: Views

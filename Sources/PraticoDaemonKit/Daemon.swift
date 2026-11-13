@@ -1,11 +1,18 @@
+import Containerization
+import ContainerizationOCI
 import Foundation
 import PraticoCore
 
 /// Docker Remote API daemon: routes requests onto the container and image services.
+/// The runtime cannot open: kernel, init, or `pratico-shim` missing or unusable.
+public struct RuntimeUnavailable: Error, CustomStringConvertible {
+    public var message: String
+    public var description: String { "pratico runtime unavailable: \(message)" }
+}
+
 public final class Daemon: @unchecked Sendable {
     public let home: URL
     public let socketPath: String
-    let runtime: AppleContainer
     let images: ImageService
     let containers: ContainerService
     let execs: ExecService
@@ -15,62 +22,46 @@ public final class Daemon: @unchecked Sendable {
     let networks: NetworkService
     let scans: ScanService
     let disk: DiskService
-    /// Registry trust and kept logins; embedded runtime only.
-    let registries: Registries?
+    /// Registry trust and kept logins.
+    let registries: Registries
     let startedAt = Date()
     private var server: HTTPServer?
-    /// Why the embedded runtime could not open: the daemon refuses to serve rather than fall back.
-    let embeddedFailure: String?
 
-    /// Throws a configuration error for unreadable `registry_ca` files and impossible
-    /// trust settings, on either runtime: the daemon refuses to start (exit 4) rather
-    /// than trust less, or more, than `config.toml` says.
-    public init(home: URL, config: Config = Config(), socketPath: String? = nil, runtime: AppleContainer = AppleContainer()) throws {
+    /// Throws `ConfigError` for unreadable `registry_ca` files and impossible trust
+    /// settings: the daemon refuses to start (exit 4) rather than trust less, or more, than
+    /// `config.toml` says. Throws `RuntimeUnavailable` when the kernel, init, or shim are
+    /// missing (exit 3).
+    public init(home: URL, config: Config = Config(), socketPath: String? = nil) throws {
         let policy = try RegistryPolicy.load(config)
         self.home = home
         self.socketPath = socketPath ?? home.appending(path: "docker.sock").path
-        self.runtime = runtime
-        // pratico's own runtime (docs/design/runtime.md) unless PRATICO_RUNTIME=container.
-        var embedded: EmbeddedContainers?
-        var images = ImageService(runtime: runtime)
-        var registries: Registries?
-        var embeddedImages: EmbeddedImageBackend?
-        var embeddedFailure: String?
-        if Pratico.embeddedRuntime {
-            switch EmbeddedContainers.open(home: home) {
-            case .success(let (e, store, content)):
-                embedded = e
-                let r = Registries(policy: policy, home: home)
-                for w in policy.warnings { Pratico.log("pratico-daemon: \(w)") }
-                r.writeState()
-                registries = r
-                let backend = EmbeddedImageBackend(store: store, content: content, registries: r)
-                embeddedImages = backend
-                images = ImageService(backend: backend)
-            case .failure(let error):
-                embeddedFailure = error.message
-            }
+        let embedded: EmbeddedContainers
+        let store: ImageStore
+        let content: LocalContentStore
+        switch EmbeddedContainers.open(home: home) {
+        case .success(let opened): (embedded, store, content) = opened
+        case .failure(let error): throw RuntimeUnavailable(message: error.message)
         }
-        self.embeddedFailure = embeddedFailure
-        self.images = images
+        let registries = Registries(policy: policy, home: home)
+        for w in policy.warnings { Pratico.log("pratico-daemon: \(w)") }
+        registries.writeState()
         self.registries = registries
-        self.networks = NetworkService(runtime: runtime, root: home.appending(path: "networks", directoryHint: .isDirectory),
-                                       events: events, apple: embedded == nil)
+        let backend = EmbeddedImageBackend(store: store, content: content, registries: registries)
+        self.images = ImageService(backend: backend)
+        self.networks = NetworkService(root: home.appending(path: "networks", directoryHint: .isDirectory), events: events)
         self.containers = ContainerService(
-            runtime: runtime, images: images, root: home.appending(path: "containers", directoryHint: .isDirectory),
-            networks: networks, config: config, events: events, embedded: embedded,
-            dockerSocket: self.socketPath)
-        embeddedImages?.usedBy = { [containers] in Set(containers.all().map(\.imageId)) }
-        self.execs = ExecService(runtime: runtime, containers: containers)
-        self.archives = ArchiveService(runtime: runtime, containers: containers)
-        self.stats = StatsService(runtime: runtime, containers: containers)
+            images: images, root: home.appending(path: "containers", directoryHint: .isDirectory),
+            networks: networks, config: config, events: events, embedded: embedded, dockerSocket: self.socketPath)
+        backend.usedBy = { [containers] in Set(containers.all().map(\.imageId)) }
+        self.execs = ExecService(containers: containers)
+        self.archives = ArchiveService(containers: containers)
+        self.stats = StatsService(containers: containers)
         self.scans = ScanService(home: home, images: images, containers: containers, config: config)
         self.disk = DiskService(home: home, images: images, containers: containers)
         containers.startGate = { [scans] rec in scans.blockReason(imageId: rec.imageId) }
     }
 
     public func start() throws {
-        if let embeddedFailure { throw APIError(500, "embedded runtime unavailable: \(embeddedFailure)") }
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
         // Container data is rebuildable and large; keep it out of Time Machine (FR-39).
         for name in ["store", "containers"] {
@@ -81,7 +72,7 @@ public final class Daemon: @unchecked Sendable {
             try dir.setResourceValues(values)
         }
         Uplink.raiseDescriptorLimit()  // pratico-net holds a socket per container connection
-        try networks.startSwitch()  // pratico-net, embedded runtime only
+        try networks.startSwitch()  // pratico-net
         let s = HTTPServer(path: socketPath) { [self] req, conn in handle(req, conn) }
         try s.start()
         server = s
@@ -141,16 +132,18 @@ public final class Daemon: @unchecked Sendable {
         // registry trust and logins.
         case ("GET", "pratico") where parts.count == 2 && parts[1] == "status":
             let c = containers.counts
-            conn.json(200, ["Version": .string(Pratico.version), "Pid": .int(Int64(getpid())), "Runtime": containers.embedded == nil ? "container" : "embedded",
-                            "StartedAt": .string(startedAt.ISO8601Format()), "Socket": .string(socketPath),
+            conn.json(200, ["Version": .string(Pratico.version), "Pid": .int(Int64(getpid())), "StartedAt": .string(startedAt.ISO8601Format()), "Socket": .string(socketPath),
                             "Containers": .int(Int64(c.total)), "ContainersRunning": .int(Int64(c.running))])
             return .keepAlive
         case ("GET", "pratico") where parts.count == 2 && parts[1] == "registries":
-            conn.json(200, try embeddedRegistries().state)
+            conn.json(200, registries.state)
             return .keepAlive
         case ("DELETE", "pratico") where parts.count == 4 && parts[1] == "registries" && parts[2] == "logins":
-            try embeddedRegistries().logout(parts[3].removingPercentEncoding ?? parts[3])
+            try registries.logout(parts[3].removingPercentEncoding ?? parts[3])
             conn.respond(204)
+            return .keepAlive
+        case ("GET", "pratico") where parts.count == 2 && parts[1] == "scanners":
+            conn.json(200, scans.doctor())
             return .keepAlive
         case ("GET", "pratico") where parts.count == 2 && parts[1] == "disk":
             conn.json(200, disk.usage())
@@ -360,14 +353,9 @@ public final class Daemon: @unchecked Sendable {
         ]
     }
 
-    private func embeddedRegistries() throws -> Registries {
-        guard let registries else { throw APIError(501, "pratico: registry settings are on the embedded runtime only") }
-        return registries
-    }
-
     func info() -> JSON {
         let c = containers.counts
-        var out: JSON = [
+        let out: JSON = [
             "ID": "pratico",
             "Containers": .int(Int64(c.total)),
             "ContainersRunning": .int(Int64(c.running)),
@@ -376,7 +364,7 @@ public final class Daemon: @unchecked Sendable {
             "Images": .int(Int64(images.localImages().count)),
             "Driver": "pratico",
             "DockerRootDir": .string(home.path),
-            "OperatingSystem": "macOS (Apple container)",
+            "OperatingSystem": "macOS (pratico)",
             "OSType": "linux",
             "Architecture": "aarch64",
             "NCPU": .int(Int64(ProcessInfo.processInfo.activeProcessorCount)),
@@ -387,14 +375,10 @@ public final class Daemon: @unchecked Sendable {
             "Swarm": ["LocalNodeState": "inactive", "ControlAvailable": false, "NodeID": "", "NodeAddr": ""],
             "SecurityOptions": [],
             "Labels": [],
-            "Warnings": [],
-        ]
-        if let registries {
             // The CLI prints "Insecure Registries" from this and each warning as WARNING: …
-            out["RegistryConfig"] = registries.policy.registryConfig
-            out["Warnings"] = registries.warnings
-            out["OperatingSystem"] = "macOS (pratico)"
-        }
+            "RegistryConfig": registries.policy.registryConfig,
+            "Warnings": registries.warnings,
+        ]
         return out
     }
 }

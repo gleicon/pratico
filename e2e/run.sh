@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # End-to-end suite: runs pratico-daemon in a throwaway home and drives the real
-# `docker` CLI against its socket. Each check names the SPEC AC it covers.
+# `docker` CLI against its socket. Each check names the SPEC AC it covers. The Docker API
+# behavior lives here; e2e/embedded.sh covers the runtime underneath (shims, pratico-net).
 # Usage: e2e/run.sh <bin-dir>
 set -uo pipefail
 
@@ -10,7 +11,9 @@ DOCKER="${DOCKER:-/opt/homebrew/bin/docker}"
 [ -x "$DOCKER" ] || { echo "e2e needs the docker CLI at $DOCKER"; exit 1; }
 docker() { "$DOCKER" "$@"; }
 echo "docker CLI: $DOCKER ($("$DOCKER" version --format '{{.Client.Version}}' 2>/dev/null))"
-command -v container >/dev/null || { echo "e2e needs Apple container"; exit 1; }
+ASSETS="${PRATICO_RUNTIME_ASSETS:-$(pwd)/.build/runtime-assets}"
+[ -f "$ASSETS/vmlinux" ] || { echo "runtime assets missing: run make assets"; exit 1; }
+export PRATICO_RUNTIME_ASSETS="$ASSETS"
 
 # $TMPDIR keeps the socket path under the 104-byte sun_path limit.
 HOME_DIR="$(mktemp -d -t pratico-e2e)"
@@ -20,22 +23,14 @@ export DOCKER_HOST="unix://$SOCK"
 # test. A config with no auth settings makes the CLI fall back to the macOS Keychain
 # helper, so it carries one inert entry.
 export DOCKER_CONFIG="$HOME_DIR/docker-config"
-export PRATICO_RUNTIME=container  # Apple's `container` CLI backend; embedded is e2e/embedded.sh
 mkdir -p "$DOCKER_CONFIG"
 echo '{"auths":{"pratico.invalid":{}}}' >"$DOCKER_CONFIG/config.json"
 DAEMON_PID=""
 # Hermetic scanning: fake scanners and a local KEV feed, never the network (D-24).
 FAKES="$(cd "$(dirname "$0")" && pwd)/fakes"
-export PRATICO_OSV_BIN="$FAKES/osv-scanner" PRATICO_GRYPE_BIN="$FAKES/grype"
+export PRATICO_OSV_BIN="$FAKES/osv-scanner" PRATICO_GRYPE_BIN="$FAKES/grype" PRATICO_TRIVY_BIN="$FAKES/trivy"
 export PRATICO_KEV_URL="file://$FAKES/kev.json" PRATICO_FAKE_SCAN_GATE="$HOME_DIR/scan-gate"
 export PRATICO_FAKE_SCAN_FAIL="$HOME_DIR/scan-fail"
-MUSL_PRESENT=0
-container image inspect busybox:musl >/dev/null 2>&1 && MUSL_PRESENT=1
-APPLE_ONLY="pratico-e2e-apple-$$"
-BUSYBOX_PRESENT=0
-container image inspect busybox >/dev/null 2>&1 && BUSYBOX_PRESENT=1
-PAUSE_PRESENT=0  # the default-network anchor's image (D-25)
-container image inspect registry.k8s.io/pause:3.10 >/dev/null 2>&1 && PAUSE_PRESENT=1
 
 pass=0
 fail=0
@@ -64,24 +59,16 @@ cleanup() {
         docker network prune -f >/dev/null 2>&1
     fi
     stop_daemon
-    container rm -f "$APPLE_ONLY" >/dev/null 2>&1
-    container image delete docker.io/pratico-e2e/a:1 >/dev/null 2>&1
-    [ "$BUSYBOX_PRESENT" = 0 ] && container image delete busybox >/dev/null 2>&1
-    [ "$MUSL_PRESENT" = 0 ] && container image delete busybox:musl >/dev/null 2>&1
-    [ "$PAUSE_PRESENT" = 0 ] && container image delete registry.k8s.io/pause:3.10 >/dev/null 2>&1
-    rm -rf "$HOME_DIR"
+    rm -rf "$HOME_DIR"  # images live in its store too
 }
 trap cleanup EXIT
 
-# AC-3: with the Apple runtime stopped (a fake `container` reporting so), the daemon
-# refuses to start, creates no socket, and leaves a reason naming the runtime.
-FAKE="$HOME_DIR/fake-container"
-printf '#!/bin/sh\necho "apiserver is not running"\nexit 1\n' >"$FAKE"
-chmod +x "$FAKE"
-PRATICO_CONTAINER_BIN="$FAKE" "$BIN/pratico-daemon" --home "$HOME_DIR" >/dev/null 2>&1
-expect_eq "AC-3 daemon refuses when runtime is stopped" "$?" "3"
-if [ -S "$SOCK" ]; then bad "AC-3 no socket when runtime is stopped"; else ok "AC-3 no socket when runtime is stopped"; fi
-expect_has "AC-3 reason names the Apple container runtime" "$(cat "$HOME_DIR/daemon.err" 2>/dev/null)" "Apple container runtime"
+# AC-3: without its kernel the daemon refuses to start, creates no socket, and leaves a
+# reason for the menubar.
+(cd "$HOME_DIR" && PRATICO_RUNTIME_ASSETS="$HOME_DIR/no-assets" "$BIN/pratico-daemon" --home "$HOME_DIR" >/dev/null 2>&1)
+expect_eq "AC-3 daemon refuses without its runtime" "$?" "3"
+if [ -S "$SOCK" ]; then bad "AC-3 no socket without the runtime"; else ok "AC-3 no socket without the runtime"; fi
+expect_has "AC-3 reason names the runtime" "$(cat "$HOME_DIR/daemon.err" 2>/dev/null)" "runtime unavailable"
 
 # AC-41: an unknown key stops the daemon, naming key and line.
 printf '# pratico\nbogus_key = 1\n' >"$HOME_DIR/config.toml"
@@ -99,9 +86,8 @@ printf 'default_memory = 512\ndefault_cpus = 2\n' >"$HOME_DIR/config.toml"
 start_daemon
 if [ -e "$HOME_DIR/daemon.err" ]; then bad "startup clears the previous error"; else ok "startup clears the previous error"; fi
 docker run -d --name e2e-cfg alpine sleep 60 >/dev/null
-res=$(container inspect "$(docker inspect e2e-cfg --format '{{.Config.Hostname}}')" |
-    python3 -c 'import json,sys; r=json.load(sys.stdin)[0]["configuration"]["resources"]; print(r["memoryInBytes"], r["cpus"])')
-expect_eq "D-14 config defaults reach the Apple container" "$res" "536870912 2"
+expect_eq "D-14 config default CPUs reach the VM" "$(docker exec e2e-cfg nproc)" "2"
+expect_eq "D-14 config default memory limits the container" "$(docker exec e2e-cfg cat /sys/fs/cgroup/memory.max)" "536870912"
 docker rm -f e2e-cfg >/dev/null
 stop_daemon
 rm "$HOME_DIR/config.toml"
@@ -196,8 +182,6 @@ docker rm -f e2e-p1 e2e-p2 >/dev/null
 
 docker run -d --name e2e-web -l a=1 -v "$MNT:/x:ro" alpine sleep 300 >/dev/null
 docker run -d --name e2e-other -l a=2 alpine sleep 300 >/dev/null
-apple_id=$(docker inspect e2e-web --format '{{.Config.Hostname}}')
-expect_has "AC-11 Docker container is its own Apple container" "$(container list)" "$apple_id"
 expect_eq "AC-14 docker ps filters by label" "$(docker ps --filter label=a=1 --format '{{.Names}}')" "e2e-web"
 
 before=$(docker inspect e2e-web --format '{{.Name}} {{json .Config.Labels}} {{json .HostConfig.PortBindings}} {{json .Mounts}}')
@@ -206,9 +190,6 @@ start_daemon
 after=$(docker inspect e2e-web --format '{{.Name}} {{json .Config.Labels}} {{json .HostConfig.PortBindings}} {{json .Mounts}}' 2>&1)
 expect_eq "AC-12 metadata survives daemon restart" "$after" "$before"
 
-container run -d --name "$APPLE_ONLY" alpine sleep 300 >/dev/null 2>&1
-if docker ps -a --format '{{.Names}}' | grep -q "$APPLE_ONLY"; then bad "AC-30 container-CLI container hidden from docker ps"; else ok "AC-30 container-CLI container hidden from docker ps"; fi
-expect_has "AC-30 docker rm of container-CLI container is 404" "$(docker rm "$APPLE_ONLY" 2>&1)" "No such container"
 
 # --- Lifecycle ---------------------------------------------------------------
 docker run -d --name e2e-life alpine sleep 300 >/dev/null
@@ -237,16 +218,8 @@ check "stop works on a paused container" docker stop -t 1 e2e-count
 docker start e2e-count >/dev/null; docker pause e2e-count >/dev/null
 stop_daemon
 start_daemon
-apple_count=$(docker inspect e2e-count --format '{{.Config.Hostname}}')
-# An exec joins the frozen cgroup, so it can only finish once the container is thawed.
-container exec "$apple_count" cat /sys/fs/cgroup/pratico/cgroup.freeze >"$HOME_DIR/freeze" 2>&1 &
-exec_pid=$!
-for _ in $(seq 50); do kill -0 "$exec_pid" 2>/dev/null || break; sleep 0.1; done
-if kill -0 "$exec_pid" 2>/dev/null; then
-    kill "$exec_pid"; bad "D-15 daemon exit thaws a paused container" "exec hung: still frozen"
-else
-    expect_eq "D-15 daemon exit thaws a paused container" "$(cat "$HOME_DIR/freeze")" "0"
-fi
+expect_eq "a paused container stays paused across a daemon restart" "$(docker inspect e2e-count --format '{{.State.Status}}')" "paused"
+check "and unpauses after it" docker unpause e2e-count
 docker rm -f e2e-count >/dev/null
 
 # AC-23: lifecycle events stream in order; since/until replays them.
@@ -383,7 +356,7 @@ else
 fi
 check "custom network reaches the internet" docker exec e2e-na wget -qO- -T5 http://1.1.1.1
 docker run -d --name e2e-nbr busybox sleep 300 >/dev/null
-expect_has "connecting a container that has run explains why not" "$(docker network connect e2e-n e2e-nbr 2>&1)" "already run"
+check "connect a running container" docker network connect e2e-n e2e-nbr
 docker create --name e2e-nc busybox sleep 300 >/dev/null
 check "connect a created container with an alias" docker network connect --alias cache e2e-n e2e-nc
 docker start e2e-nc >/dev/null
@@ -397,8 +370,7 @@ docker rm -f e2e-na e2e-nb e2e-nc e2e-nbr >/dev/null
 check "AC-27 network rm succeeds once its containers are removed" docker network rm e2e-n
 expect_eq "network events" \
     "$(docker events --since "$t0" --until "$(($(date +%s) + 1))" --filter type=network --filter network=e2e-n --format '{{.Action}}' | xargs)" \
-    "create connect disconnect destroy"
-if container ls -a | grep -q pratico-anchor; then bad "no default-network anchor left behind"; else ok "no default-network anchor left behind"; fi
+    "create connect connect disconnect destroy"
 
 # D-24: a serious scan finding stops the image's containers and blocks new starts.
 docker pull busybox:musl >/dev/null 2>&1
@@ -407,6 +379,8 @@ touch "$PRATICO_FAKE_SCAN_GATE"
 for _ in $(seq 100); do [ "$(docker inspect e2e-evil --format '{{.State.Running}}')" = false ] && break; sleep 0.1; done
 expect_eq "D-24 serious finding stops the image's container" "$(docker inspect e2e-evil --format '{{.State.Running}}')" "false"
 expect_has "D-24 start is blocked, naming the finding" "$(docker start e2e-evil 2>&1)" "MAL-0000-0001"
+# The alert follows the stop, which also says which containers were stopped.
+for _ in $(seq 50); do grep -q "busybox:musl blocked" "$HOME_DIR/alerts.json" 2>/dev/null && break; sleep 0.1; done
 expect_has "D-24 alert written for the menubar" "$(cat "$HOME_DIR/alerts.json" 2>/dev/null)" "busybox:musl blocked"
 musl_id=$(docker image inspect busybox:musl --format '{{.Id}}')
 report="$HOME_DIR/scans/${musl_id#sha256:}.json"
@@ -423,6 +397,18 @@ printf 'scan_allow = ["%s"]\n' "$musl_id" >"$HOME_DIR/config.toml"
 start_daemon
 check "D-24 scan_allow lets the image run" docker start e2e-evil
 docker rm -f e2e-evil >/dev/null
+
+# Your own scanner (scan_custom), and the menubar's scanner checkup.
+stop_daemon
+printf 'scan_custom = ["%s"]\n' "$FAKES/my-scanner" >"$HOME_DIR/config.toml"
+start_daemon
+doctor=$(curl -s --unix-socket "$SOCK" http://d/pratico/scanners)
+check "the scanner checkup lists built-in and custom scanners with paths" python3 -c "import json,sys; d=json.loads(sys.argv[1]); n={s['name']: s for s in d['scanners']}; assert set(n) >= {'osv-scanner','grype','trivy','my-scanner'} and all(s['path'] for s in n.values()) and n['grype']['brew'] == 'grype' and not n['my-scanner']['builtin']" "$doctor"
+docker pull busybox:uclibc >/dev/null 2>&1
+docker create --name e2e-custom busybox:uclibc true >/dev/null
+for _ in $(seq 100); do docker start e2e-custom 2>&1 | grep -q MAL-CUSTOM-1 && break; sleep 0.1; done
+expect_has "a custom scanner's finding blocks the image" "$(docker start e2e-custom 2>&1)" "MAL-CUSTOM-1"
+docker rm -f e2e-custom >/dev/null
 rm -f "$HOME_DIR/config.toml"
 
 docker rm -f $(docker ps -aq) >/dev/null 2>&1

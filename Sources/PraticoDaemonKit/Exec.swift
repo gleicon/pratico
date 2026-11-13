@@ -17,8 +17,7 @@ final class ExecInstance: @unchecked Sendable {
     var running = false
     var started = false
     var exitCode: Int?
-    var master: Int32 = -1  // pty master when tty
-    var shim: ShimFiles?  // embedded runtime: the exec runs in this shim
+    var shim: ShimFiles?  // the shim the exec runs in, once started
 
     init(id: String, containerId: String, body: JSON) {
         self.id = id
@@ -34,16 +33,13 @@ final class ExecInstance: @unchecked Sendable {
     }
 }
 
-/// Maps the exec API onto `container exec`. A TTY exec gets a pty the daemon owns, so
-/// the Apple CLI sees a real terminal and resize reaches it through the master side.
+/// The exec API, run by the container's shim through the guest agent.
 final class ExecService: @unchecked Sendable {
-    let runtime: AppleContainer
     let containers: ContainerService
     private let lock = NSLock()
     private var instances: [String: ExecInstance] = [:]
 
-    init(runtime: AppleContainer, containers: ContainerService) {
-        self.runtime = runtime
+    init(containers: ContainerService) {
         self.containers = containers
     }
 
@@ -81,120 +77,13 @@ final class ExecService: @unchecked Sendable {
         e.lock.unlock()
         let rec = try containers.resolve(e.containerId)
         guard rec.state.running else { throw APIError(409, "Container \(rec.id) is not running") }
-        if let embedded = containers.embedded { return try startEmbedded(e, rec, body: body, embedded, conn) }
-
-        var args = ["exec"]
-        if e.attachStdin { args.append("-i") }
-        if e.tty { args.append("-t") }
-        for v in e.env { args += ["-e", v] }
-        if !e.workdir.isEmpty { args += ["-w", e.workdir] }
-        if !e.user.isEmpty { args += ["-u", e.user] }
-        args += [rec.appleId] + e.cmd
-        let p = runtime.process(args)
-
-        let detach = body["Detach"]?.bool ?? false
-        var stdinWriter: FileHandle?
-        var readers: [(UInt8, FileHandle)] = []
-        if e.tty {
-            let master = posix_openpt(O_RDWR | O_NOCTTY)
-            guard master >= 0, grantpt(master) == 0, unlockpt(master) == 0, let name = ptsname(master) else {
-                throw APIError(500, "cannot allocate a pty: \(String(cString: strerror(errno)))")
-            }
-            let slave = open(name, O_RDWR | O_NOCTTY)
-            guard slave >= 0 else { Darwin.close(master); throw APIError(500, "cannot open pty") }
-            // Raw: the guest's pty already does line discipline; a second one doubles CRs.
-            var tio = termios()
-            if tcgetattr(slave, &tio) == 0 {
-                cfmakeraw(&tio)
-                tcsetattr(slave, TCSANOW, &tio)
-            }
-            if let size = body["ConsoleSize"]?.array, size.count == 2,
-                let h = size[0].int, let w = size[1].int
-            {
-                Self.resize(master, height: Int(h), width: Int(w))
-            }
-            let slaveHandle = FileHandle(fileDescriptor: slave, closeOnDealloc: true)
-            p.standardInput = slaveHandle
-            p.standardOutput = slaveHandle
-            p.standardError = slaveHandle
-            e.master = master
-            let masterHandle = FileHandle(fileDescriptor: master, closeOnDealloc: false)
-            stdinWriter = masterHandle
-            readers = [(1, masterHandle)]
-        } else {
-            if e.attachStdin && !detach {
-                let inPipe = Pipe()
-                p.standardInput = inPipe
-                stdinWriter = inPipe.fileHandleForWriting
-            }
-            let out = Pipe()
-            let err = Pipe()
-            p.standardOutput = out
-            p.standardError = err
-            readers = [(1, out.fileHandleForReading), (2, err.fileHandleForReading)]
-        }
-
-        do { try p.run() } catch {
-            if e.master >= 0 { Darwin.close(e.master) }
-            throw APIError(500, "cannot exec: \(error)")
-        }
-        // The child holds its own copies; the daemon's must go or EOF never arrives.
-        if e.tty { try? (p.standardInput as? FileHandle)?.close() }
-        if !e.tty, let pipe = p.standardOutput as? Pipe { try? pipe.fileHandleForWriting.close() }
-        if !e.tty, let pipe = p.standardError as? Pipe { try? pipe.fileHandleForWriting.close() }
-        if !e.tty, let pipe = p.standardInput as? Pipe { try? pipe.fileHandleForReading.close() }
-        e.lock.lock()
-        e.running = true
-        e.lock.unlock()
-
-        if detach {
-            conn.respond(200)
-            for (_, h) in readers {
-                Thread.detachNewThread { while !h.availableData.isEmpty {} }
-            }
-            Thread.detachNewThread { [self] in
-                p.waitUntilExit()
-                finish(e, code: Int(p.terminationStatus))
-            }
-            return .keepAlive
-        }
-
-        conn.hijack(contentType: e.tty ? "application/vnd.docker.raw-stream" : "application/vnd.docker.multiplexed-stream")
-        if let stdinWriter {
-            Thread.detachNewThread {
-                while let data = conn.readRaw() {
-                    if (try? stdinWriter.write(contentsOf: data)) == nil { return }
-                }
-                // Client closed its side: end the process's stdin (a pty has no half-close).
-                if !e.tty { try? stdinWriter.close() }
-            }
-        }
-        let group = DispatchGroup()
-        for (stream, h) in readers {
-            group.enter()
-            Thread.detachNewThread {
-                let wanted = stream == 1 ? e.attachStdout : e.attachStderr
-                // A pty master read fails with EIO once the slave side is gone.
-                while case let data = h.availableData, !data.isEmpty {
-                    if wanted { conn.write(e.tty ? data : StdCopy.frame(stream: stream, data)) }
-                }
-                group.leave()
-            }
-        }
-        Thread.detachNewThread { [self] in
-            p.waitUntilExit()
-            finish(e, code: Int(p.terminationStatus))
-            group.wait()
-            conn.close()
-        }
-        return .detached
+        return try startInShim(e, rec, body: body, conn)
     }
 
     /// The shim runs the process and frames its output as Docker does, so the daemon only
     /// splices bytes between the client and the shim, then asks for the exit code.
-    private func startEmbedded(_ e: ExecInstance, _ rec: ContainerRecord, body: JSON, _ embedded: EmbeddedContainers,
-                               _ conn: Connection) throws -> Disposition
-    {
+    private func startInShim(_ e: ExecInstance, _ rec: ContainerRecord, body: JSON, _ conn: Connection) throws -> Disposition {
+        let embedded = containers.embedded
         let detach = body["Detach"]?.bool ?? false
         let files = containers.shimFiles(rec.id)
         var req: [String: JSON] = [
@@ -260,30 +149,17 @@ final class ExecService: @unchecked Sendable {
         e.lock.lock()
         e.running = false
         e.exitCode = code
-        let master = e.master
         e.lock.unlock()
-        if master >= 0 {
-            // Unblock a reader still waiting on a pty with no remaining writers.
-            DispatchQueue.global().asyncAfter(deadline: .now() + 1) { Darwin.close(master) }
-        }
     }
 
     func resize(_ id: String, height: Int, width: Int) throws {
         let e = try get(id)
         e.lock.lock()
-        let master = e.master
         let shim = e.shim
         e.lock.unlock()
-        if master >= 0 { Self.resize(master, height: height, width: width) }
-        if let shim, let embedded = containers.embedded, height > 0, width > 0 {
-            try? embedded.shim.call(shim, "POST", "/exec-resize?id=\(id)&h=\(height)&w=\(width)")
+        if let shim, height > 0, width > 0 {
+            _ = try? containers.embedded.shim.call(shim, "POST", "/exec-resize?id=\(id)&h=\(height)&w=\(width)")
         }
-    }
-
-    private static func resize(_ fd: Int32, height: Int, width: Int) {
-        guard height > 0, width > 0 else { return }
-        var ws = winsize(ws_row: UInt16(clamping: height), ws_col: UInt16(clamping: width), ws_xpixel: 0, ws_ypixel: 0)
-        _ = ioctl(fd, TIOCSWINSZ, &ws)
     }
 
     func inspect(_ e: ExecInstance) -> JSON {

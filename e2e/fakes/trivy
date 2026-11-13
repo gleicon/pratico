@@ -1,0 +1,3 @@
+#!/bin/sh
+# Fake trivy for e2e: never finds anything.
+echo '{"Results":[]}'

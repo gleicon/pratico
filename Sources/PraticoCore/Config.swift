@@ -43,6 +43,8 @@ public struct Config: Equatable, Sendable {
             summary: "Findings that stop and block an image's containers: off, malware, kev (malware + exploited CVEs), critical (kev + CVSS >= 9)",
             choices: ["off", "malware", "kev", "critical"]),
         Key(name: "scan_allow", defaultValue: .strings([]), summary: "Image IDs allowed to run despite findings"),
+        Key(name: "scan_custom", defaultValue: .strings([]),
+            summary: "Your own scanners: executables run as <path> <image.tar> that print pratico's findings JSON"),
         Key(name: "registry_http", defaultValue: .strings([]),
             summary: "Registries (host, host:port, or IPv4 CIDR) reached over plain HTTP, credentials included, like Docker's insecure-registries"),
         Key(name: "registry_http_loopback", defaultValue: .bool(true),
@@ -70,6 +72,7 @@ public struct Config: Equatable, Sendable {
     public var scan: Bool { if case .bool(let v) = value("scan") { v } else { true } }
     public var scanBlock: String { if case .string(let v) = value("scan_block") { v } else { "kev" } }
     public var scanAllow: [String] { if case .strings(let v) = value("scan_allow") { v } else { [] } }
+    public var scanCustom: [String] { if case .strings(let v) = value("scan_custom") { v } else { [] } }
     public var registryHTTP: [String] { if case .strings(let v) = value("registry_http") { v } else { [] } }
     public var registryHTTPLoopback: Bool { if case .bool(let v) = value("registry_http_loopback") { v } else { true } }
     public var registryCA: [String] { if case .strings(let v) = value("registry_ca") { v } else { [] } }
