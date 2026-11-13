@@ -114,11 +114,13 @@ extension ScanService {
         ]
     }
 
-    /// The first line of `<tool> --version`, within 5 s.
+    /// The version `<tool> --version` prints, within 5 s: tools word it differently
+    /// ("grype 0.111.0", "Version: 0.76.2"), so the first dotted number, else the first line.
     static func version(_ path: String, _ args: [String]) -> String? {
         let r = run(path, args, timeout: 5)
         guard r.ok else { return nil }
-        return String(decoding: r.stdout.isEmpty ? r.stderr : r.stdout, as: UTF8.self)
-            .split(separator: "\n").first.map { $0.trimmingCharacters(in: .whitespaces) }
+        let text = String(decoding: r.stdout.isEmpty ? r.stderr : r.stdout, as: UTF8.self)
+        if let m = text.firstMatch(of: /\d+\.\d+(\.\d+)?/) { return String(m.output.0) }
+        return text.split(separator: "\n").first.map { $0.trimmingCharacters(in: .whitespaces) }
     }
 }
