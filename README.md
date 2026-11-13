@@ -19,14 +19,23 @@ behind a flag (see [Runtimes](#runtimes)).
    The build is ad-hoc signed; `READ ME FIRST.txt` in the DMG walks through it.
 2. Start the daemon from the menubar item. **Status › View Daemon Log** shows what it is
    doing (`~/.pratico/daemon.log`).
-3. Point Docker clients at it:
+3. Point `docker` at it once, so you never type `-H`. Either a Docker context, which the
+   CLI and Compose remember:
 
    ```sh
-   export DOCKER_HOST=unix://$HOME/.pratico/docker.sock
+   docker context create pratico --docker host=unix://$HOME/.pratico/docker.sock
+   docker context use pratico
    docker run --rm alpine echo hello
    ```
 
-   That is the default and needs no password. For tools that only know
+   or `DOCKER_HOST`, which every Docker client reads (add it to `~/.zshrc` to keep it):
+
+   ```sh
+   echo 'export DOCKER_HOST=unix://$HOME/.pratico/docker.sock' >> ~/.zshrc
+   ```
+
+   The menubar's **Use with docker…** shows both with a Copy button. The socket is
+   `~/.pratico/docker.sock`, the default, and needs no password. For tools that only know
    `/var/run/docker.sock`, the menubar's **Use /var/run/docker.sock…** explains why that
    path needs an administrator and gives the `sudo` commands to copy into Terminal (link
    now, optionally at every startup, undo). Pratico itself never asks for root.
@@ -35,22 +44,24 @@ Pratico has no CLI of its own: `docker` is the CLI, the menubar is the control p
 
 ## Runtimes
 
-| | Apple `container` CLI (default today) | Embedded (`PRATICO_RUNTIME=embedded`) |
+| | Embedded (default) | Apple `container` CLI (`PRATICO_RUNTIME=container`, to be removed) |
 |---|---|---|
-| Needs installed | Apple `container` 1.0 | nothing; kernel and init ship in the app |
-| VMs | Apple's services | pratico, via [apple/containerization](https://github.com/apple/containerization) |
-| Exit codes after a daemon restart | lost (reported as 0) | kept (each VM has its own `pratico-shim`) |
-| Pause | cgroup freezer agent | whole-VM pause |
-| stdin (`-i`, `-it`), healthchecks, exec, cp, stats | yes | yes (guest agent; no tools needed in the image) |
-| `docker login` | yes | yes: checked with the registry, kept in pratico's own Keychain items |
-| Networks, DNS by name | yes ([D-25](SPEC.md), `/etc/hosts`) | yes: pratico-net switch and DNS, isolated networks |
-| Connect/disconnect a running container | connect 409; disconnect drops names only | yes: disconnect cuts traffic at the switch |
-| Internet and Mac access (`host.docker.internal`) | yes | yes: pure-Swift uplink, no extra binaries |
+| Needs installed | nothing; kernel and init ship in the app | Apple `container` 1.0 |
+| VMs | pratico, via [apple/containerization](https://github.com/apple/containerization) | Apple's services |
+| Exit codes after a daemon restart | kept (each VM has its own `pratico-shim`) | lost (reported as 0) |
+| Pause | whole-VM pause | cgroup freezer agent |
+| stdin (`-i`, `-it`), healthchecks, exec, cp, stats | yes (guest agent; no tools needed in the image) | yes |
+| `docker login` | yes: checked with the registry, kept in pratico's own Keychain items | yes |
+| Networks, DNS by name | yes: pratico-net switch and DNS, isolated networks | yes ([D-25](SPEC.md), `/etc/hosts`) |
+| Connect/disconnect a running container | yes: disconnect cuts traffic at the switch | connect 409; disconnect drops names only |
+| Internet and Mac access (`host.docker.internal`) | yes: pure-Swift uplink, no extra binaries | yes |
 | Published ports (`-p`) | yes | yes |
-| `-v /var/run/docker.sock:...`, other host Unix sockets | no | yes: relayed over vsock to pratico's API or the host socket |
+| `-v /var/run/docker.sock:...`, other host Unix sockets | yes: relayed over vsock to pratico's API or the host socket | no |
 
-The embedded runtime is the target: once it covers every operation it becomes the
-default and the CLI backend is removed. Design and progress:
+The embedded runtime is the default: Pratico runs each container in its own small VM on
+Apple's Virtualization.framework, and the app carries the kernel and init, so nothing
+else needs installing. The CLI backend stays behind `PRATICO_RUNTIME=container` until it
+is removed. Design and progress:
 [docs/design/runtime.md](docs/design/runtime.md); checklist:
 [.project/roadmap.md](.project/roadmap.md).
 

@@ -44,16 +44,20 @@ e2e-embedded: build assets
 e2e-registry: build
 	e2e/registry.sh "$(BIN_DIR)"
 
-app: build
+# Everything the embedded runtime needs is inside: the shim next to the daemon, the
+# kernel and vminit in Resources/runtime, and the acknowledgements (SPEC D-28).
+app: build assets
 	rm -rf "$(APP)"
-	mkdir -p "$(APP)/Contents/MacOS"
+	mkdir -p "$(APP)/Contents/MacOS" "$(APP)/Contents/Resources"
 	cp Support/Info.plist "$(APP)/Contents/Info.plist"
-	cp "$(BIN_DIR)/pratico-menubar" "$(BIN_DIR)/pratico-daemon" "$(APP)/Contents/MacOS/"
+	cp "$(BIN_DIR)/pratico-menubar" "$(BIN_DIR)/pratico-daemon" "$(BIN_DIR)/pratico-shim" "$(APP)/Contents/MacOS/"
+	cp -R "$(ASSETS_DIR)" "$(APP)/Contents/Resources/runtime"
+	scripts/acknowledgements.sh "$(APP)/Contents/Resources/Acknowledgements.txt"
 	$(MAKE) sign
 
 sign:
 	codesign --force --sign "$(SIGN_IDENTITY)" --entitlements "$(ENTITLEMENTS)" --options runtime \
-		"$(APP)/Contents/MacOS/pratico-daemon"
+		"$(APP)/Contents/MacOS/pratico-daemon" "$(APP)/Contents/MacOS/pratico-shim"
 	codesign --force --sign "$(SIGN_IDENTITY)" --entitlements "$(ENTITLEMENTS)" --options runtime "$(APP)"
 
 # Drag-to-Applications image with the Gatekeeper walkthrough (SPEC D-10).
@@ -63,6 +67,7 @@ dmg: app
 	cp -R "$(APP)" "$(DIST_DIR)/dmg/"
 	ln -s /Applications "$(DIST_DIR)/dmg/Applications"
 	cp Support/dmg-README.txt "$(DIST_DIR)/dmg/READ ME FIRST.txt"
+	cp "$(APP)/Contents/Resources/Acknowledgements.txt" "$(DIST_DIR)/dmg/"
 	hdiutil create -volname "Pratico $(VERSION)" -srcfolder "$(DIST_DIR)/dmg" -ov -format UDZO "$(DMG)"
 	codesign --force --sign "$(SIGN_IDENTITY)" "$(DMG)"
 	rm -rf "$(DIST_DIR)/dmg"

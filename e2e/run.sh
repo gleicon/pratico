@@ -20,6 +20,7 @@ export DOCKER_HOST="unix://$SOCK"
 # test. A config with no auth settings makes the CLI fall back to the macOS Keychain
 # helper, so it carries one inert entry.
 export DOCKER_CONFIG="$HOME_DIR/docker-config"
+export PRATICO_RUNTIME=container  # Apple's `container` CLI backend; embedded is e2e/embedded.sh
 mkdir -p "$DOCKER_CONFIG"
 echo '{"auths":{"pratico.invalid":{}}}' >"$DOCKER_CONFIG/config.json"
 DAEMON_PID=""

@@ -18,8 +18,8 @@ public final class Daemon: @unchecked Sendable {
     let registries: Registries?
     let startedAt = Date()
     private var server: HTTPServer?
-    /// Embedded runtime asked for but could not open: refuse to serve rather than fall back.
-    let embeddedStartupFailed: Bool
+    /// Why the embedded runtime could not open: the daemon refuses to serve rather than fall back.
+    let embeddedFailure: String?
 
     /// Throws a configuration error for unreadable `registry_ca` files and impossible
     /// trust settings, on either runtime: the daemon refuses to start (exit 4) rather
@@ -29,13 +29,13 @@ public final class Daemon: @unchecked Sendable {
         self.home = home
         self.socketPath = socketPath ?? home.appending(path: "docker.sock").path
         self.runtime = runtime
-        // PRATICO_RUNTIME=embedded selects pratico's own runtime (docs/design/runtime.md),
-        // which becomes the default once it covers every operation.
+        // pratico's own runtime (docs/design/runtime.md) unless PRATICO_RUNTIME=container.
         var embedded: EmbeddedContainers?
         var images = ImageService(runtime: runtime)
         var registries: Registries?
         var embeddedImages: EmbeddedImageBackend?
-        if ProcessInfo.processInfo.environment["PRATICO_RUNTIME"] == "embedded" {
+        var embeddedFailure: String?
+        if Pratico.embeddedRuntime {
             switch EmbeddedContainers.open(home: home) {
             case .success(let (e, store, content)):
                 embedded = e
@@ -47,10 +47,10 @@ public final class Daemon: @unchecked Sendable {
                 embeddedImages = backend
                 images = ImageService(backend: backend)
             case .failure(let error):
-                Pratico.log("pratico-daemon: embedded runtime unavailable: \(error.message)")
+                embeddedFailure = error.message
             }
         }
-        self.embeddedStartupFailed = ProcessInfo.processInfo.environment["PRATICO_RUNTIME"] == "embedded" && embedded == nil
+        self.embeddedFailure = embeddedFailure
         self.images = images
         self.registries = registries
         self.networks = NetworkService(runtime: runtime, root: home.appending(path: "networks", directoryHint: .isDirectory),
@@ -68,7 +68,7 @@ public final class Daemon: @unchecked Sendable {
     }
 
     public func start() throws {
-        guard !embeddedStartupFailed else { throw APIError(500, "embedded runtime unavailable") }
+        if let embeddedFailure { throw APIError(500, "embedded runtime unavailable: \(embeddedFailure)") }
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
         // Container data is rebuildable and large; keep it out of Time Machine (FR-39).
         for name in ["store", "containers"] {

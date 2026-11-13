@@ -16,9 +16,8 @@ You need an Apple silicon Mac with macOS 26.
    - open System Settings → Privacy & Security and click **Open Anyway**, or
    - run `xattr -dr com.apple.quarantine /Applications/Pratico.app`.
 
-Today's default runtime also needs Apple's
-[`container`](https://github.com/apple/container/releases) 1.0 installed and started
-(`container system start`). The embedded runtime (below) removes that requirement.
+Nothing else needs installing: Pratico runs containers on Apple's
+Virtualization.framework, and the app carries the Linux kernel and init it uses.
 
 ## 2. Start
 
@@ -82,31 +81,31 @@ finding named, and the menubar shows an alert. To run it anyway, add its ID to
 scan_allow = ["sha256:…"]
 ```
 
-## Trying the embedded runtime
+## Running from source
 
-Developers building from source can run the daemon on pratico's own runtime, which
-needs no `container` install:
+```sh
+make run          # builds, fetches the kernel and init, installs and opens the app
+```
+
+Or a throwaway daemon with its own state:
 
 ```sh
 make assets build
-PRATICO_RUNTIME=embedded .build/arm64-apple-macosx/release/pratico-daemon --home /tmp/pratico-try
+.build/arm64-apple-macosx/release/pratico-daemon --home /tmp/pratico-try
 export DOCKER_HOST=unix:///tmp/pratico-try/docker.sock
 docker run --rm alpine uname -a
 ```
 
-It covers pull, images, run (`-d`, `-i`, `-it`, `-p`), logs, exec, cp, stats,
-healthchecks, networks with DNS by name, internet and `host.docker.internal` access,
-stop, kill, pause, rm, tag, save, login, push, and connecting or disconnecting running
-containers (disconnect cuts traffic at the switch). Progress:
-[docs/design/runtime.md](docs/design/runtime.md).
+`PRATICO_RUNTIME=container` selects the old backend on Apple's `container` CLI, until it
+is removed. Progress: [docs/design/runtime.md](docs/design/runtime.md).
 
 ## Troubleshooting
 
 | Symptom | Cause and fix |
 |---|---|
 | "Pratico can't be opened" | Gatekeeper; approve it as in step 1 |
-| `Cannot connect to the Docker daemon` | daemon stopped: start it from the menubar; the reason it stopped is in `~/.pratico/daemon.err` |
-| menubar names the Apple container runtime | default runtime only: install Apple `container` and run `container system start` |
+| `Cannot connect to the Docker daemon` | daemon stopped: start it from the menubar; the reason it stopped is in `~/.pratico/daemon.err` and **Status › View Daemon Log** |
+| menubar says the embedded runtime is unavailable | the kernel or `pratico-shim` is missing from the app; reinstall it. Status › View Daemon Log has the details |
 | daemon refuses to start, naming a key and line | `~/.pratico/config.toml` has an unknown key or bad value |
 | `docker start` fails naming `MAL-…` or a CVE | the image scan blocked it; see Image scanning |
-| `docker cp`, `exec`, healthcheck fail on one image | it lacks `/bin/sh` or `tar` (default runtime) |
+| `docker cp`, `exec`, healthcheck fail on one image | it lacks `/bin/sh` or `tar` (`PRATICO_RUNTIME=container` only) |

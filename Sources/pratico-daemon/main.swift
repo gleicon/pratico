@@ -41,8 +41,7 @@ do { config = try Config.load(home: home) } catch { fail("\(error)", code: 4) }
 
 let runtime = AppleContainer()
 // The embedded runtime (docs/design/runtime.md) needs no Apple `container` install.
-let embedded = ProcessInfo.processInfo.environment["PRATICO_RUNTIME"] == "embedded"
-if !embedded {
+if !Pratico.embeddedRuntime {
     guard runtime.isInstalled else { fail("Apple container runtime not installed (\(runtime.binary))", code: 3) }
     guard runtime.serviceRunning else { fail("Apple container runtime is not running; run `container system start`", code: 3) }
 }

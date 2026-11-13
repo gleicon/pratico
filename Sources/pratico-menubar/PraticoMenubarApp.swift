@@ -27,7 +27,7 @@ struct StatusMenu: View {
         Menu("Status") {
             if let s = daemon.status {
                 Text("Up since \(s.StartedAt.formatted(date: .abbreviated, time: .shortened))")
-                Text(s.Runtime == "embedded" ? "Runtime: Pratico (embedded)" : "Runtime: Apple container")
+                Text(s.Runtime == "embedded" ? "Engine: built in (Virtualization.framework)" : "Engine: Apple container CLI (external)")
                 Text("Containers: \(s.ContainersRunning) running, \(s.Containers) in all")
             }
             if let v = daemon.apiVersion { Text("Docker API \(v)") }
@@ -42,6 +42,7 @@ struct StatusMenu: View {
             Button("Copy Diagnostics") { daemon.copyDiagnostics() }
         }
         // ~/.pratico/docker.sock is the default; this path needs root, which pratico never asks for.
+        Button("Use with docker…") { daemon.showDockerSetup() }
         Button("Use \(DefaultSocket.path)…") { daemon.showDefaultSocketHelp() }
         // D-24: image scan alerts, newest first.
         if !daemon.alerts.isEmpty {

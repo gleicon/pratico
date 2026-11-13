@@ -1,7 +1,7 @@
 # Embedded runtime — design
 
 Status: in progress. Steps 1–4 of the migration are done behind
-`PRATICO_RUNTIME=embedded` (SPEC D-26–D-28). Replaces the `container` CLI backend.
+The default runtime since 2026-11-12 (`PRATICO_RUNTIME=container` selects the old one) (SPEC D-26–D-28). Replaces the `container` CLI backend.
 
 ## Why
 
@@ -183,7 +183,8 @@ The app gets an "Acknowledgements" file in the DMG and in About. Naming stays
 6. ✅ Registry auth and push on the OCI client (`docker login` checks the registry and
    keeps the login in pratico's Keychain items); scanning reads the store directly.
 7. Egress intercept: sandwich engine on container flows, per-container opt-in, menubar view.
-8. Remove `AppleContainer`, the `/etc/hosts` sync, and the anchor; update SPEC
+8. ✅ (2026-11-12) Embedded is the default; the app bundles the shim, kernel and `vminit`,
+   and ships acknowledgements. Then: remove `AppleContainer`, the `/etc/hosts` sync, and the anchor; update SPEC
    (D-10/D-11/D-15/D-21/D-25) and docs.
 
 Each slice keeps the Docker API unchanged; the CLI backend stays until slice 8, so a

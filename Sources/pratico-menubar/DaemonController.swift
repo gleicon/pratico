@@ -181,36 +181,67 @@ final class DaemonController {
         }
     }
 
+    /// How to point `docker` at pratico without `-H`: a context, or `DOCKER_HOST`.
+    func showDockerSetup() {
+        showCommands(
+            title: "Use Pratico with docker",
+            text: """
+                Pick one, once. A Docker context is remembered by the docker CLI, Compose, and \
+                most tools that read its config. DOCKER_HOST works everywhere, including tools \
+                that ignore contexts; add the line to ~/.zshrc to keep it.
+                """,
+            commands: """
+                # A Docker context (remembered):
+                docker context create pratico --docker host=unix://\(socketPath)
+                docker context use pratico
+
+                # Or an environment variable:
+                export DOCKER_HOST=unix://\(socketPath)
+                echo 'export DOCKER_HOST=unix://\(socketPath)' >> ~/.zshrc
+
+                # Check:
+                docker version --format '{{.Server.Version}}'
+                """)
+    }
+
     /// Help for `/var/run/docker.sock`: why it needs root, and the commands to run.
     func showDefaultSocketHelp() {
-        let commands = """
-            # Link it now (until the next restart):
-            \(DefaultSocket.linkCommand(target: socketPath))
+        showCommands(
+            title: "Use \(DefaultSocket.path)",
+            text: """
+                Pratico serves Docker at \(socketPath). That needs no password and works with \
+                DOCKER_HOST or a Docker context (Use with docker…).
 
-            # Optional: link it at every startup:
-            \(DefaultSocket.persistCommands(target: socketPath))
+                Some tools only look at \(DefaultSocket.path). That folder belongs to the system, \
+                so a link there needs an administrator: run these commands in Terminal yourself. \
+                Pratico never asks for your password. macOS empties /var/run at every restart; the \
+                optional startup job only runs /bin/ln. If Docker Desktop or Colima already uses the \
+                path, leave it to them.
+                """,
+            commands: """
+                # Link it now (until the next restart):
+                \(DefaultSocket.linkCommand(target: socketPath))
 
-            # Undo both:
-            \(DefaultSocket.removeCommands)
-            """
+                # Optional: link it at every startup:
+                \(DefaultSocket.persistCommands(target: socketPath))
+
+                # Undo both:
+                \(DefaultSocket.removeCommands)
+                """)
+        refreshDefaultSocket()
+    }
+
+    /// An explanation and Terminal commands the user runs themselves, with a Copy button.
+    private func showCommands(title: String, text: String, commands: String) {
         let alert = NSAlert()
-        alert.messageText = "Use \(DefaultSocket.path)"
-        alert.informativeText = """
-            Pratico serves Docker at \(socketPath). That needs no password and works with \
-            DOCKER_HOST or a Docker context.
-
-            Some tools only look at \(DefaultSocket.path). That folder belongs to the system, \
-            so a link there needs an administrator: run these commands in Terminal yourself. \
-            Pratico never asks for your password. macOS empties /var/run at every restart; the \
-            optional startup job only runs /bin/ln. If Docker Desktop or Colima already uses the \
-            path, leave it to them.
-            """
-        let text = NSTextView(frame: NSRect(x: 0, y: 0, width: 520, height: 300))
-        text.string = commands
-        text.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
-        text.isEditable = false
-        let scroll = NSScrollView(frame: text.frame)
-        scroll.documentView = text
+        alert.messageText = title
+        alert.informativeText = text
+        let view = NSTextView(frame: NSRect(x: 0, y: 0, width: 520, height: 220))
+        view.string = commands
+        view.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        view.isEditable = false
+        let scroll = NSScrollView(frame: view.frame)
+        scroll.documentView = view
         scroll.hasVerticalScroller = true
         alert.accessoryView = scroll
         alert.addButton(withTitle: "Copy Commands")
@@ -220,7 +251,6 @@ final class DaemonController {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(commands, forType: .string)
         }
-        refreshDefaultSocket()
     }
 
     private func refreshDefaultSocket() {

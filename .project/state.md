@@ -12,7 +12,7 @@
 
 # hazards
 
-- Two runtimes coexist until migration step 8: `ContainerService` branches on `embedded`. A change to container behavior must be made, or explicitly 501'd, on both paths; run `make e2e` and `make e2e-embedded`.
+- Embedded is the default; the CLI backend runs only with `PRATICO_RUNTIME=container` (`e2e/run.sh` sets it). Two runtimes coexist until it is removed: `ContainerService` branches on `embedded`. A change to container behavior must be made, or explicitly 501'd, on both paths; run `make e2e` and `make e2e-embedded`.
 - `pratico-shim` needs `com.apple.security.virtualization`. A plain `swift build` drops it; use `make build`, which re-signs. Symptom: `exit.json` says the process lacks the entitlement, exit 127.
 - Shim sockets live in `<home>/run/<short id>.sock`; anything under `containers/<64-hex id>/` exceeds the 104-byte Unix socket limit.
 - `blocking { }` (ImageBackend.swift) waits on a semaphore; call it only from the daemon's connection threads or plain threads, never from a Swift concurrency context.

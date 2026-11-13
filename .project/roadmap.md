@@ -54,7 +54,8 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 - [x] Scans read the embedded store (exports go through the image backend)
 - [x] Registry trust you choose and can see: plain HTTP for loopback (as Docker) and listed hosts, extra CAs added to the system's roots, system proxy/PAC; `docker info`, pull/push output and the menubar say so; kept logins removable from the menubar
 - [ ] Egress intercept: sandwich-proxy engine on container HTTP/HTTPS flows, per-container opt-in, log/replay/HAR/threat feeds
-- [ ] `container` CLI adapter, `/etc/hosts` sync and default-network anchor removed; SPEC and docs updated; acknowledgements (licenses) in the app and DMG
+- [x] Embedded is the default: the app bundles `pratico-shim`, the kernel and `vminit`; acknowledgements (licenses) in the app and DMG
+- [ ] `container` CLI adapter, `/etc/hosts` sync and default-network anchor removed; SPEC and docs updated
 
 ## Networks and volumes
 

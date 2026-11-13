@@ -37,5 +37,5 @@ git push origin "$TAG"
 flags=()
 if [ "${PRERELEASE:-0}" = 1 ] || [[ "$VERSION" == *-* ]]; then flags+=(--prerelease); fi
 gh release create "$TAG" "$DMG" "$DMG.sha256" --title "Pratico $VERSION" --verify-tag "${flags[@]}" \
-    --notes "$(printf 'Ad-hoc signed, not notarized: approve the first launch in System Settings > Privacy & Security ("Open Anyway"), or run `xattr -dr com.apple.quarantine /Applications/Pratico.app`. Requires macOS 26 and Apple container.\n\nSHA-256: %s' "$(cut -d' ' -f1 "$DMG.sha256")")"
+    --notes "$(printf 'Ad-hoc signed, not notarized: approve the first launch in System Settings > Privacy & Security ("Open Anyway"), or run `xattr -dr com.apple.quarantine /Applications/Pratico.app`. Requires macOS 26 on Apple silicon; nothing else to install.\n\nSHA-256: %s' "$(cut -d' ' -f1 "$DMG.sha256")")"
 echo "released $TAG"
