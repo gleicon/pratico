@@ -77,7 +77,7 @@ struct ScanResultsButton: View {
 struct ScanSummary: Decodable, Equatable {
     var Images: Int
     var Blocked: Int
-    var Vulnerable: Int
+    var CriticalOrHigh: Int
     var Scanning: Int
     var Unscanned: Int
 }

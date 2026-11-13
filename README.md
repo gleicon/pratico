@@ -127,8 +127,9 @@ pratico finds, plus CISA's list of exploited vulnerabilities. An image with malw
 exploited CVE (`scan_block`) is stopped and blocked, and the menubar says why.
 
 - **Menubar**: the icon becomes a filled shield when an image is blocked and an outline
-  shield when images have vulnerabilities. One **Scan Results…** line says how many, however
-  many images there are; a block also raises a notification, once per image.
+  shield when images have critical or high vulnerabilities (or malware, or a CVE CISA lists
+  as exploited); medium and low findings never change it. One **Scan Results…** line says
+  how many, however many images there are; a block also raises a notification, once per image.
 - **Scanners menu**: which scanners are found, with versions; **Install Missing
   Scanners…** gives the Homebrew command (or how to get Homebrew); **Scan All Images Now**.
 - **Scan Results** window: per image, which scanners ran (or why not), and every finding

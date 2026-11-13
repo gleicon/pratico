@@ -94,10 +94,11 @@ final class DaemonController {
         registries = r
     }
 
-    /// The menubar icon: a blocked image, then images with vulnerabilities, then the daemon.
+    /// The menubar icon: a blocked image, then images with critical or high vulnerabilities,
+    /// then the daemon. Medium and low findings do not change it.
     var menubarSymbol: String {
         if let s = scanSummary, s.Blocked > 0 { return "exclamationmark.shield.fill" }
-        if let s = scanSummary, s.Vulnerable > 0 { return "exclamationmark.shield" }
+        if let s = scanSummary, s.CriticalOrHigh > 0 { return "exclamationmark.shield" }
         return isRunning ? "shippingbox.fill" : "shippingbox"
     }
 
@@ -106,7 +107,7 @@ final class DaemonController {
         guard let s = scanSummary else { return "Scan Results…" }
         var parts: [String] = []
         if s.Blocked > 0 { parts.append("⛔︎ \(s.Blocked) blocked") }
-        if s.Vulnerable > 0 { parts.append("⚠︎ \(s.Vulnerable) with vulnerabilities") }
+        if s.CriticalOrHigh > 0 { parts.append("⚠︎ \(s.CriticalOrHigh) with critical or high vulnerabilities") }
         if s.Scanning > 0 { parts.append("\(s.Scanning) scanning") }
         return parts.isEmpty ? "Scan Results…" : "Scan Results…   " + parts.joined(separator: " · ")
     }

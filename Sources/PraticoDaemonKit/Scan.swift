@@ -193,6 +193,7 @@ final class ScanService: @unchecked Sendable {
     private var pending: Set<String> = []
     private var blocked: [String: String] = [:]  // image ID → reason
     private var verdicts: [String: ScanVerdict] = [:]  // image ID → latest verdict, for the summary
+    private var severe: Set<String> = []  // image IDs with a critical or high finding (or malware, or KEV)
     let env = ProcessInfo.processInfo.environment
     static let kevURL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
     static let rescanInterval: TimeInterval = 24 * 3600
@@ -346,9 +347,16 @@ final class ScanService: @unchecked Sendable {
 
     private func setVerdict(_ r: ScanReport) {
         let (verdict, _) = ScanVerdict.judge(r.findings, ran: r.scanners.contains(where: \.ran), block: config.scanBlock)
+        let isSevere = r.findings.contains(where: Self.isSevere)
         lock.lock()
         verdicts[r.imageId] = verdict
+        if isSevere { severe.insert(r.imageId) } else { severe.remove(r.imageId) }
         lock.unlock()
+    }
+
+    /// What the menubar flags: medium and low findings are listed in Scan Results, not raised.
+    static func isSevere(_ f: ScanFinding) -> Bool {
+        f.severity == "critical" || f.severity == "high" || f.malicious || f.kev
     }
 
     /// `GET /pratico/scans/summary`: counts the menubar polls, from memory.
@@ -357,9 +365,9 @@ final class ScanService: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         let blockedCount = ids.filter { blocked[$0] != nil }.count
-        // Findings worth a look, short of a block: warnings, and serious ones scan_allow lets run.
-        let flagged = ids.filter { blocked[$0] == nil && (verdicts[$0] == .warning || verdicts[$0] == .serious) }.count
-        return ["Images": .int(Int64(ids.count)), "Blocked": .int(Int64(blockedCount)), "Vulnerable": .int(Int64(flagged)),
+        // Worth a look, short of a block: a critical or high finding (or one scan_allow lets run).
+        let flagged = ids.filter { blocked[$0] == nil && severe.contains($0) }.count
+        return ["Images": .int(Int64(ids.count)), "Blocked": .int(Int64(blockedCount)), "CriticalOrHigh": .int(Int64(flagged)),
                 "Scanning": .int(Int64(ids.filter { pending.contains($0) }.count)),
                 "Unscanned": .int(Int64(ids.filter { verdicts[$0] == nil }.count))]
     }
