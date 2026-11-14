@@ -53,6 +53,7 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 - [x] `docker login` and push on the OCI client: credentials checked with the registry, kept in pratico's own Keychain items, used when a client sends none
 - [x] Scans read the embedded store (exports go through the image backend)
 - [x] Registry trust you choose and can see: plain HTTP for loopback (as Docker) and listed hosts, extra CAs added to the system's roots, system proxy/PAC; `docker info`, pull/push output and the menubar say so; kept logins removable from the menubar
+- [ ] Local registry: pratico's image store served as an OCI registry on 127.0.0.1 (push and pull without tar files, Apple `container` and other tools pulling from it, images scanned on push), optionally a pull-through cache for Docker Hub (to discuss with Features)
 - [ ] Egress intercept: sandwich-proxy engine on container HTTP/HTTPS flows, per-container opt-in, log/replay/HAR/threat feeds
 - [x] Embedded is the default: the app bundles `pratico-shim`, the kernel and `vminit`; acknowledgements (licenses) in the app and DMG
 - [x] `container` CLI adapter, `/etc/hosts` sync, freezer agent and default-network anchor removed; SPEC and docs updated

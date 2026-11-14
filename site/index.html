@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>pratico — local container management for the Mac</title>
-<meta name="description" content="Pratico is your local container manager for Apple silicon Macs. It works with docker, Compose, and every tool that speaks the Docker API, runs each container in its own VM, and scans every image with open source scanners.">
+<meta name="description" content="Pratico is your local container manager for Apple silicon Macs: compatible with the tools you have, OCI images, and Apple container, with every workload isolated in its own VM and every image scanned the moment you pull it.">
 <meta property="og:title" content="pratico">
 <meta property="og:description" content="Local container management for the Mac: compatible with the tools you have, every workload isolated in its own VM, every image scanned.">
 <meta property="og:type" content="website">
@@ -122,7 +122,7 @@
   .stats dt { font-size: var(--step--1); color: var(--muted); }
   .stats dd { margin: var(--space-1) 0 0; font-size: var(--step-2); font-weight: 650; letter-spacing: -0.02em; }
 
-  .install ol { margin: 0; padding: 0; list-style: none; display: grid; gap: var(--space-6); max-width: 44rem; }
+  .install ol { margin: 0; padding: 0; list-style: none; display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-6); max-width: 44rem; }
   .install li p { color: var(--muted); }
 
   footer { border-top: 1px solid var(--line); padding: var(--space-6) 0 var(--space-7); font-size: var(--step--1); color: var(--muted); }
@@ -130,7 +130,7 @@
   footer p { margin: 0; }
 
   @media (max-width: 52rem) {
-    .pillars, .two { grid-template-columns: minmax(0, 1fr); }
+    .pillars, .two, .claims { grid-template-columns: minmax(0, 1fr); }
     .hero { padding-top: var(--space-7); text-align: left; }
     .hero h1, .hero .lede { margin-left: 0; }
     .actions { justify-content: flex-start; }
@@ -139,6 +139,9 @@
   @media (prefers-reduced-motion: no-preference) {
     a, .btn, .copy { transition: color 0.15s, border-color 0.15s, opacity 0.15s; }
   }
+  .claims { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-6) var(--space-7); margin-bottom: var(--space-7); }
+  .claims p { color: var(--muted); margin: 0; }
+  .tm { font-size: 0.75rem; color: var(--muted); }
 </style>
 </head>
 <body>
@@ -152,9 +155,10 @@
     </a>
     <nav aria-label="Sections">
       <ul>
+        <li><a href="#why">Why a VM each</a></li>
         <li><a href="#compatible">Compatible</a></li>
-        <li><a href="#isolate">Isolation</a></li>
-        <li><a href="#protect">Scanning</a></li>
+        <li><a href="#network">Networking</a></li>
+        <li><a href="#protect">Security</a></li>
         <li><a href="#install">Install</a></li>
         <li><a href="https://github.com/gleicon/pratico">GitHub</a></li>
       </ul>
@@ -166,7 +170,7 @@
   <div class="hero">
     <div class="wrap">
       <h1>Your local container manager.</h1>
-      <p class="lede">Pratico works with the tools you already use and gives you a new way to work with containers on your Mac: every workload isolated in its own virtual machine, every image checked before it can hurt you.</p>
+      <p class="lede">Pratico runs containers on your Mac with the tools you already have, and gives you a new way to work: every workload isolated in its own virtual machine, every image scanned the moment it arrives.</p>
       <div class="actions">
         <a class="btn primary" href="https://github.com/gleicon/pratico/releases/latest">Download for macOS</a>
         <a class="btn" href="https://github.com/gleicon/pratico">View source</a>
@@ -178,60 +182,85 @@
         <div class="pillar">
           <p class="kicker">Compatible</p>
           <h2>Keep your tools</h2>
-          <p><code>docker</code>, Compose, and anything else that speaks the Docker API connect to pratico and keep working as before.</p>
+          <p>Docker-compatible clients, OCI images from any registry, and images you move to and from Apple's <code>container</code>.</p>
         </div>
         <div class="pillar">
           <p class="kicker">Isolated</p>
           <h2>One VM per workload</h2>
-          <p>Every container boots its own small virtual machine. What happens in one stays there: no shared kernel, no shared Linux VM.</p>
+          <p>Each container gets its own kernel, its own memory, and its own network card. What happens in one stays there.</p>
         </div>
         <div class="pillar">
           <p class="kicker">Protected</p>
-          <h2>Images checked for you</h2>
-          <p>Open source scanners inspect every image you pull. Malware and actively exploited flaws are stopped before they run.</p>
+          <h2>Scanned on arrival</h2>
+          <p>Open source scanners check each image and the dependencies inside it as you pull it, long before a build or CI would.</p>
         </div>
       </div>
     </div>
   </div>
 
-  <section id="compatible" aria-labelledby="compatible-h">
-    <div class="wrap two">
+  <section id="why" aria-labelledby="why-h">
+    <div class="wrap">
       <div class="head">
-        <p class="kicker">Compatible with older tools</p>
-        <h2 id="compatible-h">The Docker API, so nothing has to change</h2>
-        <p>Pratico serves the Docker Engine API on a socket in your home folder. Point your tools at it once and use them as you always have.</p>
+        <p class="kicker">The obvious question</p>
+        <h2 id="why-h">"Isn't one shared VM faster and lighter?"</h2>
+        <p>Per container, yes: a process in a shared VM costs less than a VM of its own. Here is what pratico costs, measured, and what you get for it.</p>
       </div>
-      <div class="code" role="region" aria-label="Example session">
-<pre><code><span class="p">$</span> docker context use pratico
-<span class="p">$</span> docker run --rm alpine echo hello
-hello
-<span class="p">$</span> docker compose up -d
-<span class="p">$</span> docker exec -it web sh
-<span class="p">$</span> docker logs -f web</code></pre>
-      </div>
-    </div>
-    <div class="wrap spaced">
-      <div class="cols">
-        <div><h3>Docker CLI 25 to current</h3><p>Version negotiation as Docker Engine does it; older clients get Docker's own message.</p></div>
-        <div><h3>Everyday commands</h3><p><code>run</code>, <code>exec -it</code>, <code>logs -f</code>, <code>cp</code>, <code>stats</code>, healthchecks, events, <code>save</code> and <code>load</code>.</p></div>
-        <div><h3>Networks and volumes</h3><p>Isolated networks with DNS by name, published ports, named and anonymous volumes, tmpfs.</p></div>
-        <div><h3>The socket inside containers</h3><p>Mount <code>docker.sock</code> into a container, as CI tools and test frameworks do, and it reaches pratico.</p></div>
+      <dl class="stats">
+        <div><dt>From run to running</dt><dd>≈ 400 ms</dd></div>
+        <div><dt>Memory per idle container</dt><dd>≈ 200 MB</dd></div>
+        <div><dt>With nothing running</dt><dd>no VM at all</dd></div>
+        <div><dt>Daemon, 32 containers running</dt><dd>48 MB</dd></div>
+      </dl>
+      <div class="claims spaced">
+        <div><h3>Nothing idle in the background</h3><p>A shared VM keeps its memory while it is up, whether you run one container or none. Here, stopping a container ends its VM and gives all of its memory back.</p></div>
+        <div><h3>Limits the hypervisor enforces</h3><p>Memory and CPU limits are the size of the VM, set by macOS, not by settings inside a kernel every container shares.</p></div>
+        <div><h3>One workload cannot reach another</h3><p>No shared kernel, no shared process table, no files in common unless you share a volume. A crash, a runaway process, or a breakout stays in its own VM.</p></div>
+        <div><h3>Fast where you feel it</h3><p>CPU runs natively on Apple silicon, each root file system is a disk image of its own, and control calls answer in under 2 ms with 100 containers.</p></div>
       </div>
     </div>
   </section>
 
-  <section id="isolate" aria-labelledby="isolate-h">
+  <section id="compatible" aria-labelledby="compatible-h">
+    <div class="wrap two">
+      <div class="head">
+        <p class="kicker">Compatible</p>
+        <h2 id="compatible-h">Your tools, OCI images, and Apple container</h2>
+        <p>Pratico speaks the Docker-compatible API on a socket in your home folder, runs standard OCI images from any registry, and is built on Apple's open source <a href="https://github.com/apple/containerization">containerization</a> framework, the same foundation as Apple's <code>container</code> tool.</p>
+      </div>
+      <div class="code" role="region" aria-label="Moving an image between Apple container and pratico">
+<pre><code><span class="p"># From Apple's container to pratico</span>
+<span class="p">$</span> container image save myapp:dev -o myapp.tar
+<span class="p">$</span> docker load -i myapp.tar
+<span class="p">$</span> docker run --rm myapp:dev
+
+<span class="p"># And back</span>
+<span class="p">$</span> docker save myapp:dev -o myapp.tar
+<span class="p">$</span> container image load -i myapp.tar
+<span class="p">$</span> container run --rm myapp:dev</code></pre>
+      </div>
+    </div>
+    <div class="wrap spaced">
+      <div class="cols">
+        <div><h3>Side by side with Apple container</h3><p>Both run on the same Mac at the same time, each with its own image store. Move images between them as OCI archives, both ways.</p></div>
+        <div><h3>Clients you already use</h3><p>Command-line clients and Compose files that speak the Docker-compatible API work unchanged, from version 25 on.</p></div>
+        <div><h3>OCI images, any registry</h3><p>Pull and push standard OCI images, with your registry logins and private certificate authorities.</p></div>
+        <div><h3>Tools that run in containers</h3><p>Mount the API socket into a container, as CI runners and test frameworks do, and it reaches pratico.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="network" aria-labelledby="network-h">
     <div class="wrap">
       <div class="head">
-        <p class="kicker">A new way to work</p>
-        <h2 id="isolate-h">Each workload in its own virtual machine</h2>
-        <p>Most Mac setups run one Linux VM with every container inside it. Pratico, built on Apple's open source <a href="https://github.com/apple/containerization">containerization</a> framework, boots a small VM per container instead.</p>
+        <p class="kicker">Each workload in its own VM</p>
+        <h2 id="network-h">Networking that stays outside the workload</h2>
+        <p>Every VM gets its own virtual network card, plugged into pratico-net: a switch that runs on your Mac, outside every container. The rules live there, where no container can change them.</p>
       </div>
       <div class="cols">
-        <div><h3>Contained failures</h3><p>A kernel panic, a runaway process, or a breakout attempt stays inside one VM, away from your other workloads.</p></div>
-        <div><h3>Light enough to use</h3><p>About 400 ms from <code>docker run</code> to running, and about 200 MB of memory per idle container.</p></div>
-        <div><h3>Visible from the menubar</h3><p>What runs, with CPU, memory, health, and ports. Alerts when a port is open to your network or a container turns unhealthy.</p></div>
-        <div><h3>Nothing else to install</h3><p>The app carries its own Linux kernel. No root, no password, no Docker Desktop.</p></div>
+        <div><h3>Networks that really separate</h3><p>Containers on different networks cannot exchange a single packet: the switch never connects them, whatever runs inside.</p></div>
+        <div><h3>Names, not addresses</h3><p>Each network answers DNS for its containers and aliases, and passes other names to your Mac's resolver.</p></div>
+        <div><h3>Ports you can see</h3><p>Published ports are opened on your Mac by pratico. The menubar warns when one is reachable from your network, not only from this Mac.</p></div>
+        <div><h3>Disconnect means disconnected</h3><p>Taking a running container off a network cuts it at the switch. Nothing inside the VM can bring the link back.</p></div>
       </div>
     </div>
   </section>
@@ -239,15 +268,15 @@ hello
   <section id="protect" aria-labelledby="protect-h">
     <div class="wrap">
       <div class="head">
-        <p class="kicker">Protect yourself</p>
-        <h2 id="protect-h">Every image scanned with open source tools</h2>
-        <p>When you pull an image, pratico runs every scanner it finds on your Mac against it, and again every day, because new flaws are published all the time. Their findings are merged, and each one says which scanner reported it.</p>
+        <p class="kicker">Security in the AI era</p>
+        <h2 id="protect-h">Don't wait for the build or CI to scan</h2>
+        <p>Agents, scripts, and copied commands pull and run images in seconds. Pratico scans each image, and the dependencies inside it, the moment it reaches your Mac, then again every day as new flaws are published. Malware and actively exploited flaws are stopped before they run.</p>
       </div>
       <ul class="scanners">
         <li>
           <h3><a href="https://google.github.io/osv-scanner/">osv-scanner</a></h3>
           <p class="who">Google · Apache 2.0</p>
-          <p>Checks every package against <a href="https://osv.dev">OSV.dev</a>, the open vulnerability database, malicious package reports included.</p>
+          <p>Checks system and language packages against <a href="https://osv.dev">OSV.dev</a>, the open vulnerability database, malicious package reports included.</p>
         </li>
         <li>
           <h3><a href="https://github.com/anchore/grype">grype</a></h3>
@@ -262,7 +291,7 @@ hello
         <li>
           <h3><a href="https://www.cisa.gov/known-exploited-vulnerabilities-catalog">CISA KEV</a></h3>
           <p class="who">U.S. CISA · public catalog</p>
-          <p>Flags the vulnerabilities attackers exploit today, so the urgent ones stand out from the rest.</p>
+          <p>Flags the vulnerabilities attackers exploit today, so the urgent ones stand out.</p>
         </li>
       </ul>
       <div class="two">
@@ -270,7 +299,7 @@ hello
           <h3>What happens with the results</h3>
           <ul class="outcomes">
             <li class="stop"><strong>Malware or an exploited flaw.</strong> The image is blocked, its containers stop, and a notification says why. You can allow an image you trust.</li>
-            <li class="warn"><strong>Critical or high findings.</strong> The menubar shield changes, and Scan Results lists them with the versions that fix them.</li>
+            <li class="warn"><strong>Critical or high findings.</strong> The menubar shield changes, and Scan Results lists each one, which scanner found it, and the versions that fix it.</li>
             <li><strong>Medium and low.</strong> Listed, never in your way. You choose what blocks in Settings.</li>
           </ul>
           <p class="fine">The Scanners menu gives the one Homebrew command that installs them. grype and trivy match on your Mac; osv-scanner sends package names and versions to the OSV.dev API. Image contents never leave your Mac.</p>
@@ -293,22 +322,6 @@ hello
     </div>
   </section>
 
-  <section aria-labelledby="numbers-h">
-    <div class="wrap">
-      <div class="head">
-        <p class="kicker">Measured</p>
-        <h2 id="numbers-h">What it costs</h2>
-        <p>From <code>make bench</code>, against the real Docker CLI on an Apple silicon Mac.</p>
-      </div>
-      <dl class="stats">
-        <div><dt><code>docker run --rm alpine true</code>, P99</dt><dd>436 ms</dd></div>
-        <div><dt>Memory per idle container</dt><dd>≈ 200 MB</dd></div>
-        <div><dt>Daemon memory, 32 running</dt><dd>48 MB</dd></div>
-        <div><dt>Control calls, 100 containers</dt><dd>≤ 2 ms</dd></div>
-      </dl>
-    </div>
-  </section>
-
   <section id="install" class="install" aria-labelledby="install-h">
     <div class="wrap">
       <div class="head">
@@ -318,18 +331,18 @@ hello
       <ol>
         <li>
           <h3>1. Download and open</h3>
-          <p>Get the <a href="https://github.com/gleicon/pratico/releases/latest">latest release</a> and drag Pratico to Applications. The build is not notarized yet: approve it once with <strong>Open Anyway</strong> in System Settings › Privacy &amp; Security, or run:</p>
+          <p>Get the <a href="https://github.com/gleicon/pratico/releases/latest">latest release</a> and drag Pratico to Applications. The app is not notarized: approve it once with <strong>Open Anyway</strong> in System Settings › Privacy &amp; Security, or run:</p>
           <div class="code"><button class="copy" type="button" hidden>Copy</button><pre><code>xattr -dr com.apple.quarantine /Applications/Pratico.app</code></pre></div>
         </li>
         <li>
           <h3>2. Start it from the menubar</h3>
-          <p>The daemon listens on <code>~/.pratico/docker.sock</code> and starts at login.</p>
+          <p>It listens on <code>~/.pratico/docker.sock</code> and starts at login. No root, no password.</p>
         </li>
         <li>
-          <h3>3. Point your tools at it</h3>
+          <h3>3. Point your client at it</h3>
           <div class="code"><button class="copy" type="button" hidden>Copy</button><pre><code>docker context create pratico --docker host=unix://$HOME/.pratico/docker.sock
 docker context use pratico</code></pre></div>
-          <p class="fine">Or set <code>DOCKER_HOST=unix://$HOME/.pratico/docker.sock</code>. Still to come: <code>docker build</code> and a notarized build; see the <a href="https://github.com/gleicon/pratico/blob/main/.project/roadmap.md">roadmap</a>.</p>
+          <p class="fine">Or set <code>DOCKER_HOST=unix://$HOME/.pratico/docker.sock</code> for any client that reads it.</p>
         </li>
       </ol>
     </div>
@@ -340,6 +353,7 @@ docker context use pratico</code></pre></div>
   <div class="wrap">
     <p><em>Prático</em>: Portuguese for the harbour pilot who guides ships through narrow channels.</p>
     <p>MIT licensed · <a href="https://github.com/gleicon/pratico">GitHub</a></p>
+    <p class="tm">Docker is a registered trademark of Docker, Inc. Pratico is an independent project, not affiliated with or endorsed by Docker, Inc. or Apple Inc.</p>
   </div>
 </footer>
 
