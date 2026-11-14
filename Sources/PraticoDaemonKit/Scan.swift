@@ -269,7 +269,7 @@ final class ScanService: @unchecked Sendable {
         guard verdict == .serious, !config.scanAllow.contains(r.imageId),
             !config.scanAllow.contains(String(r.imageId.dropFirst(7)))
         else { return nil }
-        let name = r.refs.first.map(ImageRef.familiar) ?? String(r.imageId.prefix(19))
+        let name = ImageRef.displayName(refs: r.refs, id: r.imageId)
         return "image \(name) is blocked by pratico's scan: \(reasons.prefix(3).joined(separator: "; ")). "
             + "Add \"\(r.imageId)\" to scan_allow in ~/.pratico/config.toml to run it anyway."
     }
@@ -293,7 +293,7 @@ final class ScanService: @unchecked Sendable {
         let enc = JSONEncoder()
         enc.dateEncodingStrategy = .iso8601
         return .array(images.localImages().map { img in
-            var out: [String: JSON] = ["Id": .string(img.id), "Tags": JSON(img.tags), "Scanning": .bool(scanning.contains(img.id))]
+            var out: [String: JSON] = ["Id": .string(img.id), "Name": .string(img.displayName), "Tags": JSON(img.tags), "Scanning": .bool(scanning.contains(img.id))]
             if let r = report(img.id), let data = try? enc.encode(r), let json = JSON.parse(data) {
                 let (verdict, reasons) = ScanVerdict.judge(r.findings, ran: r.scanners.contains(where: \.ran), block: config.scanBlock)
                 out["Report"] = json
@@ -360,6 +360,8 @@ final class ScanService: @unchecked Sendable {
         for i in findings.indices where !kev.isDisjoint(with: findings[i].cves) { findings[i].kev = true }
         let report = ScanReport(imageId: img.id, refs: img.refs, time: Date(), scanners: runs,
                                 findings: findings, packages: packages, kevDate: kevDate)
+        // Deleted while it was scanned: `forget` already ran, so saving would bring it back.
+        guard images.resolve(img.id) != nil else { return }
         save(report)
         act(report)
     }
@@ -394,7 +396,7 @@ final class ScanService: @unchecked Sendable {
     /// Findings short of a block show in Scan Results; only a block raises an alert, the one
     /// that becomes a notification.
     private func act(_ r: ScanReport) {
-        let name = r.refs.first.map(ImageRef.familiar) ?? r.imageId
+        let name = ImageRef.displayName(refs: r.refs, id: r.imageId)
         let (_, reasons) = ScanVerdict.judge(r.findings, ran: r.scanners.contains(where: \.ran), block: config.scanBlock)
         setVerdict(r)
         guard let reason = gateReason(r) else {

@@ -6,14 +6,13 @@ import SwiftUI
 struct DiskUsage: Decodable, Equatable {
     struct Image: Decodable, Equatable {
         var Id: String
-        var Tags: [String]
+        var Name: String
         var Size: Int64
         var Containers: Int
     }
     struct Container: Decodable, Equatable {
         var Id: String
         var Name: String
-        var ImageID: String
         var Running: Bool
         var Size: Int64
         var Logs: Int64
@@ -21,8 +20,6 @@ struct DiskUsage: Decodable, Equatable {
     struct ImageGroup: Decodable, Equatable {
         var Size: Int64
         var Unused: Int64
-        /// Unused once stopped containers are gone too: the images only they held.
-        var UnusedAfterContainers: Int64
         var Unreferenced: Int64
         var Items: [Image]
     }
@@ -39,26 +36,30 @@ struct DiskUsage: Decodable, Equatable {
     var Runtime: Int64
     var Scans: Int64
 
+    var Cleanup: Cleanups
+
     var stopped: [Container] { Containers.Items.filter { !$0.Running } }
 
-    /// What a cleanup removes and frees: one answer for the button, the confirmation, and
-    /// the result, so they agree. With containers, the images only stopped ones used go too.
-    struct Cleanup {
-        var containers: [Container]
-        var images: [Image]
-        var leftover: Int64
-        var bytes: Int64
-        var isEmpty: Bool { containers.isEmpty && images.isEmpty && leftover == 0 }
+    /// What a cleanup removes and frees, worked out by the daemon with the rule its prune
+    /// applies: the button, the confirmation, and the result all read the same plan.
+    struct Plan: Decodable, Equatable {
+        struct Item: Decodable, Equatable {
+            var Id: String
+            var Name: String
+            var Size: Int64
+        }
+        var Containers: [Item]
+        var Images: [Item]
+        var Leftover: Int64
+        var Bytes: Int64
+        var isEmpty: Bool { Containers.isEmpty && Images.isEmpty && Leftover == 0 }
     }
+    struct Cleanups: Decodable, Equatable {
+        var Containers: Plan
+        var Images: Plan
+        var Both: Plan
 
-    func cleanup(containers: Bool, images: Bool) -> Cleanup {
-        let gone = containers ? stopped : []
-        let running = Set(Containers.Items.filter(\.Running).map(\.ImageID))
-        let imgs = !images ? [] : Images.Items.filter { containers ? !running.contains($0.Id) : $0.Containers == 0 }
-        let leftover = images ? Images.Unreferenced : 0
-        let imageBytes = !images ? 0 : (containers ? Images.UnusedAfterContainers : Images.Unused)
-        return Cleanup(containers: gone, images: imgs, leftover: leftover,
-                       bytes: gone.reduce(0) { $0 + $1.Size + $1.Logs } + imageBytes + leftover)
+        func plan(containers: Bool, images: Bool) -> Plan { containers && images ? Both : containers ? Containers : Images }
     }
 }
 
@@ -94,13 +95,13 @@ struct DiskMenu: View {
     }
 
     private func cleanupButton(_ d: DiskUsage, _ title: String, containers: Bool, images: Bool) -> some View {
-        let c = d.cleanup(containers: containers, images: images)
-        return Button("\(title) (\(bytes(c.bytes)))…") { daemon.cleanUp(containers: containers, images: images) }
+        let c = d.Cleanup.plan(containers: containers, images: images)
+        return Button("\(title) (\(bytes(c.Bytes)))…") { daemon.cleanUp(containers: containers, images: images) }
             .disabled(c.isEmpty)
     }
 
     private func largest(_ d: DiskUsage) -> [String] {
-        let images = d.Images.Items.map { (size: $0.Size, line: "\(bytes($0.Size))  image \($0.Tags.first ?? String($0.Id.dropFirst(7).prefix(12)))\($0.Containers == 0 ? " (unused)" : "")") }
+        let images = d.Images.Items.map { (size: $0.Size, line: "\(bytes($0.Size))  image \($0.Name)\($0.Containers == 0 ? " (unused)" : "")") }
         let containers = d.Containers.Items.map { (size: $0.Size + $0.Logs, line: "\(bytes($0.Size + $0.Logs))  container \($0.Name)\($0.Running ? "" : " (stopped)")") }
         return (images + containers).sorted { $0.size > $1.size }.prefix(8).map(\.line)
     }

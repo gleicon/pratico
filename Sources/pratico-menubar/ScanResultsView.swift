@@ -33,7 +33,7 @@ struct ScanResult: Decodable, Identifiable, Equatable {
         var findings: [Finding]
     }
     var Id: String
-    var Tags: [String]
+    var Name: String
     var Scanning: Bool
     var Verdict: String?
     var Reasons: [String]?
@@ -41,7 +41,6 @@ struct ScanResult: Decodable, Identifiable, Equatable {
     var Report: Report?
 
     var id: String { Id }
-    var name: String { Tags.first ?? String(Id.dropFirst(7).prefix(12)) }
 
     /// The finding's `sources` use short tags; runs use the scanner's name.
     static func scannerName(_ source: String) -> String { source == "osv" ? "osv-scanner" : source }
@@ -63,7 +62,7 @@ struct ScanResultsView: View {
             List(results, selection: $selection) { r in
                 HStack {
                     Text(badge(r))
-                    Text(r.name).lineLimit(1)
+                    Text(r.Name).lineLimit(1)
                 }
                 .tag(r.id)
             }
@@ -114,7 +113,7 @@ struct ScanResultsView: View {
 
     @ViewBuilder private func detail(_ r: ScanResult) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(r.name).font(.title2)
+            Text(r.Name).font(.title2)
             if r.Scanning { Text("Scanning…").foregroundStyle(.secondary) }
             if let report = r.Report {
                 Text("Scanned \(report.time.formatted(date: .abbreviated, time: .shortened))").foregroundStyle(.secondary)
@@ -162,11 +161,6 @@ struct ScanResultsView: View {
     }
 
     static func fetch() async -> [ScanResult] {
-        await Task.detached {
-            guard let r = DaemonProbe.request("GET", "/pratico/scans", timeout: 10), r.status == 200 else { return [] }
-            let dec = JSONDecoder()
-            dec.dateDecodingStrategy = .iso8601
-            return (try? dec.decode([ScanResult].self, from: r.body)) ?? []
-        }.value
+        await DaemonProbe.fetch("/pratico/scans", as: [ScanResult].self, timeout: 10) ?? []
     }
 }

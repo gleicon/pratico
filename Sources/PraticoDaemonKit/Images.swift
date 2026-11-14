@@ -33,6 +33,11 @@ public enum ImageRef {
         return ref
     }
 
+    /// How people see an image: its first tag, else its short ID, as `docker images` does.
+    static func displayName(refs: [String], id: String) -> String {
+        refs.first.map(familiar) ?? String(id.dropFirst(7).prefix(12))
+    }
+
     /// Reference Docker passes to `POST /images/create` as `fromImage` + `tag`.
     public static func join(_ image: String, tag: String?) -> String {
         guard let tag, !tag.isEmpty else { return image }
@@ -46,6 +51,8 @@ struct LocalImage {
     var refs: [String]  // full references
 
     var tags: [String] { refs.map(ImageRef.familiar) }
+    var displayName: String { ImageRef.displayName(refs: refs, id: id) }
+    var shortId: String { String(id.dropFirst(7).prefix(12)) }
 }
 
 public final class ImageService: Sendable {
@@ -157,6 +164,10 @@ public final class ImageService: Sendable {
     /// Image IDs used by containers (for the Apple backend, Docker-created or not).
     func inUse() -> Set<String> { backend.inUse() }
 
+    /// What `prune -a` removes when the containers using `used` stay: every other image.
+    /// The Disk menu's cleanup plans use the same rule, so they list what prune deletes.
+    func unused(keeping used: Set<String>) -> [LocalImage] { localImages().filter { !used.contains($0.id) } }
+
     func tag(_ source: String, repo: String, tag: String?) throws {
         guard let (img, matched) = resolve(source) else { throw APIError(404, "No such image: \(source)") }
         guard !repo.isEmpty else { throw APIError(400, "repository name must be given") }
@@ -171,7 +182,7 @@ public final class ImageService: Sendable {
     /// tag); by ID removes every reference. Images in use need `force`, as in Docker.
     func remove(_ nameOrId: String, force: Bool) throws -> [JSON] {
         guard let (img, matched) = resolve(nameOrId) else { throw APIError(404, "No such image: \(nameOrId)") }
-        let short = String(img.id.dropFirst(7).prefix(12))
+        let short = img.shortId
         let refs = matched.map { [$0] } ?? img.refs
         let removesImage = refs.count == img.refs.count
         if matched == nil && img.refs.count > 1 && !force {
@@ -204,10 +215,9 @@ public final class ImageService: Sendable {
             events.emit("image", "prune", id: "", attributes: ["reclaimed": String(reclaimed)])
             return ["ImagesDeleted": .null, "SpaceReclaimed": .int(reclaimed)]
         }
-        let used = inUse()
         var deleted: [JSON] = []
         var reclaimed: Int64 = 0
-        for img in localImages() where !used.contains(img.id) {
+        for img in unused(keeping: inUse()) {
             guard let items = try? remove(img.id, force: true) else { continue }
             deleted += items
             reclaimed += Self.variant(img.record)?["size"]?.int ?? 0

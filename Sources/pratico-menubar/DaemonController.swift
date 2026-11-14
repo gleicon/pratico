@@ -115,11 +115,7 @@ final class DaemonController {
     }
 
     func refreshScanSummary() async {
-        let summary = await Task.detached { () -> ScanSummary? in
-            guard let r = DaemonProbe.request("GET", "/pratico/scans/summary", timeout: 5), r.status == 200 else { return nil }
-            return try? JSONDecoder().decode(ScanSummary.self, from: r.body)
-        }.value
-        update(\.scanSummary, summary)
+        update(\.scanSummary, await DaemonProbe.fetch("/pratico/scans/summary", as: ScanSummary.self))
     }
 
     /// New serious alerts also become a notification: the daemon stopped containers.
@@ -308,12 +304,12 @@ final class DaemonController {
 
     /// Lists what goes and what it frees, asks, then uses Docker's own prune endpoints.
     func cleanUp(containers: Bool, images: Bool) {
-        guard let c = disk?.cleanup(containers: containers, images: images), !c.isEmpty else { return }
-        var lines = c.containers.map { "container \($0.Name)  \(bytes($0.Size + $0.Logs))" }  // its logs go too
-        lines += c.images.map { "image \($0.Tags.first ?? String($0.Id.dropFirst(7).prefix(12)))  \(bytes($0.Size))" }
-        if c.leftover > 0 { lines.append("leftover image data  \(bytes(c.leftover))") }
+        guard let c = disk?.Cleanup.plan(containers: containers, images: images), !c.isEmpty else { return }
+        var lines = c.Containers.map { "container \($0.Name)  \(bytes($0.Size))" }  // with its logs
+        lines += c.Images.map { "image \($0.Name)  \(bytes($0.Size))" }
+        if c.Leftover > 0 { lines.append("leftover image data  \(bytes(c.Leftover))") }
         let alert = NSAlert()
-        alert.messageText = "Remove \(lines.count) item\(lines.count == 1 ? "" : "s"), freeing \(bytes(c.bytes))?"
+        alert.messageText = "Remove \(lines.count) item\(lines.count == 1 ? "" : "s"), freeing \(bytes(c.Bytes))?"
         alert.informativeText = lines.prefix(15).joined(separator: "\n") + (lines.count > 15 ? "\n… and \(lines.count - 15) more" : "")
             + "\n\nRunning containers and the images they use are kept."
         alert.addButton(withTitle: "Remove")
@@ -331,8 +327,7 @@ final class DaemonController {
                 }
                 return freed
             }.value
-            await refreshDisk()
-            await refreshScanSummary()
+            await refreshAfterChange()
             let done = NSAlert()
             done.messageText = "Freed \(bytes(freed))"
             done.informativeText = "\(bytes(disk?.Total ?? 0)) used, \(bytes(disk?.Free ?? 0)) free on this Mac."
@@ -346,12 +341,13 @@ final class DaemonController {
         return (obj["SpaceReclaimed"] as? NSNumber)?.int64Value ?? 0
     }
 
-    func refreshDisk() async {
-        let usage = await Task.detached { () -> DiskUsage? in
-            guard let r = DaemonProbe.request("GET", "/pratico/disk", timeout: 30), r.status == 200 else { return nil }
-            return try? JSONDecoder().decode(DiskUsage.self, from: r.body)
-        }.value
-        update(\.disk, usage)
+    /// Disk use and the scan summary, together: the slow disk walk does not hold up the other.
+    func refreshAfterChange() async {
+        async let usage = DaemonProbe.fetch("/pratico/disk", as: DiskUsage.self, timeout: 30)
+        async let summary = DaemonProbe.fetch("/pratico/scans/summary", as: ScanSummary.self)
+        let (u, s) = await (usage, summary)
+        update(\.disk, u)
+        update(\.scanSummary, s)
     }
 
     /// Refreshes once a second, so state changes show within 2 s (SPEC FR-30). Disk use and
@@ -370,10 +366,7 @@ final class DaemonController {
                 self.refreshAlerts()
                 self.refreshRegistries()
                 self.refreshDefaultSocket()
-                if changed || tick % 30 == 0 {
-                    await self.refreshDisk()
-                    await self.refreshScanSummary()
-                }
+                if changed || tick % 30 == 0 { await self.refreshAfterChange() }
                 // Each check runs every scanner's --version: once a minute is plenty.
                 if tick % 60 == 0 { await self.refreshScanners() }
                 tick += 1
@@ -409,17 +402,27 @@ final class DaemonController {
         }
     }
 
-    nonisolated static func probeStatus() -> Status? {
-        guard let r = DaemonProbe.get("/pratico/status"), r.status == 200 else { return nil }
-        let dec = JSONDecoder()
-        dec.dateDecodingStrategy = .iso8601
-        return try? dec.decode(Status.self, from: r.body)
-    }
+    nonisolated static func probeStatus() -> Status? { DaemonProbe.decode("/pratico/status") }
 
     nonisolated static func probeVersion() -> String? {
         guard let r = DaemonProbe.get("/version"), r.status == 200,
             let obj = try? JSONSerialization.jsonObject(with: r.body) as? [String: Any]
         else { return nil }
         return obj["ApiVersion"] as? String
+    }
+}
+
+/// The menubar's reads of the daemon's JSON: one decoder (dates are ISO 8601), off the main actor.
+extension DaemonProbe {
+    static func fetch<T: Decodable & Sendable>(_ path: String, as type: T.Type, timeout: Int = 5) async -> T? {
+        await Task.detached { decode(path, as: type, timeout: timeout) }.value
+    }
+
+    /// `GET path`, decoded; nil when the daemon does not answer or the body does not decode.
+    nonisolated static func decode<T: Decodable>(_ path: String, as type: T.Type = T.self, timeout: Int = 1) -> T? {
+        guard let r = get(path, timeout: timeout), r.status == 200 else { return nil }
+        let dec = JSONDecoder()
+        dec.dateDecodingStrategy = .iso8601
+        return try? dec.decode(type, from: r.body)
     }
 }

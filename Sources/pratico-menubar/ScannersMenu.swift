@@ -154,10 +154,7 @@ extension DaemonController {
     }
 
     func refreshScanners() async {
-        let report = await Task.detached { () -> ScannerReport? in
-            guard let r = DaemonProbe.request("GET", "/pratico/scanners", timeout: 30), r.status == 200 else { return nil }
-            return try? JSONDecoder().decode(ScannerReport.self, from: r.body)
-        }.value
+        let report = await DaemonProbe.fetch("/pratico/scanners", as: ScannerReport.self, timeout: 30)
         if report != scanners { scanners = report }
     }
 }
