@@ -88,24 +88,30 @@ struct SnapshotService {
 
     // MARK: Restore
 
-    /// `POST /pratico/snapshots/restore?path=…[&dry_run=1]`. Volumes, then networks, then
-    /// containers, so each finds what it refers to. A name already taken is skipped and
-    /// reported (FR-36); an unsupported `format_version` refuses the whole restore before
-    /// anything changes (FR-36.a). Containers that ran when the snapshot was taken are
-    /// started again. A dry run reports what would happen and changes nothing.
-    func restore(path: String, dryRun: Bool) throws -> JSON {
-        let fm = FileManager.default
+    /// `POST /pratico/snapshots/restore?path=…[&dry_run=1][&start=1]`. Volumes, then
+    /// networks, then containers, so each finds what it refers to. A name already taken is
+    /// skipped and reported (FR-36); an unsupported `format_version` refuses the whole
+    /// restore before anything changes (FR-36.a). With `start`, containers that ran when
+    /// the snapshot was taken are started again. A dry run reports what would happen,
+    /// with each container's `Review` (image, command, Mac folders, ports, privileges),
+    /// and changes nothing.
+    func restore(path: String, dryRun: Bool, start: Bool) throws -> JSON {
         let file = URL(filePath: (path as NSString).expandingTildeInPath)
-        guard let size = (try? fm.attributesOfItem(atPath: file.path))?[.size] as? Int, size <= Self.maxArchive else {
+        guard let size = (try? FileManager.default.attributesOfItem(atPath: file.path))?[.size] as? Int, size <= Self.maxArchive else {
             throw APIError(400, "\(path) is not a pratico snapshot (missing, or larger than a snapshot can be)")
         }
-        let work = fm.temporaryDirectory.appending(path: "pratico-restore-\(UUID().uuidString)")
-        try fm.createDirectory(at: work, withIntermediateDirectories: true)
-        defer { try? fm.removeItem(at: work) }
-        do { try Tar.extract(file, to: work) } catch {
+        // Only the members a snapshot has, read into memory with caps: a hostile archive
+        // can neither fill the disk nor plant files.
+        let members: [String: Data]
+        do {
+            members = try Tar.readFiles(file, accept: Self.isMember, maxFile: Self.maxMember,
+                                        maxTotal: Self.maxArchive, maxEntries: Self.maxEntries)
+        } catch let e as APIError {
+            throw APIError(400, "\(path) is not a pratico snapshot: \(e.message)")
+        } catch {
             throw APIError(400, "\(path) is not a pratico snapshot: \(error)")
         }
-        guard let manifest = (try? Data(contentsOf: work.appending(path: "manifest.json"))).flatMap(JSON.parse) else {
+        guard let manifest = members["manifest.json"].flatMap(JSON.parse) else {
             throw APIError(400, "\(path) is not a pratico snapshot: it has no manifest.json")
         }
         guard let version = manifest["format_version"]?.int, version == Self.formatVersion else {
@@ -117,12 +123,10 @@ struct SnapshotService {
         var skipped: [JSON] = []
         var failed: [JSON] = []
         var started: [String] = []
+        var review: [JSON] = []
         for kind in Kind.allCases {
             for name in manifest[kind.folder]?.strings ?? [] {
-                // Names come from the file: one that is not a plain file name never becomes a path.
-                guard !name.isEmpty, !name.contains("/"), !name.hasPrefix("."),
-                    let item = (try? Data(contentsOf: work.appending(path: "\(kind.folder)/\(name).json"))).flatMap(JSON.parse)
-                else {
+                guard Self.isPlainName(name), let item = members["\(kind.folder)/\(name).json"].flatMap(JSON.parse) else {
                     failed.append(["Kind": .string(kind.rawValue), "Name": .string(name), "Error": "missing or unreadable in the snapshot"])
                     continue
                 }
@@ -130,6 +134,7 @@ struct SnapshotService {
                     skipped.append(["Kind": .string(kind.rawValue), "Name": .string(name), "Reason": .string("a \(kind.rawValue) with this name exists")])
                     continue
                 }
+                if kind == .container { review.append(Self.review(name, item)) }
                 if dryRun {
                     created[kind, default: []].append(name)
                     continue
@@ -137,7 +142,7 @@ struct SnapshotService {
                 do {
                     try recreate(kind, name, item)
                     created[kind, default: []].append(name)
-                    if kind == .container && item["Running"]?.bool == true {
+                    if start && kind == .container && item["Running"]?.bool == true {
                         do { _ = try containers.start(name); started.append(name) } catch let e as APIError {
                             failed.append(["Kind": "container", "Name": .string(name), "Error": .string("created, but not started: \(e.message)")])
                         }
@@ -151,7 +156,44 @@ struct SnapshotService {
             "DryRun": .bool(dryRun),
             "Created": .object(Dictionary(uniqueKeysWithValues: Kind.allCases.map { ($0.folder.capitalized, JSON(created[$0] ?? [])) })),
             "Started": JSON(started), "Skipped": .array(skipped), "Failed": .array(failed),
+            "Review": .array(review),
         ]
+    }
+
+    static let maxMember = 1 << 20
+    static let maxEntries = 10_000
+
+    /// `manifest.json` and `<kind>s/<plain name>.json`, nothing else.
+    static func isMember(_ path: String) -> Bool {
+        if path == "manifest.json" { return true }
+        let parts = path.split(separator: "/", omittingEmptySubsequences: false)
+        guard parts.count == 2, Kind.allCases.contains(where: { $0.folder == parts[0] }), parts[1].hasSuffix(".json") else { return false }
+        return isPlainName(String(parts[1].dropLast(5)))
+    }
+
+    /// Names come from the file: one that is not a plain file name never becomes a path.
+    static func isPlainName(_ name: String) -> Bool { !name.isEmpty && !name.contains("/") && !name.hasPrefix(".") }
+
+    /// What a restored container could do to this Mac, for the confirmation: a snapshot can
+    /// come from anywhere, and a container from it can reach whatever these give it.
+    static func review(_ name: String, _ item: JSON) -> JSON {
+        let body = item["Create"] ?? [:]
+        let host = body["HostConfig"] ?? [:]
+        var risks: [String] = []
+        let binds = (host["Binds"]?.strings ?? []).filter { $0.hasPrefix("/") }.map { String($0.split(separator: ":")[0]) }
+            + (host["Mounts"]?.array ?? []).filter { $0["Type"]?.string == "bind" }.compactMap { $0["Source"]?.string }
+        if !binds.isEmpty { risks.append("reads and writes Mac folders: " + binds.joined(separator: ", ")) }
+        let ports = (host["PortBindings"]?.object ?? [:]).flatMap { port, list in
+            (list.array ?? []).map { b in "\(b["HostIp"]?.string.flatMap { $0.isEmpty ? nil : $0 } ?? "0.0.0.0"):\(b["HostPort"]?.string ?? "")→\(port)" }
+        }
+        if !ports.isEmpty { risks.append("publishes " + ports.sorted().joined(separator: ", ")) }
+        if host["Privileged"]?.bool == true { risks.append("privileged") }
+        if let caps = host["CapAdd"]?.strings, !caps.isEmpty { risks.append("adds capabilities " + caps.joined(separator: ", ")) }
+        if let devices = host["Devices"]?.array, !devices.isEmpty { risks.append("uses host devices") }
+        if host["NetworkMode"]?.string == "host" { risks.append("host networking") }
+        let command = ((body["Entrypoint"]?.strings ?? []) + (body["Cmd"]?.strings ?? [])).joined(separator: " ")
+        return ["Name": .string(name), "Image": body["Image"] ?? "", "Command": .string(command),
+                "Running": .bool(item["Running"]?.bool ?? false), "Risks": JSON(risks)]
     }
 
     private func exists(_ kind: Kind, _ name: String) -> Bool {

@@ -6,6 +6,28 @@ import PraticoCore
 public enum DockerAPI {
     public static let version = "1.55"
     public static let minVersion = "1.44"
+
+    /// Docker Engine's check on a `/vX.Y` request, with its words: a client outside the
+    /// supported range is refused, so an old CLI says so instead of misbehaving (AC-49).
+    static func accept(_ requested: String?) throws {
+        guard let requested else { return }
+        if compare(requested, minVersion) < 0 {
+            throw APIError(400, "client version \(requested) is too old. Minimum supported API version is \(minVersion), please upgrade your client to a newer version")
+        }
+        if compare(requested, version) > 0 {
+            throw APIError(400, "client version \(requested) is too new. Maximum supported API version is \(version)")
+        }
+    }
+
+    /// Dotted versions compared numerically: 1.9 < 1.44.
+    static func compare(_ a: String, _ b: String) -> Int {
+        let x = a.split(separator: ".").map { Int($0) ?? 0 }, y = b.split(separator: ".").map { Int($0) ?? 0 }
+        for i in 0..<max(x.count, y.count) {
+            let l = i < x.count ? x[i] : 0, r = i < y.count ? y[i] : 0
+            if l != r { return l < r ? -1 : 1 }
+        }
+        return 0
+    }
 }
 
 public enum DaemonInfo {

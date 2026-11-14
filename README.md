@@ -55,8 +55,9 @@ becomes a notification once.
 
 **Snapshot** writes every container, network, and volume definition to a `.tar.gz` of
 plain JSON in `~/.pratico/snapshots` (read it with `tar -xzf` and any editor). **Restore
-from Snapshot…** shows what it would create and what it would skip, asks, then recreates
-them and starts the containers that were running. Images come back from their registries;
+from Snapshot…** shows what it would create and skip, and for each container its image,
+command, and anything reaching beyond it (Mac folders, published ports, privileges), then
+asks whether to restore only or restore and start the ones that were running. Images come back from their registries;
 volume data is not part of a snapshot.
 
 Volumes work as in Docker: `docker volume create`, `-v name:/path`, `--mount

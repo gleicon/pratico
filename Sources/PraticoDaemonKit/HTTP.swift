@@ -16,6 +16,8 @@ public struct Request: Sendable {
     public var query: [String: String]
     public var headers: [String: String]
     public var body: Data
+    /// The `/vX.Y` prefix the client asked for, if any.
+    public var apiVersion: String? = nil
 
     public func flag(_ name: String) -> Bool {
         guard let v = query[name]?.lowercased() else { return false }
@@ -142,23 +144,26 @@ public final class Connection: @unchecked Sendable {
 
         let target = String(parts[1])
         let (rawPath, rawQuery) = target.splitOnce("?")
+        let (path, version) = Self.splitVersion(rawPath.removingPercentEncoding ?? rawPath)
         return Request(
             method: String(parts[0]),
-            path: Self.stripVersion(rawPath.removingPercentEncoding ?? rawPath),
+            path: path,
             query: Self.parseQuery(rawQuery ?? ""),
             headers: headers,
-            body: body)
+            body: body,
+            apiVersion: version)
     }
 
-    static func stripVersion(_ path: String) -> String {
-        guard path.hasPrefix("/v") else { return path }
+    /// `/v1.55/containers/json` is `/containers/json` at API 1.55.
+    static func splitVersion(_ path: String) -> (path: String, version: String?) {
+        guard path.hasPrefix("/v") else { return (path, nil) }
         let rest = path.dropFirst(2)
-        guard let slash = rest.firstIndex(of: "/") else { return path }
+        guard let slash = rest.firstIndex(of: "/") else { return (path, nil) }
         let version = rest[..<slash]
         if !version.isEmpty && version.allSatisfy({ $0.isNumber || $0 == "." }) {
-            return String(rest[slash...])
+            return (String(rest[slash...]), String(version))
         }
-        return path
+        return (path, nil)
     }
 
     static func parseQuery(_ q: String) -> [String: String] {

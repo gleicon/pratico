@@ -25,9 +25,12 @@ func normalizesImageRefs(input: String, expected: String) {
 }
 
 @Test func stripsAPIVersionPrefix() {
-    #expect(Connection.stripVersion("/v1.55/containers/json") == "/containers/json")
-    #expect(Connection.stripVersion("/_ping") == "/_ping")
-    #expect(Connection.stripVersion("/volumes/v1") == "/volumes/v1")
+    #expect(Connection.splitVersion("/v1.55/containers/json") == ("/containers/json", "1.55"))
+    #expect(Connection.splitVersion("/_ping") == ("/_ping", nil))
+    #expect(Connection.splitVersion("/volumes/v1") == ("/volumes/v1", nil))
+    #expect(throws: APIError.self) { try DockerAPI.accept("1.41") }
+    #expect(throws: APIError.self) { try DockerAPI.accept("1.99") }
+    #expect(throws: Never.self) { try DockerAPI.accept("1.44"); try DockerAPI.accept("1.55"); try DockerAPI.accept(nil) }
 }
 
 @Test func parsesQueryEncoding() {

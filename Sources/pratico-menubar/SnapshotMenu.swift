@@ -16,10 +16,19 @@ struct RestoreReport: Decodable {
         var Networks: [String]
         var Containers: [String]
     }
+    /// A container as the snapshot would make it, and what it could do to this Mac.
+    struct Review: Decodable {
+        var Name: String
+        var Image: String
+        var Command: String
+        var Running: Bool
+        var Risks: [String]
+    }
     var Created: Names
     var Started: [String]
     var Skipped: [Item]
     var Failed: [Item]
+    var Review: [Review]
 
     var lines: [String] {
         var out: [String] = []
@@ -86,19 +95,44 @@ extension DaemonController {
                 report("Nothing to restore", (["Everything in this snapshot is already here."] + plan.lines).joined(separator: "\n"))
                 return
             }
-            guard confirm("Restore \(file.lastPathComponent)?", Self.listed(plan.lines)
-                + "\n\nExisting containers, networks, and volumes are left as they are.", button: "Restore")
-            else { return }
-            guard let done = await restore(file, dryRun: false) else { return }
+            guard let start = confirmRestore(file, plan) else { return }
+            guard let done = await restore(file, dryRun: false, start: start) else { return }
             report(done.Failed.isEmpty ? "Restored" : "Restored, with problems", Self.listed(done.lines))
             await refreshContainers()
         }
     }
 
-    private func restore(_ file: URL, dryRun: Bool) async -> RestoreReport? {
+    /// Every container it would make, with its image, command, and anything that reaches
+    /// beyond it (Mac folders, published ports, privileges): a snapshot can come from
+    /// anywhere. Starting them is a separate choice. nil is Cancel, else whether to start.
+    private func confirmRestore(_ file: URL, _ plan: RestoreReport) -> Bool? {
+        var text = Self.listed(plan.lines.filter { !$0.hasPrefix("container ") })
+        for c in plan.Review {
+            text += "\n\ncontainer \(c.Name): \(c.Image) \(c.Command)"
+            text += c.Risks.map { "\n⚠︎ \($0)" }.joined()
+        }
+        text += "\n\nExisting containers, networks, and volumes are left as they are. Only restore snapshots you trust."
+        let running = plan.Review.filter(\.Running).count
+        let alert = NSAlert()
+        alert.messageText = "Restore \(file.lastPathComponent)?"
+        alert.informativeText = text
+        alert.alertStyle = plan.Review.contains { !$0.Risks.isEmpty } ? .warning : .informational
+        alert.addButton(withTitle: "Restore")
+        if running > 0 { alert.addButton(withTitle: "Restore and Start \(running)") }
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate()
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: return false
+        case .alertSecondButtonReturn where running > 0: return true
+        default: return nil
+        }
+    }
+
+    private func restore(_ file: URL, dryRun: Bool, start: Bool = false) async -> RestoreReport? {
         let query = file.path.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? ""
+        let flags = (dryRun ? "&dry_run=1" : "") + (start ? "&start=1" : "")
         let r = await Task.detached {
-            DaemonProbe.request("POST", "/pratico/snapshots/restore?path=\(query)\(dryRun ? "&dry_run=1" : "")", timeout: 300)
+            DaemonProbe.request("POST", "/pratico/snapshots/restore?path=\(query)\(flags)", timeout: 300)
         }.value
         guard let r, r.status == 200, let report = try? JSONDecoder().decode(RestoreReport.self, from: r.body) else {
             let message = r.flatMap { try? JSONSerialization.jsonObject(with: $0.body) as? [String: Any] }?["message"] as? String

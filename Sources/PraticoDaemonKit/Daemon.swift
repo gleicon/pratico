@@ -115,6 +115,7 @@ public final class Daemon: @unchecked Sendable {
     }
 
     private func route(_ req: Request, _ conn: Connection) throws -> Disposition {
+        try DockerAPI.accept(req.apiVersion)
         let parts = req.path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
         let m = req.method
 
@@ -154,7 +155,7 @@ public final class Daemon: @unchecked Sendable {
             return .keepAlive
         case ("POST", "pratico") where parts.count == 3 && parts[1] == "snapshots" && parts[2] == "restore":
             guard let path = req.query["path"], !path.isEmpty else { throw APIError(400, "path is required") }
-            conn.json(200, try snapshots.restore(path: path, dryRun: req.flag("dry_run")))
+            conn.json(200, try snapshots.restore(path: path, dryRun: req.flag("dry_run"), start: req.flag("start")))
             return .keepAlive
         case ("DELETE", "pratico") where parts.count == 2 && parts[1] == "alerts":
             alerts.clear()

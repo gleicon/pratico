@@ -51,6 +51,37 @@ enum Tar {
         }
     }
 
+    /// Reads the regular files `accept` names into memory, never to disk, with hard caps
+    /// counted on the bytes actually decompressed (headers can lie): an archive past
+    /// `maxFile` for one member, `maxTotal` in all, or `maxEntries` members is rejected.
+    /// Other members (directories, links) are skipped unread.
+    static func readFiles(_ file: URL, accept: (String) -> Bool, maxFile: Int, maxTotal: Int, maxEntries: Int) throws -> [String: Data] {
+        let reader = try ArchiveReader(file: file)
+        var out: [String: Data] = [:]
+        var total = 0
+        var entries = 0
+        var buffer = [UInt8](repeating: 0, count: 64 << 10)
+        for (entry, stream) in reader.makeStreamingIterator() {
+            entries += 1
+            guard entries <= maxEntries else { throw APIError(400, "archive has more than \(maxEntries) members") }
+            let name = (entry.path ?? "").hasPrefix("./") ? String(entry.path!.dropFirst(2)) : (entry.path ?? "")
+            guard entry.fileType == .regular, accept(name) else { continue }
+            var data = Data()
+            while true {
+                let n = buffer.withUnsafeMutableBufferPointer { stream.read($0.baseAddress!, maxLength: $0.count) }
+                if n < 0 { throw APIError(400, "archive is damaged at \(name)") }
+                if n == 0 { break }
+                data.append(contentsOf: buffer[0..<n])
+                total += n
+                guard data.count <= maxFile else { throw APIError(400, "archive member \(name) is larger than \(maxFile >> 10) KiB") }
+                guard total <= maxTotal else { throw APIError(400, "archive is larger than \(maxTotal >> 20) MiB unpacked") }
+            }
+            out[name] = data
+        }
+        try reader.throwIfStreamFailed()
+        return out
+    }
+
     /// Unpacks `file` into `dir`. Members that would land outside `dir`, by `..` or through a
     /// symlink, are refused and the archive is rejected.
     static func extract(_ file: URL, to dir: URL) throws {
