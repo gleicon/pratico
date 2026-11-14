@@ -6,8 +6,9 @@ own lightweight VM: no shared Linux VM, no Docker Desktop. Existing tools keep w
 
 *Prático* (Portuguese): the harbour pilot who guides ships through narrow channels.
 
-Status: **v0.1.0-alpha**. Each container runs in its own small VM on Apple's
-Virtualization.framework; nothing else needs installing (see [How it runs](#how-it-runs)).
+Status: early (0.x). Each container runs in its own small VM on Apple's
+Virtualization.framework; nothing else needs installing (see [How it runs](#how-it-runs)
+and [What it costs](#what-it-costs)). Website: <https://gleicon.github.io/pratico/>.
 
 ## Use it
 
@@ -84,12 +85,49 @@ carries the Linux kernel and init, so nothing else needs installing.
 Design: [docs/design/runtime.md](docs/design/runtime.md); checklist:
 [.project/roadmap.md](.project/roadmap.md).
 
+### One VM per container, not one VM for all
+
+Docker Desktop, Colima, and OrbStack run one Linux VM and every container as processes
+inside it. Pratico, like Apple's own `container` tool, gives each container its own VM:
+`pratico-shim` builds a `LinuxContainer` from apple/containerization, whose `create()`
+asks `VZVirtualMachineManager` for a new `VZVirtualMachine` every time. (apple/container
+does the same: one launchd service per container, each with its own `LinuxContainer`.)
+Containers share nothing but the Mac: a kernel panic, a fork bomb, or a breakout stays in
+its VM. The library also has an experimental `LinuxPod` (several containers in one VM);
+pratico does not use it.
+
+## What it costs
+
+Measured on an M-series Mac, idle `alpine sleep` containers:
+
+| | Each container |
+|---|---|
+| `docker run -d` to running | about 400 ms (boot included); `run --rm alpine true` P99 436 ms over 50 runs |
+| Mac memory, VM process (`phys_footprint`) | about 190–210 MB: guest kernel, init, page cache touched while booting |
+| Mac memory, its `pratico-shim` | about 20 MB |
+| Daemon | about 45 MB in all, 48 MB with 32 containers running |
+| Control calls (`ps`, `inspect`, `/version`) | ≤ 2 ms P99 with 100 containers |
+
+- Memory is a ceiling, not a reservation: a container gets `--memory` (default 1 GiB, plus
+  128 MiB for the guest) and the Mac backs only the pages the guest touches. Pages the guest
+  uses for its file cache are not handed back while it runs (the VM has no balloon), so a
+  container that reads a lot of files stays near its limit until it stops. Set `--memory`
+  (or `default_memory`) for busy ones.
+- CPU runs natively (arm64 under Apple's hypervisor); `--cpus` caps the VM's vCPUs
+  (default 4).
+- The image's root filesystem is an ext4 disk image per container: fast, and sparse on disk.
+  Bind mounts and volumes go over virtiofs, slower than the Mac's own disk for many
+  small files.
+- Networking goes through pratico-net, a user-space switch: correct and isolated, not
+  yet tuned for throughput.
+- Ten idle containers cost about 2 GB of Mac memory; one shared VM would cost less for
+  many tiny containers, and gives up the isolation. `make bench` re-measures the numbers above.
+
 ## Not yet
 
-Volumes (named volumes; bind mounts work), `docker build`, snapshot and restore, egress
-interception, more than 4 networks per container, IPv6, `docker cp` with a stopped
-container, `docker save` of several images at once, Developer ID signing. The checklist,
-with what is done: [.project/roadmap.md](.project/roadmap.md).
+`docker build` and egress interception (next, after parity and scanning), more than 4
+networks per container, IPv6, `docker cp` with a stopped container, Developer ID signing.
+The checklist, with what is done: [.project/roadmap.md](.project/roadmap.md).
 
 ## Build from source
 
