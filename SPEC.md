@@ -61,7 +61,7 @@ Docker API compatibility
 - FR-17: The daemon shall run a command in a running container via the exec API, with and without a TTY.
 - FR-18: The daemon shall copy files into and out of a container via `PUT|GET /containers/{id}/archive` as tar streams.
 - FR-19: The daemon shall report CPU, memory, and network usage via `GET /containers/{id}/stats`, both one-shot and streamed.
-- FR-20: The daemon shall emit container lifecycle events (create, start, die, stop, pause, unpause, destroy, health_status) on `GET /events`.
+- FR-20: The daemon shall emit container lifecycle events (create, start, die, stop, pause, unpause, destroy, health_status) and image events (pull, tag, untag, delete, prune) on `GET /events`.
 - FR-21: The daemon shall support image list, inspect, tag, remove, and prune.
 - FR-22: The daemon shall push a tagged image to a registry via `POST /images/{name}/push`.
 - FR-23: The daemon shall support network create, list, inspect, connect, disconnect, and remove, with a default `bridge` network present at start.
@@ -117,7 +117,7 @@ Targets measured on an M1 with 16 GB RAM, image already pulled, daemon warm. Num
 ## Interfaces
 
 App ↔ daemon helper
-- `Pratico.app` bundles `pratico-daemon`; Start spawns the bundle's daemon in its own session and writes `~/Library/LaunchAgents/dev.pratico.daemon.plist`, which launchd reads at login; Stop sends the daemon SIGTERM and removes the plist. No `launchctl` or other external program is run. A daemon that finds another answering on its socket exits, leaving it alone. Its output goes to `~/.pratico/daemon.log` (timestamped lines, one 10 MB rotation), which the menubar's Status › View Daemon Log opens in Console; `GET /pratico/status` gives the Status menu version, runtime, start time, socket, and container counts. No pratico CLI ships.
+- `Pratico.app` bundles `pratico-daemon`; Start spawns the bundle's daemon in its own session and writes `~/Library/LaunchAgents/dev.pratico.daemon.plist`, which launchd reads at login; Stop sends the daemon SIGTERM and removes the plist. No `launchctl` or other external program is run. A daemon that finds another answering on its socket exits, leaving it alone. Its output goes to `~/.pratico/daemon.log` (timestamped lines, one 10 MB rotation), which the menubar's Status › View Daemon Log opens in Console; `GET /pratico/status` gives the Status menu version, runtime, start time, socket, container counts, and `Changes`, a counter every event and every scan start or finish moves: the menubar refreshes disk use, the scan summary, and an open Scan Results window when it moves, so every indicator agrees whether the change came from the Disk menu, Scan Results, the Scanners menu, or the docker CLI. A deleted image's scan report is deleted with it. Cleanup buttons, their confirmation, and the bytes they report come from one calculation; Clean Up Both counts the images only stopped containers used. No pratico CLI ships.
 
 Docker Remote API (HTTP/1.1 over `unix://~/.pratico/docker.sock`)
 - System: `/_ping`, `/version`, `/info`, `/events`

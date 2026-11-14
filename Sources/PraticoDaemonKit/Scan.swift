@@ -187,6 +187,7 @@ final class ScanService: @unchecked Sendable {
     let config: Config
     let dir: URL
     let alertsPath: URL
+    let events: EventBus
     private let dbDir: URL
     private let queue = DispatchQueue(label: "pratico.scan")
     private let lock = NSLock()
@@ -198,16 +199,32 @@ final class ScanService: @unchecked Sendable {
     static let kevURL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
     static let rescanInterval: TimeInterval = 24 * 3600
 
-    init(home: URL, images: ImageService, containers: ContainerService, config: Config) {
+    init(home: URL, images: ImageService, containers: ContainerService, config: Config, events: EventBus) {
         self.images = images
         self.containers = containers
         self.config = config
+        self.events = events
         dir = home.appending(path: "scans", directoryHint: .isDirectory)
         dbDir = home.appending(path: "scan-db", directoryHint: .isDirectory)
         alertsPath = home.appending(path: "alerts.json")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: dbDir, withIntermediateDirectories: true)
         loadBlocked()
+        // A deleted image's report goes with it, so its findings stop counting.
+        _ = events.subscribe(since: nil) { [weak self] e in
+            guard let self else { return false }
+            if e.type == "image" && e.action == "delete" { forget(e.id) }
+            return true
+        }
+    }
+
+    private func forget(_ imageId: String) {
+        try? FileManager.default.removeItem(at: path(imageId))
+        lock.lock()
+        verdicts[imageId] = nil
+        severe.remove(imageId)
+        blocked[imageId] = nil
+        lock.unlock()
     }
 
     /// Scans images never scanned, then rescans everything daily: advisories change.
@@ -294,11 +311,13 @@ final class ScanService: @unchecked Sendable {
         let fresh = pending.insert(img.id).inserted
         lock.unlock()
         guard fresh else { return }
+        events.touch()
         queue.async { [self] in
             defer {
                 lock.lock()
                 pending.remove(img.id)
                 lock.unlock()
+                events.touch()
             }
             scan(img)
         }

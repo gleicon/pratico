@@ -50,8 +50,13 @@ struct LocalImage {
 
 public final class ImageService: Sendable {
     let backend: any ImageBackend
+    /// Image events as dockerd sends them: pull, tag, untag, delete, prune.
+    let events: EventBus
 
-    init(backend: any ImageBackend) { self.backend = backend }
+    init(backend: any ImageBackend, events: EventBus) {
+        self.backend = backend
+        self.events = events
+    }
 
     /// Finds an image by reference or by (possibly short, possibly `sha256:`-prefixed) ID.
     public func find(_ nameOrId: String) -> JSON? {
@@ -159,6 +164,7 @@ public final class ImageService: Sendable {
         do { try backend.tag(matched ?? img.refs[0], target) } catch {
             throw APIError(500, "cannot tag image: \(error)")
         }
+        events.emit("image", "tag", id: img.id, attributes: ["name": ImageRef.familiar(target)])
     }
 
     /// `DELETE /images/{name}`: by reference untags it (deleting the image with its last
@@ -180,8 +186,12 @@ public final class ImageService: Sendable {
                 throw APIError(500, "cannot remove \(ImageRef.familiar(ref)): \(error)")
             }
             out.append(["Untagged": .string(ImageRef.familiar(ref))])
+            events.emit("image", "untag", id: img.id, attributes: ["name": ImageRef.familiar(ref)])
         }
-        if removesImage { out.append(["Deleted": .string(img.id)]) }
+        if removesImage {
+            out.append(["Deleted": .string(img.id)])
+            events.emit("image", "delete", id: img.id, attributes: ["name": img.id])
+        }
         return out
     }
 
@@ -190,7 +200,9 @@ public final class ImageService: Sendable {
     /// Either way, blobs no image references are collected too.
     func prune(filters: [String: [String]]) -> JSON {
         guard filters["dangling"]?.contains(where: { $0 == "false" || $0 == "0" }) == true else {
-            return ["ImagesDeleted": .null, "SpaceReclaimed": .int(backend.removeUnreferencedBlobs())]
+            let reclaimed = backend.removeUnreferencedBlobs()
+            events.emit("image", "prune", id: "", attributes: ["reclaimed": String(reclaimed)])
+            return ["ImagesDeleted": .null, "SpaceReclaimed": .int(reclaimed)]
         }
         let used = inUse()
         var deleted: [JSON] = []
@@ -201,6 +213,7 @@ public final class ImageService: Sendable {
             reclaimed += Self.variant(img.record)?["size"]?.int ?? 0
         }
         reclaimed += backend.removeUnreferencedBlobs()
+        events.emit("image", "prune", id: "", attributes: ["reclaimed": String(reclaimed)])
         return ["ImagesDeleted": deleted.isEmpty ? .null : .array(deleted), "SpaceReclaimed": .int(reclaimed)]
     }
 
@@ -223,6 +236,7 @@ public final class ImageService: Sendable {
         if let d = backend.image(full)?["configuration"]?["descriptor"]?["digest"]?.string {
             emit(["status": .string("Digest: \(d)")])
         }
+        events.emit("image", "pull", id: familiar, attributes: ["name": String(familiar.split(separator: ":").first ?? "")])
         let status = existed ? "Image is up to date for \(familiar)" : "Downloaded newer image for \(familiar)"
         emit(["status": .string("Status: \(status)")])
     }

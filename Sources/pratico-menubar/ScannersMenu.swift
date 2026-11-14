@@ -36,7 +36,7 @@ struct ScannersMenu: View {
                     }
                 }
                 Divider()
-                Button("Scan All Images Now") { daemon.scanNow() }.disabled(!r.enabled)
+                Button(daemon.scanNowTitle) { daemon.scanNow() }.disabled(!daemon.canScanNow)
                 Divider()
                 Button("Install Missing Scanners…") { daemon.showScannerInstall() }
                     .disabled(r.missing.allSatisfy { !$0.builtin })
@@ -83,10 +83,22 @@ struct ScanSummary: Decodable, Equatable {
 }
 
 extension DaemonController {
-    /// Every image, with every installed scanner, now.
+    /// Every image, with every installed scanner, now. The menu and Scan Results share this
+    /// and the summary it refreshes, so both show the scan the moment either starts it.
     func scanNow() {
-        Task.detached { _ = DaemonProbe.request("POST", "/pratico/scans", timeout: 10) }
+        Task {
+            _ = await Task.detached { DaemonProbe.request("POST", "/pratico/scans", timeout: 10) }.value
+            await refreshScanSummary()
+        }
     }
+
+    var scanNowTitle: String {
+        guard let n = scanSummary?.Scanning, n > 0 else { return "Scan All Images Now" }
+        return "Scanning \(n) image\(n == 1 ? "" : "s")…"
+    }
+
+    /// Off while a scan runs (another would only queue the same images) or scanning is off.
+    var canScanNow: Bool { scanners?.enabled != false && (scanSummary?.Scanning ?? 0) == 0 }
 
     /// Homebrew commands for what is missing, or how to get Homebrew, or each project's page.
     func showScannerInstall() {

@@ -119,13 +119,18 @@ expect_has "AC-8 docker pull streams progress" "$pull" "busybox:latest"
 expect_has "AC-8 docker images lists pulled image" "$(docker images --format '{{.Repository}}:{{.Tag}}')" "busybox:latest"
 # AC-24: tag, inspect, rmi, prune. (`prune -a` is not run: it would remove the
 # user's own unused images.)
+changes() { curl -s --unix-socket "$SOCK" http://d/pratico/status | python3 -c 'import json,sys; print(json.load(sys.stdin)["Changes"])'; }
+before=$(changes)
+since=$(date +%s)
 check "AC-24 docker tag" docker tag busybox pratico-e2e/a:1
+check "a tag moves the change counter the menubar refreshes on" test "$(changes)" -gt "$before"
 expect_has "AC-24 image inspect lists both tags" "$(docker image inspect pratico-e2e/a:1 --format '{{json .RepoTags}}')" '"busybox:latest".*"pratico-e2e/a:1"\|"pratico-e2e/a:1".*"busybox:latest"'
 expect_eq "docker images shows one ID for both tags" "$(docker images --format '{{.ID}}' busybox) $(docker images --format '{{.ID}}' pratico-e2e/a)" "$(docker images --format '{{.ID}}' busybox) $(docker images --format '{{.ID}}' busybox)"
 bb_id=$(docker image inspect busybox --format '{{.Id}}')
 expect_has "rmi by ID with two tags needs force" "$(docker rmi "${bb_id#sha256:}" 2>&1)" "referenced in multiple repositories"
 expect_eq "AC-24 docker rmi untags only" "$(docker rmi pratico-e2e/a:1 2>&1)" "Untagged: pratico-e2e/a:1"
 check "busybox survives the untag" docker image inspect busybox
+expect_has "tag and untag are image events, as in dockerd" "$(docker events --since "$since" --until "$(($(date +%s) + 1))" --filter type=image --format '{{.Action}} {{.Actor.Attributes.name}}' | tr '\n' ' ')" "tag pratico-e2e/a:1 untag pratico-e2e/a:1"
 docker run -d --name e2e-img busybox sleep 300 >/dev/null
 expect_has "rmi of an image in use needs force" "$(docker rmi busybox 2>&1)" "being used by a container"
 docker rm -f e2e-img >/dev/null
@@ -420,7 +425,14 @@ summary=$(curl -s --unix-socket "$SOCK" http://d/pratico/scans/summary)
 check "the scan summary counts blocked and critical-or-high images" python3 -c "import json,sys; s=json.loads(sys.argv[1]); assert s['Blocked'] >= 1 and 'CriticalOrHigh' in s and s['Images'] >= 2" "$summary"
 queued=$(curl -s -X POST --unix-socket "$SOCK" http://d/pratico/scans)
 check "Scan Now queues every image" python3 -c "import json,sys; q=json.loads(sys.argv[1]); assert q['Enabled'] and q['Queued'] >= 2" "$queued"
+check "a queued scan shows in the summary at once" python3 -c "import json,sys; assert json.loads(sys.argv[1])['Scanning'] >= 1" "$(curl -s --unix-socket "$SOCK" http://d/pratico/scans/summary)"
 docker rm -f e2e-custom >/dev/null
+uclibc=$(docker image inspect busybox:uclibc --format '{{.Id}}')
+blocked() { curl -s --unix-socket "$SOCK" http://d/pratico/scans/summary | python3 -c 'import json,sys; print(json.load(sys.stdin)["Blocked"])'; }
+was=$(blocked)
+docker rmi -f busybox:uclibc >/dev/null
+check "a removed image's scan report goes with it" test ! -e "$HOME_DIR/scans/${uclibc#sha256:}.json"
+expect_eq "and it stops counting as blocked" "$(blocked)" "$((was - 1))"
 rm -f "$HOME_DIR/config.toml"
 
 docker rm -f $(docker ps -aq) >/dev/null 2>&1

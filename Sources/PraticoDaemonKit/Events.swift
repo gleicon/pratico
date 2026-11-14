@@ -57,11 +57,28 @@ final class EventBus: @unchecked Sendable {
     private var history: [DockerEvent] = []
     private var subscribers: [Int: Subscriber] = [:]
     private var nextId = 0
+    private var changes = 0
     static let historyLimit = 1000
+
+    /// Bumped by every event and every `touch()`: the menubar polls it in `/pratico/status`
+    /// and refreshes disk use and scan results when it moves, whoever made the change.
+    var generation: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return changes
+    }
+
+    /// A change Docker has no event for (a scan starting or finishing).
+    func touch() {
+        lock.lock()
+        changes += 1
+        lock.unlock()
+    }
 
     func emit(_ type: String, _ action: String, id: String, attributes: [String: String] = [:]) {
         let e = DockerEvent(type: type, action: action, id: id, attributes: attributes, time: Date())
         lock.lock()
+        changes += 1
         history.append(e)
         if history.count > Self.historyLimit { history.removeFirst(history.count - Self.historyLimit) }
         let subs = subscribers

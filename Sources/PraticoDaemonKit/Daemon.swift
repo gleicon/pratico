@@ -47,7 +47,7 @@ public final class Daemon: @unchecked Sendable {
         registries.writeState()
         self.registries = registries
         let backend = EmbeddedImageBackend(store: store, content: content, registries: registries)
-        self.images = ImageService(backend: backend)
+        self.images = ImageService(backend: backend, events: events)
         self.networks = NetworkService(root: home.appending(path: "networks", directoryHint: .isDirectory), events: events)
         self.containers = ContainerService(
             images: images, root: home.appending(path: "containers", directoryHint: .isDirectory),
@@ -56,7 +56,7 @@ public final class Daemon: @unchecked Sendable {
         self.execs = ExecService(containers: containers)
         self.archives = ArchiveService(containers: containers)
         self.stats = StatsService(containers: containers)
-        self.scans = ScanService(home: home, images: images, containers: containers, config: config)
+        self.scans = ScanService(home: home, images: images, containers: containers, config: config, events: events)
         self.disk = DiskService(home: home, images: images, containers: containers)
         containers.startGate = { [scans] rec in scans.blockReason(imageId: rec.imageId) }
     }
@@ -133,7 +133,8 @@ public final class Daemon: @unchecked Sendable {
         case ("GET", "pratico") where parts.count == 2 && parts[1] == "status":
             let c = containers.counts
             conn.json(200, ["Version": .string(Pratico.version), "Pid": .int(Int64(getpid())), "StartedAt": .string(startedAt.ISO8601Format()), "Socket": .string(socketPath),
-                            "Containers": .int(Int64(c.total)), "ContainersRunning": .int(Int64(c.running))])
+                            "Containers": .int(Int64(c.total)), "ContainersRunning": .int(Int64(c.running)),
+                            "Changes": .int(Int64(events.generation))])
             return .keepAlive
         case ("GET", "pratico") where parts.count == 2 && parts[1] == "registries":
             conn.json(200, registries.state)

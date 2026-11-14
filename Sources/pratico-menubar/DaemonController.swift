@@ -46,6 +46,8 @@ final class DaemonController {
         var Socket: String
         var Containers: Int
         var ContainersRunning: Int
+        /// Moves on any change to images, containers, or scans, from the menu or the CLI.
+        var Changes: Int
     }
 
     struct Alert: Decodable, Identifiable, Equatable {
@@ -112,7 +114,7 @@ final class DaemonController {
         return parts.isEmpty ? "Scan Results…" : "Scan Results…   " + parts.joined(separator: " · ")
     }
 
-    private func refreshScanSummary() async {
+    func refreshScanSummary() async {
         let summary = await Task.detached { () -> ScanSummary? in
             guard let r = DaemonProbe.request("GET", "/pratico/scans/summary", timeout: 5), r.status == 200 else { return nil }
             return try? JSONDecoder().decode(ScanSummary.self, from: r.body)
@@ -306,13 +308,12 @@ final class DaemonController {
 
     /// Lists what goes and what it frees, asks, then uses Docker's own prune endpoints.
     func cleanUp(containers: Bool, images: Bool) {
-        guard let d = disk else { return }
-        var lines: [String] = []
-        if containers { lines += d.stopped.map { "container \($0.Name)  \(bytes($0.Size + $0.Logs))" } }  // its logs go too
-        if images { lines += d.unusedImages.map { "image \($0.Tags.first ?? String($0.Id.dropFirst(7).prefix(12)))  \(bytes($0.Size))" } }
-        if images && d.Images.Unreferenced > 0 { lines.append("leftover image data  \(bytes(d.Images.Unreferenced))") }
+        guard let c = disk?.cleanup(containers: containers, images: images), !c.isEmpty else { return }
+        var lines = c.containers.map { "container \($0.Name)  \(bytes($0.Size + $0.Logs))" }  // its logs go too
+        lines += c.images.map { "image \($0.Tags.first ?? String($0.Id.dropFirst(7).prefix(12)))  \(bytes($0.Size))" }
+        if c.leftover > 0 { lines.append("leftover image data  \(bytes(c.leftover))") }
         let alert = NSAlert()
-        alert.messageText = "Remove \(lines.count) item\(lines.count == 1 ? "" : "s")?"
+        alert.messageText = "Remove \(lines.count) item\(lines.count == 1 ? "" : "s"), freeing \(bytes(c.bytes))?"
         alert.informativeText = lines.prefix(15).joined(separator: "\n") + (lines.count > 15 ? "\n… and \(lines.count - 15) more" : "")
             + "\n\nRunning containers and the images they use are kept."
         alert.addButton(withTitle: "Remove")
@@ -331,6 +332,7 @@ final class DaemonController {
                 return freed
             }.value
             await refreshDisk()
+            await refreshScanSummary()
             let done = NSAlert()
             done.messageText = "Freed \(bytes(freed))"
             done.informativeText = "\(bytes(disk?.Total ?? 0)) used, \(bytes(disk?.Free ?? 0)) free on this Mac."
@@ -352,8 +354,10 @@ final class DaemonController {
         update(\.disk, usage)
     }
 
-    /// Refreshes once a second, so state changes show within 2 s (SPEC FR-30); disk use,
-    /// which walks the store, every 10 s.
+    /// Refreshes once a second, so state changes show within 2 s (SPEC FR-30). Disk use and
+    /// scan results follow the daemon's change counter, so every indicator moves together
+    /// whether the change came from this menu, Scan Results, or the docker CLI; disk use
+    /// also every 30 s, for logs that grow.
     private func poll() {
         pollTask = Task { [weak self] in
             var tick = 0
@@ -361,12 +365,15 @@ final class DaemonController {
                 let (version, status) = await Task.detached { (DaemonController.probeVersion(), DaemonController.probeStatus()) }.value
                 guard let self else { return }
                 self.apply(version)
+                let changed = status?.Changes != self.status?.Changes
                 self.update(\.status, status)
                 self.refreshAlerts()
                 self.refreshRegistries()
                 self.refreshDefaultSocket()
-                if tick % 10 == 0 { await self.refreshDisk() }
-                if tick % 3 == 0 { await self.refreshScanSummary() }
+                if changed || tick % 30 == 0 {
+                    await self.refreshDisk()
+                    await self.refreshScanSummary()
+                }
                 // Each check runs every scanner's --version: once a minute is plenty.
                 if tick % 60 == 0 { await self.refreshScanners() }
                 tick += 1

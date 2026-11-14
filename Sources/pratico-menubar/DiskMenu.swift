@@ -13,6 +13,7 @@ struct DiskUsage: Decodable, Equatable {
     struct Container: Decodable, Equatable {
         var Id: String
         var Name: String
+        var ImageID: String
         var Running: Bool
         var Size: Int64
         var Logs: Int64
@@ -20,6 +21,8 @@ struct DiskUsage: Decodable, Equatable {
     struct ImageGroup: Decodable, Equatable {
         var Size: Int64
         var Unused: Int64
+        /// Unused once stopped containers are gone too: the images only they held.
+        var UnusedAfterContainers: Int64
         var Unreferenced: Int64
         var Items: [Image]
     }
@@ -37,7 +40,26 @@ struct DiskUsage: Decodable, Equatable {
     var Scans: Int64
 
     var stopped: [Container] { Containers.Items.filter { !$0.Running } }
-    var unusedImages: [Image] { Images.Items.filter { $0.Containers == 0 } }
+
+    /// What a cleanup removes and frees: one answer for the button, the confirmation, and
+    /// the result, so they agree. With containers, the images only stopped ones used go too.
+    struct Cleanup {
+        var containers: [Container]
+        var images: [Image]
+        var leftover: Int64
+        var bytes: Int64
+        var isEmpty: Bool { containers.isEmpty && images.isEmpty && leftover == 0 }
+    }
+
+    func cleanup(containers: Bool, images: Bool) -> Cleanup {
+        let gone = containers ? stopped : []
+        let running = Set(Containers.Items.filter(\.Running).map(\.ImageID))
+        let imgs = !images ? [] : Images.Items.filter { containers ? !running.contains($0.Id) : $0.Containers == 0 }
+        let leftover = images ? Images.Unreferenced : 0
+        let imageBytes = !images ? 0 : (containers ? Images.UnusedAfterContainers : Images.Unused)
+        return Cleanup(containers: gone, images: imgs, leftover: leftover,
+                       bytes: gone.reduce(0) { $0 + $1.Size + $1.Logs } + imageBytes + leftover)
+    }
 }
 
 func bytes(_ n: Int64) -> String { ByteCountFormatter.string(fromByteCount: n, countStyle: .file) }
@@ -64,14 +86,17 @@ struct DiskMenu: View {
                     ForEach(largest(d), id: \.self) { Text($0) }
                 }
                 Divider()
-                Button("Remove Stopped Containers (\(bytes(d.Containers.Stopped)))…") { daemon.cleanUp(containers: true, images: false) }
-                    .disabled(d.stopped.isEmpty)
-                Button("Remove Unused Images (\(bytes(d.Images.Unused + d.Images.Unreferenced)))…") { daemon.cleanUp(containers: false, images: true) }
-                    .disabled(d.unusedImages.isEmpty && d.Images.Unreferenced == 0)
-                Button("Clean Up Both…") { daemon.cleanUp(containers: true, images: true) }
-                    .disabled(d.stopped.isEmpty && d.unusedImages.isEmpty && d.Images.Unreferenced == 0)
+                cleanupButton(d, "Remove Stopped Containers", containers: true, images: false)
+                cleanupButton(d, "Remove Unused Images", containers: false, images: true)
+                cleanupButton(d, "Clean Up Both", containers: true, images: true)
             }
         }
+    }
+
+    private func cleanupButton(_ d: DiskUsage, _ title: String, containers: Bool, images: Bool) -> some View {
+        let c = d.cleanup(containers: containers, images: images)
+        return Button("\(title) (\(bytes(c.bytes)))…") { daemon.cleanUp(containers: containers, images: images) }
+            .disabled(c.isEmpty)
     }
 
     private func largest(_ d: DiskUsage) -> [String] {

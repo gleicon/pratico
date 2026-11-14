@@ -84,19 +84,19 @@ struct ScanResultsView: View {
             Button {
                 daemon.scanNow()
             } label: {
-                Label("Scan Now", systemImage: "arrow.clockwise")
+                Label(daemon.scanNowTitle, systemImage: "arrow.clockwise")
             }
+            .labelStyle(.titleAndIcon)
+            .disabled(!daemon.canScanNow)
             .help("Scan every image again with every installed scanner")
         }
         .frame(minWidth: 820, minHeight: 440)
-        .task {
-            // Refreshes while open, so queued scans show their results as they finish.
-            while !Task.isCancelled {
-                let fresh = await Self.fetch()
-                if fresh != results { results = fresh }
-                if selection == nil { selection = results.first?.id }
-                try? await Task.sleep(for: .seconds(results.contains(where: \.Scanning) ? 2 : 10))
-            }
+        // Refetches whenever the daemon's change counter moves: a scan starting or
+        // finishing, an image pulled or removed, from here, the menu, or the docker CLI.
+        .task(id: daemon.status?.Changes) {
+            let fresh = await Self.fetch()
+            if fresh != results { results = fresh }
+            if selection == nil || !results.contains(where: { $0.id == selection }) { selection = results.first?.id }
         }
     }
 

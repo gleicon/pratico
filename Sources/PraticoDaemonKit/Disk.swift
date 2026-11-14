@@ -36,8 +36,10 @@ struct DiskService {
 
     /// Per image: its blobs' size, the part other images share, and its containers.
     /// An image whose blobs cannot be listed falls back to its layer sizes.
+    /// `unusedReclaimable`: what removing unused images frees; `idleReclaimable`: the same
+    /// once stopped containers are removed too, which frees the images only they held.
     /// `referenced`: bytes of the blobs some image holds; the rest of the store is garbage.
-    func imageUse() -> (items: [ImageUse], unusedReclaimable: Int64, referenced: Int64) {
+    func imageUse() -> (items: [ImageUse], unusedReclaimable: Int64, idleReclaimable: Int64, referenced: Int64) {
         let all = images.localImages()
         var holders: [String: Set<String>] = [:]
         for img in all { for b in img.record["blobs"]?.strings ?? [] { holders[b, default: []].insert(img.id) } }
@@ -57,12 +59,15 @@ struct DiskService {
             let shared = mine.filter { (holders[$0]?.count ?? 0) > 1 }.reduce(0) { $0 + size($1) }
             items.append(ImageUse(image: img, size: total, shared: shared, containers: counts[img.id] ?? 0))
         }
-        // What removing every unused image frees: blobs no image in use holds.
-        let unused = Set(all.map(\.id)).subtracting(used)
-        let freed = holders.filter { $0.value.isSubset(of: unused) }.keys.reduce(Int64(0)) { $0 + size($1) }
-        let fallback = items.filter { $0.image.record["blobs"] == nil && unused.contains($0.image.id) }.reduce(Int64(0)) { $0 + $1.size }
+        // What removing these images frees: blobs no other image holds.
+        func reclaimable(_ removed: Set<String>) -> Int64 {
+            let freed = holders.filter { $0.value.isSubset(of: removed) }.keys.reduce(Int64(0)) { $0 + size($1) }
+            return freed + items.filter { $0.image.record["blobs"] == nil && removed.contains($0.image.id) }.reduce(Int64(0)) { $0 + $1.size }
+        }
+        let ids = Set(all.map(\.id))
+        let usedByRunning = Set(containers.all().filter(\.state.running).map(\.imageId))
         let referenced = holders.keys.reduce(Int64(0)) { $0 + size($1) }
-        return (items, freed + fallback, referenced)
+        return (items, reclaimable(ids.subtracting(used)), reclaimable(ids.subtracting(usedByRunning)), referenced)
     }
 
     func containerUse() -> [ContainerUse] {
@@ -75,7 +80,7 @@ struct DiskService {
 
     /// `GET /pratico/disk`: the menubar's Disk menu.
     func usage() -> JSON {
-        let (imgs, unused, referenced) = imageUse()
+        let (imgs, unused, idle, referenced) = imageUse()
         let ctrs = containerUse()
         let content = Self.allocated(store.appending(path: "content").path)
         let runtime = Self.allocated(store.appending(path: "initfs.ext4").path)
@@ -91,7 +96,7 @@ struct DiskService {
             "Total": .int(content + runtime + scans + sum(ctrs) + logs),
             "Free": .int(free),
             "Images": [
-                "Size": .int(content), "Unused": .int(unused),
+                "Size": .int(content), "Unused": .int(unused), "UnusedAfterContainers": .int(idle),
                 "Unreferenced": .int(max(content - referenced, 0)),
                 "Items": .array(imgs.map { u in
                     ["Id": .string(u.image.id), "Tags": JSON(u.image.tags), "Size": .int(u.size), "Shared": .int(u.shared),
@@ -102,7 +107,7 @@ struct DiskService {
                 "Running": .int(sum(running)), "Stopped": .int(sum(stopped)),
                 "Logs": .int(logs),
                 "Items": .array(ctrs.map { c in
-                    ["Id": .string(c.record.id), "Name": .string(c.record.name), "Image": .string(c.record.image),
+                    ["Id": .string(c.record.id), "Name": .string(c.record.name), "Image": .string(c.record.image), "ImageID": .string(c.record.imageId),
                      "Running": .bool(c.record.state.running), "Size": .int(c.rootfs), "Logs": .int(c.logs)]
                 }),
             ],
@@ -115,7 +120,7 @@ struct DiskService {
     /// Docker's `GET /system/df`: the legacy lists, from which older CLIs derive
     /// "reclaimable", and the per-type summaries newer ones read.
     func df() -> JSON {
-        let (imgs, unusedReclaimable, referenced) = imageUse()
+        let (imgs, unusedReclaimable, _, referenced) = imageUse()
         let sizes = Dictionary(uniqueKeysWithValues: imgs.map { ($0.image.id, $0.size) })
         let imageItems: [JSON] = imgs.map { u in
             var s = ImageService.summary(u.image)

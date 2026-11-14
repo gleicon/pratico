@@ -376,6 +376,7 @@ docker run -d --name d-keep alpine sleep 300 >/dev/null
 docker run --name d-gone alpine sh -c 'head -c 5000000 /dev/urandom >/big' >/dev/null
 disk=$(curl -s --unix-socket "$SOCK" http://d/pratico/disk)
 check "disk use counts a stopped container's written data" python3 -c "import json,sys; d=json.loads(sys.argv[1]); assert d['Containers']['Stopped'] >= 5000000 and d['Images']['Unused'] > 0 and d['Total'] > 0" "$disk"
+check "removing stopped containers frees at least what unused images free" python3 -c "import json,sys; i=json.loads(sys.argv[1])['Images']; assert i['UnusedAfterContainers'] >= i['Unused'] > 0" "$disk"
 check "disk use slices add up to the total" python3 -c "import json,sys; d=json.loads(sys.argv[1]); i,c=d['Images'],d['Containers']; assert d['Total'] == i['Size']+c['Running']+c['Stopped']+c['Logs']+d['Runtime']+d['Scans']" "$disk"
 df=$(docker system df --format '{{.Type}} {{.TotalCount}} {{.Active}}' 2>&1)
 expect_has "docker system df counts images" "$df" "Images $(docker images -q | sort -u | wc -l | tr -d ' ') 1"
