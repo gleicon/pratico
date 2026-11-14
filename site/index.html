@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pratico — Docker for Apple silicon Macs, one VM per container</title>
+<meta name="description" content="A Docker daemon for Apple silicon Macs with a menubar app. Every container runs in its own lightweight VM on Virtualization.framework. docker and docker compose keep working.">
+<meta property="og:title" content="pratico">
+<meta property="og:description" content="Docker for Apple silicon Macs. One lightweight VM per container, a menubar app, no Docker Desktop.">
+<meta property="og:type" content="website">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b2540'/%3E%3Cpath d='M8 21h16l-2.5 4h-11z' fill='%23ff7a1a'/%3E%3Crect x='10' y='9' width='5' height='10' rx='1' fill='%23e9eef5'/%3E%3Crect x='17' y='12' width='5' height='7' rx='1' fill='%23e9eef5'/%3E%3C/svg%3E">
+<style>
+  :root {
+    /* Type scale: 1.25 (major third) from a 17px body. */
+    --step--1: 0.85rem;
+    --step-0: 1.0625rem;
+    --step-1: 1.33rem;
+    --step-2: 1.66rem;
+    --step-3: 2.07rem;
+    --step-4: 2.6rem;
+    --step-5: clamp(2.6rem, 6vw, 3.9rem);
+    /* Spacing: 4px base, doubling past 16. */
+    --space-1: 0.25rem; --space-2: 0.5rem; --space-3: 0.75rem; --space-4: 1rem;
+    --space-5: 1.5rem; --space-6: 2rem; --space-7: 3rem; --space-8: 4.5rem; --space-9: 7rem;
+    --measure: 66ch;
+    --wide: 72rem;
+    --radius: 10px;
+
+    --font-display: ui-serif, "New York", "Iowan Old Style", Georgia, serif;
+    --font-body: system-ui, -apple-system, "SF Pro Text", "Helvetica Neue", sans-serif;
+    --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+
+    /* Harbour at dusk: deep navy, a pilot's signal orange, sea-glass for quiet accents. */
+    --ink: #0b2540;
+    --ink-soft: #3b5168;
+    --paper: #f6f4ef;
+    --paper-raised: #ffffff;
+    --rule: #d9d4c7;
+    --signal: #c2410c;        /* orange that holds 4.5:1 on paper for text */
+    --signal-bright: #ff7a1a; /* for marks, not text */
+    --glass: #2f6f73;
+    --code-bg: #0b2540;
+    --code-ink: #e9eef5;
+    --focus: #1d4ed8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ink: #e9eef5;
+      --ink-soft: #a9b7c6;
+      --paper: #08182a;
+      --paper-raised: #0f2236;
+      --rule: #213750;
+      --signal: #ff9a4d;
+      --signal-bright: #ff7a1a;
+      --glass: #7cc4c1;
+      --code-bg: #04101d;
+      --code-ink: #e9eef5;
+      --focus: #93c5fd;
+    }
+  }
+
+  *, *::before, *::after { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font: var(--step-0)/1.6 var(--font-body);
+    text-rendering: optimizeLegibility;
+  }
+  a { color: inherit; text-decoration-color: var(--signal-bright); text-decoration-thickness: 2px; text-underline-offset: 3px; }
+  a:hover { color: var(--signal); }
+  :focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; border-radius: 4px; }
+  .skip { position: absolute; left: var(--space-4); top: -4rem; background: var(--paper-raised); padding: var(--space-2) var(--space-4); z-index: 10; }
+  .skip:focus { top: var(--space-4); }
+
+  .wrap { max-width: var(--wide); margin: 0 auto; padding: 0 var(--space-5); }
+  .prose { max-width: var(--measure); }
+
+  /* Header */
+  header.site { border-bottom: 1px solid var(--rule); }
+  header.site .wrap { display: flex; align-items: center; justify-content: space-between; gap: var(--space-5); padding-block: var(--space-4); flex-wrap: wrap; }
+  .mark { display: inline-flex; align-items: center; gap: var(--space-3); font: 600 var(--step-1)/1 var(--font-display); text-decoration: none; letter-spacing: -0.01em; }
+  .mark svg { width: 28px; height: 28px; flex: none; }
+  nav ul { list-style: none; display: flex; flex-wrap: wrap; gap: var(--space-5); margin: 0; padding: 0; font-size: var(--step--1); letter-spacing: 0.02em; }
+  nav a { text-decoration: none; color: var(--ink-soft); }
+  nav a:hover { color: var(--ink); }
+
+  /* Hero */
+  .hero { padding: var(--space-8) 0 var(--space-7); }
+  .hero .wrap { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); gap: var(--space-7); align-items: center; }
+  .eyebrow { font: 600 var(--step--1)/1.2 var(--font-body); letter-spacing: 0.14em; text-transform: uppercase; color: var(--glass); margin: 0 0 var(--space-4); }
+  h1 { font: 500 var(--step-5)/1.04 var(--font-display); letter-spacing: -0.025em; margin: 0 0 var(--space-5); }
+  h1 em { font-style: italic; color: var(--signal); }
+  .lede { font-size: var(--step-1); line-height: 1.5; color: var(--ink-soft); margin: 0 0 var(--space-6); max-width: 34ch; }
+  .actions { display: flex; flex-wrap: wrap; gap: var(--space-3); }
+  .btn { display: inline-flex; align-items: center; gap: var(--space-2); padding: var(--space-3) var(--space-5); border-radius: 999px; font-weight: 600; text-decoration: none; border: 2px solid var(--ink); }
+  .btn.primary { background: var(--ink); color: var(--paper); }
+  .btn.primary:hover { background: var(--signal); border-color: var(--signal); color: #fff; }
+  .btn.quiet:hover { color: var(--signal); border-color: var(--signal); }
+  .note { font-size: var(--step--1); color: var(--ink-soft); margin-top: var(--space-4); }
+
+  /* Code */
+  pre, code { font-family: var(--font-mono); }
+  code { font-size: 0.92em; background: color-mix(in srgb, var(--ink) 8%, transparent); padding: 0.1em 0.35em; border-radius: 5px; }
+  .term { position: relative; background: var(--code-bg); color: var(--code-ink); border-radius: var(--radius); padding: var(--space-5); overflow-x: auto; font-size: var(--step--1); line-height: 1.7; box-shadow: 0 1px 0 var(--rule), 0 24px 48px -28px rgb(0 0 0 / 0.45); }
+  .term code { background: none; padding: 0; font-size: inherit; color: inherit; }
+  .term .p { color: var(--signal-bright); user-select: none; }
+  .term .o { color: #9fb3c8; }
+  .copy { position: absolute; top: var(--space-3); right: var(--space-3); font: 600 var(--step--1)/1 var(--font-body); background: transparent; color: var(--code-ink); border: 1px solid #3b5168; border-radius: 6px; padding: var(--space-2) var(--space-3); cursor: pointer; }
+  .copy:hover { border-color: var(--signal-bright); }
+
+  /* Sections */
+  section { padding: var(--space-8) 0; border-top: 1px solid var(--rule); }
+  h2 { font: 500 var(--step-4)/1.1 var(--font-display); letter-spacing: -0.02em; margin: 0 0 var(--space-4); }
+  h3 { font: 600 var(--step-1)/1.3 var(--font-body); margin: 0 0 var(--space-2); letter-spacing: -0.01em; }
+  .section-lede { font-size: var(--step-1); color: var(--ink-soft); margin: 0 0 var(--space-7); max-width: 46ch; line-height: 1.5; }
+  p { margin: 0 0 var(--space-4); }
+
+  .steps { counter-reset: step; list-style: none; padding: 0; margin: 0; display: grid; gap: var(--space-6); }
+  .steps > li { counter-increment: step; display: grid; grid-template-columns: 3rem minmax(0, 1fr); gap: var(--space-4); }
+  .steps > li::before { content: counter(step); font: 500 var(--step-3)/1 var(--font-display); color: var(--signal); }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr)); gap: var(--space-6) var(--space-7); }
+  .feature { border-top: 3px solid var(--ink); padding-top: var(--space-4); }
+  .feature p { color: var(--ink-soft); margin: 0; }
+
+  .split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--space-7); align-items: start; }
+
+  .flow { list-style: none; margin: 0; padding: 0; border-left: 2px solid var(--rule); }
+  .flow li { position: relative; padding: 0 0 var(--space-5) var(--space-5); }
+  .flow li::before { content: ""; position: absolute; left: -7px; top: 0.55em; width: 12px; height: 12px; border-radius: 50%; background: var(--paper); border: 2px solid var(--glass); }
+  .flow strong { display: block; font-weight: 600; }
+  .flow span { color: var(--ink-soft); }
+
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: var(--space-5); margin: 0; }
+  .stat { background: var(--paper-raised); border: 1px solid var(--rule); border-radius: var(--radius); padding: var(--space-5); }
+  .stat dt { font-size: var(--step--1); color: var(--ink-soft); margin-bottom: var(--space-2); }
+  .stat dd { margin: 0; font: 500 var(--step-3)/1.1 var(--font-display); }
+  .stat dd small { font: 400 var(--step--1)/1.3 var(--font-body); color: var(--ink-soft); display: block; margin-top: var(--space-2); }
+
+  .plain { padding-left: 1.2em; margin: 0; }
+  .plain li { margin-bottom: var(--space-2); }
+  .plain li::marker { color: var(--signal); }
+
+  footer { border-top: 1px solid var(--rule); padding: var(--space-6) 0 var(--space-7); font-size: var(--step--1); color: var(--ink-soft); }
+  footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--space-4); }
+  footer p { margin: 0; }
+
+  @media (max-width: 52rem) {
+    .hero .wrap, .split { grid-template-columns: 1fr; }
+    .hero { padding-top: var(--space-7); }
+    section { padding: var(--space-7) 0; }
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    a, .btn, .copy { transition: color 0.15s ease, background-color 0.15s ease, border-color 0.15s ease; }
+  }
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="site">
+  <div class="wrap">
+    <a class="mark" href="./" aria-label="pratico home">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7" fill="#0b2540"/><path d="M8 21h16l-2.5 4h-11z" fill="#ff7a1a"/><rect x="10" y="9" width="5" height="10" rx="1" fill="#e9eef5"/><rect x="17" y="12" width="5" height="7" rx="1" fill="#e9eef5"/></svg>
+      pratico
+    </a>
+    <nav aria-label="Sections">
+      <ul>
+        <li><a href="#install">Install</a></li>
+        <li><a href="#features">Features</a></li>
+        <li><a href="#how">How it runs</a></li>
+        <li><a href="#scanning">Scanning</a></li>
+        <li><a href="https://github.com/gleicon/pratico">GitHub</a></li>
+      </ul>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+  <div class="hero">
+    <div class="wrap">
+      <div>
+        <p class="eyebrow">Docker for Apple silicon Macs</p>
+        <h1>Every container in <em>its own</em> small VM.</h1>
+        <p class="lede">A Docker daemon and a menubar app. No shared Linux VM, no Docker Desktop. <code>docker</code>, Compose, and anything that speaks the Docker socket keep working.</p>
+        <div class="actions">
+          <a class="btn primary" href="https://github.com/gleicon/pratico/releases/latest">Download for macOS</a>
+          <a class="btn quiet" href="https://github.com/gleicon/pratico">Source on GitHub</a>
+        </div>
+        <p class="note">Apple silicon, macOS 26. Free and open source (MIT).</p>
+      </div>
+      <div class="term" role="region" aria-label="Example terminal session">
+<pre><code><span class="p">$</span> docker context use pratico
+<span class="p">$</span> docker run --rm alpine echo hello
+<span class="o">hello</span>
+<span class="p">$</span> docker run -d -p 127.0.0.1:8080:80 nginx
+<span class="p">$</span> docker compose up -d
+<span class="p">$</span> docker system df
+<span class="o">TYPE            TOTAL   ACTIVE   SIZE</span>
+<span class="o">Images          3       2        91.2MB</span>
+<span class="o">Containers      4       3        1.1MB</span>
+<span class="o">Local Volumes   2       2        48.0MB</span></code></pre>
+      </div>
+    </div>
+  </div>
+
+  <section id="install" aria-labelledby="install-h">
+    <div class="wrap">
+      <h2 id="install-h">Three steps</h2>
+      <p class="section-lede">Nothing else to install: the app carries its own Linux kernel and init.</p>
+      <ol class="steps">
+        <li>
+          <div class="prose">
+            <h3>Download and open it once</h3>
+            <p>Get <code>Pratico-&lt;version&gt;.dmg</code> from <a href="https://github.com/gleicon/pratico/releases">Releases</a> and drag <strong>Pratico.app</strong> to Applications. The build is not yet notarized, so approve it once: <strong>Open Anyway</strong> in System Settings › Privacy &amp; Security, or:</p>
+            <div class="term"><button class="copy" type="button" hidden>Copy</button><pre><code>xattr -dr com.apple.quarantine /Applications/Pratico.app</code></pre></div>
+          </div>
+        </li>
+        <li>
+          <div class="prose">
+            <h3>Start the daemon from the menubar</h3>
+            <p>It serves the Docker API on <code>~/.pratico/docker.sock</code> and starts at login. No password, no root: pratico never asks for one.</p>
+          </div>
+        </li>
+        <li>
+          <div class="prose">
+            <h3>Point docker at it, once</h3>
+            <p>A Docker context, which the CLI and Compose remember:</p>
+            <div class="term"><button class="copy" type="button" hidden>Copy</button><pre><code>docker context create pratico --docker host=unix://$HOME/.pratico/docker.sock
+docker context use pratico</code></pre></div>
+            <p class="note">Or <code>export DOCKER_HOST=unix://$HOME/.pratico/docker.sock</code> in <code>~/.zshrc</code>. Tools that only know <code>/var/run/docker.sock</code>: the menubar explains the one <code>sudo ln</code> it takes.</p>
+          </div>
+        </li>
+      </ol>
+    </div>
+  </section>
+
+  <section id="features" aria-labelledby="features-h">
+    <div class="wrap">
+      <h2 id="features-h">What you get</h2>
+      <p class="section-lede">The Docker you know, with the Mac's own tools around it, and nothing downgraded to fit a checklist.</p>
+      <div class="grid">
+        <article class="feature">
+          <h3>One VM per container</h3>
+          <p>Each container boots its own lightweight VM on Apple's Virtualization.framework. A crash, a kernel panic, or a breakout stays in its box.</p>
+        </article>
+        <article class="feature">
+          <h3>The Docker API, for real</h3>
+          <p><code>run</code>, <code>exec -it</code>, <code>logs -f</code>, <code>cp</code>, <code>stats</code>, healthchecks, networks with DNS, published ports, volumes, <code>save</code> and <code>load</code>, events. Docker CLI 25 to current.</p>
+        </article>
+        <article class="feature">
+          <h3>A menubar that tells you things</h3>
+          <p>Running containers with CPU, memory, health, and ports; open, stop, restart. Alerts when a port is reachable from other machines or a container turns unhealthy.</p>
+        </article>
+        <article class="feature">
+          <h3>Disk use you can trust</h3>
+          <p>Allocated blocks, shared layers counted once, slices that add up. Cleanup lists exactly what it removes and asks first; running work is never touched.</p>
+        </article>
+        <article class="feature">
+          <h3>Images scanned for you</h3>
+          <p>osv-scanner, grype, trivy, your own scanners, and CISA's exploited list. Malware or exploited CVEs stop and block the image; the menubar says why.</p>
+        </article>
+        <article class="feature">
+          <h3>Snapshots in plain JSON</h3>
+          <p>Every container, network, and volume definition in one <code>.tar.gz</code> you can read with an editor. Restore shows what each container could reach before it asks.</p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section id="how" aria-labelledby="how-h">
+    <div class="wrap split">
+      <div class="prose">
+        <h2 id="how-h">How it runs</h2>
+        <p>Pratico is built on <a href="https://github.com/apple/containerization">apple/containerization</a>. The daemon speaks the Docker Engine API on a Unix socket; each container gets a small VM with its own kernel, started by a per-container shim so containers and their exit codes survive a daemon restart.</p>
+        <p>Networking is pratico-net, a user-space switch in Swift: isolated networks, DNS by name, the internet and the Mac (<code>host.docker.internal</code>), published ports, and connect or disconnect of running containers, cut at the switch.</p>
+        <p class="note">Design notes: <a href="https://github.com/gleicon/pratico/blob/main/docs/design/runtime.md">docs/design/runtime.md</a>.</p>
+      </div>
+      <ol class="flow" aria-label="From docker command to process">
+        <li><strong>docker CLI, Compose, Testcontainers</strong><span>talk to <code>~/.pratico/docker.sock</code></span></li>
+        <li><strong>pratico-daemon</strong><span>the Docker API, images, networks, volumes, scans</span></li>
+        <li><strong>pratico-shim, one per container</strong><span>owns its VM on Virtualization.framework</span></li>
+        <li><strong>Linux VM</strong><span>a guest agent for exec, cp, stats, healthchecks</span></li>
+        <li><strong>your process</strong><span>started once its ports are bound and it reads as running</span></li>
+      </ol>
+    </div>
+  </section>
+
+  <section aria-labelledby="numbers-h">
+    <div class="wrap">
+      <h2 id="numbers-h">Measured, not promised</h2>
+      <p class="section-lede"><code>make bench</code> runs these against the real Docker CLI on every change that could move them.</p>
+      <dl class="stats">
+        <div class="stat"><dt><code>docker run --rm alpine true</code></dt><dd>436 ms<small>P99 over 50 runs, VM boot included</small></dd></div>
+        <div class="stat"><dt>Control calls, 100 containers</dt><dd>≤ 2 ms<small>P99 of <code>/_ping</code>, <code>/version</code>, <code>ps -a</code></small></dd></div>
+        <div class="stat"><dt>Daemon memory, 32 running</dt><dd>48 MiB<small>64 clients hammering it, zero errors</small></dd></div>
+        <div class="stat"><dt>Mac memory per idle container</dt><dd>≈ 200 MB<small>its VM and shim; <code>--memory</code> is a ceiling, not a reservation</small></dd></div>
+        <div class="stat"><dt>Leaks over 100 restarts</dt><dd>0<small>open files unchanged, daemon and containers</small></dd></div>
+      </dl>
+    </div>
+  </section>
+
+  <section id="scanning" aria-labelledby="scan-h">
+    <div class="wrap split">
+      <div class="prose">
+        <h2 id="scan-h">Scanning, your way</h2>
+        <p>Every pulled image is scanned in the background and again daily with every scanner pratico finds. The menubar's shield only changes for what matters: critical or high findings, malware, or a CVE that is being exploited.</p>
+        <p>Bring your own scanner: any executable run as <code>&lt;path&gt; &lt;image.tar&gt;</code> that prints findings as JSON joins the others, and Scan Results shows which scanner found what.</p>
+      </div>
+      <div class="term" role="region" aria-label="Custom scanner output format">
+<pre><code>{"findings": [
+  {"id": "CVE-2024-0001", "package": "openssl",
+   "version": "3.0.1", "severity": "high",
+   "fixed": ["3.0.2"], "cvss": 7.5},
+  {"id": "MAL-ACME-7", "package": "evil-pkg",
+   "version": "6.6.6", "severity": "critical",
+   "malicious": true}
+]}</code></pre>
+      </div>
+    </div>
+  </section>
+
+  <section aria-labelledby="next-h">
+    <div class="wrap prose">
+      <h2 id="next-h">Not yet</h2>
+      <p>Pratico is young and says so. Still to come: <code>docker build</code>, egress inspection, and a notarized build. The full checklist, with what is done, is on <a href="https://github.com/gleicon/pratico/blob/main/.project/roadmap.md">GitHub</a>.</p>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <p><em>Prático</em> (Portuguese): the harbour pilot who guides ships through narrow channels.</p>
+    <p>MIT licensed · <a href="https://github.com/gleicon/pratico">github.com/gleicon/pratico</a></p>
+  </div>
+</footer>
+
+<script>
+  // Copy buttons appear only where the Clipboard API works; the commands stay selectable.
+  if (navigator.clipboard) {
+    for (const button of document.querySelectorAll(".copy")) {
+      button.hidden = false;
+      button.addEventListener("click", async () => {
+        const text = button.parentElement.querySelector("code").innerText;
+        try {
+          await navigator.clipboard.writeText(text);
+          button.textContent = "Copied";
+        } catch {
+          button.textContent = "Select and copy";
+        }
+        setTimeout(() => { button.textContent = "Copy"; }, 1600);
+      });
+    }
+  }
+</script>
+</body>
+</html>
