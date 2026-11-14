@@ -504,7 +504,8 @@ private let grypeSample = Data(#"""
     try Tar.create(archive, base: root.appending(path: "src"), names: ["d"])
 
     let dst = root.appending(path: "dst")
-    try Tar.extract(archive, to: dst)
+    try fm.createDirectory(at: dst, withIntermediateDirectories: true)
+    try Tar.extract(archive, to: dst, links: true, maxBytes: 1 << 20)
     #expect(try String(contentsOf: dst.appending(path: "d/f"), encoding: .utf8) == "hi")
     #expect(try fm.destinationOfSymbolicLink(atPath: dst.appending(path: "d/out").path) == "/etc/hosts")
 
@@ -519,7 +520,8 @@ private let grypeSample = Data(#"""
     e.size = 1
     try w.writeEntry(entry: e, data: Data("x".utf8))
     try w.finishEncoding()
-    #expect(throws: APIError.self) { try Tar.extract(evil, to: root.appending(path: "dst2")) }
+    try fm.createDirectory(at: root.appending(path: "dst2"), withIntermediateDirectories: true)
+    #expect(throws: APIError.self) { try Tar.extract(evil, to: root.appending(path: "dst2"), links: true, maxBytes: 1 << 20) }
     #expect(!fm.fileExists(atPath: root.appending(path: "escaped").path))
 }
 
@@ -535,4 +537,63 @@ private let grypeSample = Data(#"""
     #expect(c[0].malicious && c[0].severity == "critical" && c[0].sources == ["mine"])
     #expect(c[1].severity == "unknown")
     #expect(ScanParsers.custom(Data("not json".utf8), source: "mine") == nil)
+}
+
+/// An archive of `members`: (path, kind) with kind "d", "f:<content>", or "l:<target>".
+private func tarFile(_ members: [(String, String)]) throws -> URL {
+    let file = FileManager.default.temporaryDirectory.appending(path: "pratico-tar-\(UUID().uuidString).tar")
+    let w = try ArchiveWriter(configuration: ArchiveWriterConfiguration(format: .pax, filter: .none))
+    try w.open(file: file)
+    for (path, kind) in members {
+        let e = WriteEntry()
+        e.path = path
+        // The file type first: libarchive's set-type resets the mode.
+        if kind == "d" {
+            e.fileType = .directory
+            e.permissions = 0o755
+            try w.writeEntry(entry: e, data: nil)
+        } else if kind.hasPrefix("l:") {
+            e.fileType = .symbolicLink
+            e.permissions = 0o777
+            e.symlinkTarget = String(kind.dropFirst(2))
+            try w.writeEntry(entry: e, data: nil)
+        } else {
+            let data = Data(kind.dropFirst(2).utf8)
+            e.fileType = .regular
+            e.permissions = 0o644
+            e.size = Int64(data.count)
+            try w.writeEntry(entry: e, data: data)
+        }
+    }
+    try w.finishEncoding()
+    return file
+}
+
+private func emptyDir() throws -> URL {
+    let dir = FileManager.default.temporaryDirectory.appending(path: "pratico-x-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    return dir
+}
+
+@Test func extractNeverWritesThroughALink() throws {
+    let outside = try emptyDir()
+    let dir = try emptyDir()
+    let tar = try tarFile([("a", "l:\(outside.path)"), ("a/pwned", "f:x")])
+    #expect(throws: APIError.self) { try Tar.extract(tar, to: dir, links: true, maxBytes: 1 << 20) }
+    #expect(!FileManager.default.fileExists(atPath: outside.appending(path: "pwned").path))
+}
+
+@Test func extractRefusesEscapesDuplicatesAndLinksWhereNoneBelong() throws {
+    #expect(throws: APIError.self) { try Tar.extract(try tarFile([("../x", "f:x")]), to: try emptyDir(), links: true, maxBytes: 1 << 20) }
+    #expect(throws: APIError.self) { try Tar.extract(try tarFile([("x", "f:1"), ("x", "f:2")]), to: try emptyDir(), links: true, maxBytes: 1 << 20) }
+    #expect(throws: APIError.self) { try Tar.extract(try tarFile([("index.json", "l:/etc/hosts")]), to: try emptyDir(), links: false, maxBytes: 1 << 20) }
+    #expect(throws: APIError.self) { try Tar.extract(try tarFile([("big", "f:" + String(repeating: "0", count: 4096))]), to: try emptyDir(), links: true, maxBytes: 1024) }
+}
+
+@Test func extractKeepsTreesAndLinks() throws {
+    let dir = try emptyDir()
+    try Tar.extract(try tarFile([("d", "d"), ("d/f", "f:hello"), ("d/l", "l:f"), ("./g/h", "f:deep")]), to: dir, links: true, maxBytes: 1 << 20)
+    #expect(try String(contentsOf: dir.appending(path: "d/f"), encoding: .utf8) == "hello")
+    #expect(try FileManager.default.destinationOfSymbolicLink(atPath: dir.appending(path: "d/l").path) == "f")
+    #expect(try String(contentsOf: dir.appending(path: "g/h"), encoding: .utf8) == "deep")
 }

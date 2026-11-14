@@ -283,7 +283,8 @@ public final class ImageService: Sendable {
         let dir = fm.temporaryDirectory.appending(path: "pratico-load-\(UUID().uuidString)")
         try fm.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: dir) }
-        try Tar.extract(archive, to: dir)
+        // No symlinks in an image archive: index.json and blobs are read and written here.
+        try Tar.extract(archive, to: dir, links: false, maxBytes: Tar.unpackLimit(at: dir))
         let indexFile = dir.appending(path: "index.json")
         guard var index = (try? Data(contentsOf: indexFile)).flatMap(JSON.parse), var entries = index["manifests"]?.array else {
             throw APIError(400, "pratico: this archive has no OCI index.json (Docker before 25 wrote archives without one); save it again with Docker 25 or later, or pull the image")
@@ -297,7 +298,7 @@ public final class ImageService: Sendable {
             entries[i]["annotations"] = .object(notes)
         }
         index["manifests"] = .array(entries)
-        try index.encoded().write(to: indexFile)
+        try index.encoded().write(to: indexFile, options: .atomic)
         let refs: [String]
         do { refs = try backend.loadLayout(from: dir) } catch {
             throw APIError(400, "cannot load the archive: \(error)")

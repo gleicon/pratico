@@ -110,7 +110,7 @@ final class ArchiveService: @unchecked Sendable {
         defer { try? FileManager.default.removeItem(at: scratch) }
         let work = scratch.appending(path: "tree")
         try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
-        do { try Tar.extract(archive, to: work) } catch let e as APIError { throw e } catch {
+        do { try Tar.extract(archive, to: work, links: true, maxBytes: Tar.unpackLimit(at: work)) } catch let e as APIError { throw e } catch {
             throw APIError(400, "invalid tar archive")
         }
         let q = { (s: String) in s.addingPercentEncoding(withAllowedCharacters: .alphanumerics.union(CharacterSet(charactersIn: "/._-"))) ?? s }
