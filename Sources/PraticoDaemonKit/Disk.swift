@@ -7,6 +7,7 @@ struct DiskService {
     let home: URL
     let images: ImageService
     let containers: ContainerService
+    let volumes: VolumeService
 
     private var store: URL { home.appending(path: "store", directoryHint: .isDirectory) }
     private var blobs: URL { store.appending(path: "content/blobs/sha256", directoryHint: .isDirectory) }
@@ -32,6 +33,20 @@ struct DiskService {
         var record: ContainerRecord
         var rootfs: Int64
         var logs: Int64
+    }
+
+    struct VolumeUse {
+        var record: VolumeRecord
+        var size: Int64
+        var containers: Int
+    }
+
+    /// One measurement of everything, which the slices and every cleanup plan read.
+    struct Measure {
+        var images: ImageUsage
+        var containers: [ContainerUse]
+        var volumes: [VolumeUse]
+        var unreferenced: Int64
     }
 
     /// Every image's size, and the blobs behind them, so any set of images can be priced.
@@ -73,20 +88,29 @@ struct DiskService {
     /// What a Disk menu cleanup removes and frees. Containers go first, so with them the
     /// images only stopped containers used go too; images follow `ImageService.unused`,
     /// the rule `prune -a` applies, so the confirmation lists exactly what is deleted.
-    func plan(containers withContainers: Bool, images withImages: Bool, _ use: ImageUsage, _ ctrs: [ContainerUse], unreferenced: Int64) -> JSON {
-        let gone = withContainers ? ctrs.filter { !$0.record.state.running } : []
-        let kept = withContainers ? Set(ctrs.filter(\.record.state.running).map(\.record.imageId)) : images.inUse()
+    func plan(_ m: Measure, containers withContainers: Bool = false, images withImages: Bool = false, volumes withVolumes: Bool = false) -> JSON {
+        let gone = withContainers ? m.containers.filter { !$0.record.state.running } : []
+        let kept = withContainers ? Set(m.containers.filter(\.record.state.running).map(\.record.imageId)) : images.inUse()
         let removed = withImages ? unusedIds(keeping: kept) : []
-        let leftover = withImages ? unreferenced : 0
-        let bytes = gone.reduce(0) { $0 + $1.rootfs + $1.logs } + use.reclaimable(removed) + leftover
+        let leftover = withImages ? m.unreferenced : 0
+        // Volumes as `docker volume prune -a`: every one no container mounts, named or not.
+        let prunable = withVolumes ? Set(volumes.prunable(filters: ["all": ["true"]]).map(\.name)) : []
+        let vols = m.volumes.filter { prunable.contains($0.record.name) }
+        let bytes = gone.reduce(0) { $0 + $1.rootfs + $1.logs } + m.images.reclaimable(removed) + leftover + vols.reduce(0) { $0 + $1.size }
         return [
             "Containers": .array(gone.map { ["Id": .string($0.record.id), "Name": .string($0.record.name), "Size": .int($0.rootfs + $0.logs)] }),
-            "Images": .array(use.items.filter { removed.contains($0.image.id) }.map {
+            "Images": .array(m.images.items.filter { removed.contains($0.image.id) }.map {
                 ["Id": .string($0.image.id), "Name": .string($0.image.displayName), "Size": .int($0.size)]
             }),
+            "Volumes": .array(vols.map { ["Id": .string($0.record.name), "Name": .string($0.record.name), "Size": .int($0.size)] }),
             "Leftover": .int(leftover),
             "Bytes": .int(bytes),
         ]
+    }
+
+    func volumeUse() -> [VolumeUse] {
+        let users = volumes.usedBy()
+        return volumes.all().map { VolumeUse(record: $0, size: volumes.size($0.name), containers: users[$0.name]?.count ?? 0) }
     }
 
     func containerUse() -> [ContainerUse] {
@@ -101,8 +125,11 @@ struct DiskService {
     func usage() -> JSON {
         let use = imageUse()
         let ctrs = containerUse()
+        let vols = volumeUse()
         let content = Self.allocated(store.appending(path: "content").path)
         let unreferenced = max(content - use.referenced, 0)
+        let m = Measure(images: use, containers: ctrs, volumes: vols, unreferenced: unreferenced)
+        let volumeBytes = vols.reduce(Int64(0)) { $0 + $1.size }
         let runtime = Self.allocated(store.appending(path: "initfs.ext4").path)
         let scans = Self.allocated(home.appending(path: "scan-db").path) + Self.allocated(home.appending(path: "scans").path)
         let running = ctrs.filter(\.record.state.running)
@@ -113,7 +140,7 @@ struct DiskService {
             .volumeAvailableCapacityForImportantUsage ?? 0
         return [
             // Every part below is its own slice: they add up to Total.
-            "Total": .int(content + runtime + scans + sum(ctrs) + logs),
+            "Total": .int(content + runtime + scans + sum(ctrs) + logs + volumeBytes),
             "Free": .int(free),
             "Images": [
                 "Size": .int(content), "Unused": .int(use.reclaimable(unusedIds(keeping: images.inUse()))),
@@ -131,13 +158,22 @@ struct DiskService {
                      "Running": .bool(c.record.state.running), "Size": .int(c.rootfs), "Logs": .int(c.logs)]
                 }),
             ],
+            "Volumes": [
+                "Size": .int(volumeBytes),
+                "Unused": .int(vols.filter { $0.containers == 0 }.reduce(0) { $0 + $1.size }),
+                "Items": .array(vols.map { v in
+                    ["Name": .string(v.record.name), "Size": .int(v.size), "Containers": .int(Int64(v.containers)),
+                     "Anonymous": .bool(v.record.anonymous)]
+                }),
+            ],
             // The guest's init filesystem, shared by every container.
             "Runtime": .int(runtime),
             "Scans": .int(scans),
             "Cleanup": [
-                "Containers": plan(containers: true, images: false, use, ctrs, unreferenced: unreferenced),
-                "Images": plan(containers: false, images: true, use, ctrs, unreferenced: unreferenced),
-                "Both": plan(containers: true, images: true, use, ctrs, unreferenced: unreferenced),
+                "Containers": plan(m, containers: true),
+                "Images": plan(m, images: true),
+                "Both": plan(m, containers: true, images: true),
+                "Volumes": plan(m, volumes: true),
             ],
         ]
     }
@@ -165,6 +201,9 @@ struct DiskService {
         let unusedImages = imgs.filter { $0.containers == 0 }
         let stopped = ctrs.filter { !$0.record.state.running }
         let empty: JSON = ["ActiveCount": 0, "TotalCount": 0, "TotalSize": 0, "Reclaimable": 0, "Items": []]
+        let vols = volumeUse()
+        let volumeItems: [JSON] = vols.map { volumes.json($0.record, usage: ($0.size, $0.containers)) }
+        let unusedVolumes = vols.filter { $0.containers == 0 }
         return [
             "LayersSize": .int(Self.allocated(store.appending(path: "content").path)),
             "ImageUsage": [
@@ -176,11 +215,15 @@ struct DiskService {
                 "TotalSize": .int(ctrs.reduce(0) { $0 + $1.rootfs }), "Reclaimable": .int(stopped.reduce(0) { $0 + $1.rootfs }),
                 "Items": .array(containerItems),
             ],
-            "VolumeUsage": empty,
+            "VolumeUsage": [
+                "ActiveCount": .int(Int64(vols.count - unusedVolumes.count)), "TotalCount": .int(Int64(vols.count)),
+                "TotalSize": .int(vols.reduce(0) { $0 + $1.size }), "Reclaimable": .int(unusedVolumes.reduce(0) { $0 + $1.size }),
+                "Items": .array(volumeItems),
+            ],
             "BuildCacheUsage": empty,
             "Images": .array(imageItems),
             "Containers": .array(containerItems),
-            "Volumes": [],
+            "Volumes": .array(volumeItems),
             "BuildCache": [],
         ]
     }

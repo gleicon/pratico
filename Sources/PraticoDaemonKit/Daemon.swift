@@ -20,6 +20,7 @@ public final class Daemon: @unchecked Sendable {
     let stats: StatsService
     let events = EventBus()
     let networks: NetworkService
+    let volumes: VolumeService
     let scans: ScanService
     let disk: DiskService
     /// Registry trust and kept logins.
@@ -49,15 +50,17 @@ public final class Daemon: @unchecked Sendable {
         let backend = EmbeddedImageBackend(store: store, content: content, registries: registries)
         self.images = ImageService(backend: backend, events: events)
         self.networks = NetworkService(root: home.appending(path: "networks", directoryHint: .isDirectory), events: events)
+        self.volumes = VolumeService(root: home.appending(path: "volumes", directoryHint: .isDirectory), events: events)
         self.containers = ContainerService(
             images: images, root: home.appending(path: "containers", directoryHint: .isDirectory),
-            networks: networks, config: config, events: events, embedded: embedded, dockerSocket: self.socketPath)
+            networks: networks, volumes: volumes, config: config, events: events, embedded: embedded, dockerSocket: self.socketPath)
         backend.usedBy = { [containers] in Set(containers.all().map(\.imageId)) }
+        volumes.usedBy = { [containers] in containers.volumeUsers() }
         self.execs = ExecService(containers: containers)
         self.archives = ArchiveService(containers: containers)
         self.stats = StatsService(containers: containers)
         self.scans = ScanService(home: home, images: images, containers: containers, config: config, events: events)
-        self.disk = DiskService(home: home, images: images, containers: containers)
+        self.disk = DiskService(home: home, images: images, containers: containers, volumes: volumes)
         containers.startGate = { [scans] rec in scans.blockReason(imageId: rec.imageId) }
     }
 
@@ -168,9 +171,6 @@ public final class Daemon: @unchecked Sendable {
         case ("POST", "build") where parts.count == 2 && parts[1] == "prune":
             conn.json(200, ["CachesDeleted": [], "SpaceReclaimed": 0])
             return .keepAlive
-        case ("POST", "volumes") where parts.count == 2 && parts[1] == "prune":
-            conn.json(200, ["VolumesDeleted": [], "SpaceReclaimed": 0])
-            return .keepAlive
         case ("GET", "info") where parts.count == 1:
             conn.json(200, info())
             return .keepAlive
@@ -182,8 +182,8 @@ public final class Daemon: @unchecked Sendable {
             if let d = try routeImages(m, Array(parts.dropFirst()), req, conn) { return d }
         case (_, "networks"):
             if let d = try routeNetworks(m, Array(parts.dropFirst()), req, conn) { return d }
-        case ("GET", "volumes") where parts.count == 2:
-            throw APIError(404, "get \(parts[1]): no such volume")
+        case (_, "volumes"):
+            if let d = try routeVolumes(m, Array(parts.dropFirst()), req, conn) { return d }
         case ("GET", "plugins") where parts.count == 3 && parts[2] == "json":
             // No plugin API; a 404 lets `docker inspect` move on to other object types.
             throw APIError(404, "plugin \"\(parts[1])\" not found")
@@ -204,7 +204,7 @@ public final class Daemon: @unchecked Sendable {
             let rec = try containers.create(name: req.query["name"], body: body)
             conn.json(201, ["Id": .string(rec.id), "Warnings": []])
         case ("DELETE", 1, _):
-            try containers.remove(p[0], force: req.flag("force"))
+            try containers.remove(p[0], force: req.flag("force"), volumes: req.flag("v"))
             conn.respond(204)
         case ("GET", 2, "json"):
             conn.json(200, containers.inspect(try containers.resolve(p[0])))
@@ -250,6 +250,27 @@ public final class Daemon: @unchecked Sendable {
         case ("POST", 2, "resize"):
             try containers.resize(p[0], height: req.query["h"].flatMap(Int.init) ?? 0, width: req.query["w"].flatMap(Int.init) ?? 0)
             conn.respond(200, body: Data())
+        default:
+            return nil
+        }
+        return .keepAlive
+    }
+
+    private func routeVolumes(_ m: String, _ p: [String], _ req: Request, _ conn: Connection) throws -> Disposition? {
+        let filters = ContainerService.parseFilters(req.query["filters"])
+        switch (m, p.count, p.first) {
+        case ("GET", 0, _):
+            conn.json(200, volumes.list(filters: filters))
+        case ("POST", 1, "create"):
+            guard let body = JSON.parse(req.body) else { throw APIError(400, "invalid JSON body") }
+            conn.json(201, volumes.json(try volumes.create(body)))
+        case ("POST", 1, "prune"):
+            conn.json(200, volumes.prune(filters: filters))
+        case ("GET", 1, let name?):
+            conn.json(200, volumes.json(try volumes.resolve(name)))
+        case ("DELETE", 1, let name?):
+            try volumes.remove(name, force: req.flag("force"))
+            conn.respond(204)
         default:
             return nil
         }

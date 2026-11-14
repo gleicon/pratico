@@ -48,20 +48,32 @@ func normalizesImageRefs(input: String, expected: String) {
 
 @Test func bindsAreReadWriteUnlessRo() throws {
     let host: JSON = ["Binds": ["/tmp/a:/a", "/tmp/b:/b:ro,z", "/tmp/c:/c:rw"]]
-    let m = try ContainerService.mounts(host)
+    let m = try ContainerService.mounts(host, volumeData: volumeData)
     #expect(m.map(\.readOnly) == [false, true, false])
     #expect(m.allSatisfy { $0.createSource })
 }
 
-@Test func namedVolumesAndBadSpecsRejected() {
-    #expect(throws: APIError.self) { try ContainerService.mounts(["Binds": ["data:/data"]]) }
-    #expect(throws: APIError.self) { try ContainerService.mounts(["Binds": ["/tmp:relative"]]) }
-    #expect(throws: APIError.self) { try ContainerService.mounts(["Mounts": [["Type": "volume", "Target": "/v"]]]) }
+private func volumeData(_ name: String) -> String { "/vols/\(name)/_data" }
+
+@Test func namedVolumesMountTheirDataDirectory() throws {
+    let m = try ContainerService.mounts(
+        ["Binds": ["data:/data:ro"], "Mounts": [["Type": "volume", "Source": "cache", "Target": "/c"]]], volumeData: volumeData)
+    #expect(m.map(\.source) == ["/vols/data/_data", "/vols/cache/_data"])
+    #expect(m.map(\.volume) == ["data", "cache"])
+    #expect(m.map(\.readOnly) == [true, false])
+    #expect(!m.contains { $0.createSource })
+}
+
+@Test func badMountSpecsRejected() {
+    #expect(throws: APIError.self) { try ContainerService.mounts(["Binds": ["/tmp:relative"]], volumeData: volumeData) }
+    #expect(throws: APIError.self) { try ContainerService.mounts(["Binds": ["bad/name:/d"]], volumeData: volumeData) }
+    #expect(throws: APIError.self) { try ContainerService.mounts(["Mounts": [["Type": "volume", "Target": "/v"]]], volumeData: volumeData) }
+    #expect(throws: APIError.self) { try ContainerService.mounts(["Mounts": [["Type": "tmpfs", "Target": "/t"]]], volumeData: volumeData) }
 }
 
 @Test func mountFlagNeedsExistingSource() {
     let missing: JSON = ["Mounts": [["Type": "bind", "Source": "/nonexistent-pratico", "Target": "/x"]]]
-    #expect(throws: APIError.self) { try ContainerService.mounts(missing) }
+    #expect(throws: APIError.self) { try ContainerService.mounts(missing, volumeData: volumeData) }
 }
 
 @Test func logStoreStaysUnderCapAndKeepsNewest() throws {
@@ -442,7 +454,7 @@ private let grypeSample = Data(#"""
     let mounts = try ContainerService.mounts([
         "Binds": ["/var/run/docker.sock:/var/run/docker.sock", .string("\(dir.path):/data:ro")],
         "Mounts": [["Type": "bind", "Source": "/run/docker.sock", "Target": "/d.sock"]],
-    ])
+    ], volumeData: volumeData)
     #expect(mounts.map(\.createSource) == [false, true, false])
     let shim = mounts.map { ContainerService.shimMount($0, dockerSocket: api) }
     #expect(shim == [

@@ -303,29 +303,25 @@ final class DaemonController {
     }
 
     /// Lists what goes and what it frees, asks, then uses Docker's own prune endpoints.
-    func cleanUp(containers: Bool, images: Bool) {
-        guard let c = disk?.Cleanup.plan(containers: containers, images: images), !c.isEmpty else { return }
+    func cleanUp(_ kind: CleanupKind) {
+        guard let c = disk?.Cleanup[kind], !c.isEmpty else { return }
         var lines = c.Containers.map { "container \($0.Name)  \(bytes($0.Size))" }  // with its logs
         lines += c.Images.map { "image \($0.Name)  \(bytes($0.Size))" }
+        lines += c.Volumes.map { "volume \($0.Name)  \(bytes($0.Size))" }
         if c.Leftover > 0 { lines.append("leftover image data  \(bytes(c.Leftover))") }
         let alert = NSAlert()
         alert.messageText = "Remove \(lines.count) item\(lines.count == 1 ? "" : "s"), freeing \(bytes(c.Bytes))?"
         alert.informativeText = lines.prefix(15).joined(separator: "\n") + (lines.count > 15 ? "\n… and \(lines.count - 15) more" : "")
-            + "\n\nRunning containers and the images they use are kept."
+            + "\n\n" + kind.note
         alert.addButton(withTitle: "Remove")
         alert.addButton(withTitle: "Cancel")
         alert.alertStyle = .warning
+        alert.buttons.first?.hasDestructiveAction = true
         NSApp.activate()
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         Task {
-            let freed = await Task.detached { () -> Int64 in
-                var freed: Int64 = 0
-                // Containers first, so the images they held become unused.
-                if containers { freed += Self.reclaimed(DaemonProbe.request("POST", "/containers/prune", timeout: 300)) }
-                if images {
-                    freed += Self.reclaimed(DaemonProbe.request("POST", "/images/prune?filters=%7B%22dangling%22%3A%5B%22false%22%5D%7D", timeout: 300))
-                }
-                return freed
+            let freed = await Task.detached {
+                kind.prunes.reduce(Int64(0)) { $0 + Self.reclaimed(DaemonProbe.request("POST", $1, timeout: 300)) }
             }.value
             await refreshAfterChange()
             let done = NSAlert()

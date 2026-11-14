@@ -58,6 +58,7 @@ public final class ContainerService: @unchecked Sendable {
     let config: Config
     let events: EventBus
     let networks: NetworkService
+    let volumes: VolumeService
     /// The runtime: kernel, init, and the shim that owns each VM (docs/design/runtime.md).
     let embedded: EmbeddedContainers
     /// The daemon's own API socket: what `-v /var/run/docker.sock:...` gives a container.
@@ -78,8 +79,9 @@ public final class ContainerService: @unchecked Sendable {
     /// container's endpoints and NIC slots.
     let membership = NSLock()
 
-    init(images: ImageService, root: URL, networks: NetworkService, config: Config = Config(),
+    init(images: ImageService, root: URL, networks: NetworkService, volumes: VolumeService, config: Config = Config(),
          events: EventBus = EventBus(), embedded: EmbeddedContainers, dockerSocket: String = "") {
+        self.volumes = volumes
         self.dockerSocket = dockerSocket
         self.embedded = embedded
         self.events = events
@@ -193,7 +195,10 @@ public final class ContainerService: @unchecked Sendable {
         let attach = try networks.attachments(host: body["HostConfig"] ?? [:], networking: body["NetworkingConfig"])
         var hostFields = body["HostConfig"]?.object ?? [:]
         if ["", "default"].contains(hostFields["NetworkMode"]?.string ?? "") { hostFields["NetworkMode"] = "bridge" }
-        let host = JSON.object(hostFields)
+        // Paths that want an anonymous volume: the image's `VOLUME`s and a bare `-v /path`,
+        // which the Docker CLI sends as `Volumes`, not in `Binds`.
+        let wanted = [imageConfig["Volumes"], body["Volumes"]].flatMap { $0?.object.map { Array($0.keys) } ?? [] }
+        let host = try namingVolumes(.object(hostFields), imageVolumes: Array(Set(wanted)))
 
         // Docker merges image defaults into the container config; an explicit
         // Entrypoint resets the image Cmd.
@@ -221,7 +226,7 @@ public final class ContainerService: @unchecked Sendable {
         config["Healthcheck"] = body["Healthcheck"] ?? imageConfig["Healthcheck"]
 
         // `-v` creates a missing host directory, as Docker does.
-        for m in try Self.mounts(host) where m.createSource {
+        for m in try mounts(host) where m.createSource {
             try? FileManager.default.createDirectory(atPath: m.source, withIntermediateDirectories: true)
         }
         try FileManager.default.createDirectory(at: dir(id), withIntermediateDirectories: true)
@@ -254,64 +259,6 @@ public final class ContainerService: @unchecked Sendable {
         return "pratico_\(randomHexID().prefix(8))"
     }
 
-    struct Mount: Equatable {
-        var source: String
-        var destination: String
-        var readOnly: Bool
-        /// `-v` creates a missing host path, as Docker does; `--mount` does not.
-        var createSource: Bool
-    }
-
-    /// Where Docker clients and tools expect the daemon. A container that mounts it gets
-    /// pratico's API whether or not the Mac has the link (Docker Desktop does the same).
-    static let dockerSocketPaths: Set<String> = ["/var/run/docker.sock", "/private/var/run/docker.sock", "/run/docker.sock"]
-
-    /// The guest side of a mount: a host Unix socket is relayed over vsock, since virtiofs
-    /// shares files but not the connections behind a socket.
-    static func shimMount(_ m: Mount, dockerSocket: String) -> ShimMount {
-        let source = dockerSocketPaths.contains(m.source) ? dockerSocket : m.source
-        var st = stat()
-        let socket = stat(source, &st) == 0 && st.st_mode & S_IFMT == S_IFSOCK
-        return ShimMount(source: source, destination: m.destination, readOnly: m.readOnly, socket: socket)
-    }
-
-    /// Docker `Binds` (`src:dst[:opts]`) and bind-type `Mounts` (SPEC FR-14). Named
-    /// volumes and other mount types are rejected until volumes exist.
-    static func mounts(_ host: JSON) throws -> [Mount] {
-        var out: [Mount] = []
-        for bind in host["Binds"]?.strings ?? [] {
-            let parts = bind.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
-            guard parts.count == 2 || parts.count == 3, !parts[0].isEmpty, parts[1].hasPrefix("/") else {
-                throw APIError(400, "invalid volume specification: '\(bind)'")
-            }
-            guard parts[0].hasPrefix("/") else {
-                throw APIError(400, "named volumes are not supported yet: '\(bind)'")
-            }
-            let opts = parts.count == 3 ? parts[2].split(separator: ",").map(String.init) : []
-            out.append(Mount(source: parts[0], destination: parts[1], readOnly: opts.contains("ro"),
-                             createSource: !dockerSocketPaths.contains(parts[0])))
-        }
-        for m in host["Mounts"]?.array ?? [] {
-            let type = m["Type"]?.string ?? "volume"
-            guard type == "bind" else { throw APIError(400, "mount type \(type) is not supported yet") }
-            guard let src = m["Source"]?.string, src.hasPrefix("/"), let dst = m["Target"]?.string, dst.hasPrefix("/") else {
-                throw APIError(400, "invalid mount config: bind mounts need an absolute source and target")
-            }
-            guard dockerSocketPaths.contains(src) || FileManager.default.fileExists(atPath: src) else {
-                throw APIError(400, "invalid mount config for type \"bind\": bind source path does not exist: \(src)")
-            }
-            out.append(Mount(source: src, destination: dst, readOnly: m["ReadOnly"]?.bool ?? false, createSource: false))
-        }
-        return out
-    }
-
-    func mountsJSON(_ rec: ContainerRecord) -> JSON {
-        .array(((try? Self.mounts(rec.hostConfig)) ?? []).map { m in
-            ["Type": "bind", "Source": .string(m.source), "Destination": .string(m.destination),
-             "Mode": .string(m.readOnly ? "ro" : ""), "RW": .bool(!m.readOnly), "Propagation": "rprivate"]
-        })
-    }
-
     // MARK: Lifecycle
 
     func start(_ ref: String) throws -> Bool {
@@ -326,7 +273,7 @@ public final class ContainerService: @unchecked Sendable {
     /// through the log file the shim writes.
     private func launch(_ rec: ContainerRecord) throws {
         let files = ShimFiles(dir: dir(rec.id))
-        let mounts = try Self.mounts(rec.hostConfig).map { Self.shimMount($0, dockerSocket: dockerSocket) }
+        let mounts = try mounts(rec.hostConfig).map { Self.shimMount($0, dockerSocket: dockerSocket) }
         let mem = rec.hostConfig["Memory"]?.int.flatMap { $0 > 0 ? Int($0 / 1_048_576) : nil } ?? config.defaultMemoryMiB
         let cpus = rec.hostConfig["NanoCpus"]?.int.flatMap { $0 > 0 ? Int(($0 + 999_999_999) / 1_000_000_000) : nil } ?? config.defaultCPUs
         let rootfs: String = files.dir.appending(path: "rootfs.ext4").path
@@ -461,7 +408,10 @@ public final class ContainerService: @unchecked Sendable {
         }
         if let rec = try? resolve(id) { emit(rec, "die", ["exitCode": "\(code)"]) }
         for c in conns { c.close() }
-        if auto { removeNow(id, code: code) }
+        if auto, let rec = try? resolve(id) {
+            removeNow(id, code: code)
+            removeAnonymousVolumes(rec)  // `--rm` takes its anonymous volumes, as in Docker
+        }
         for w in waiters { w(code) }
     }
 
@@ -548,7 +498,7 @@ public final class ContainerService: @unchecked Sendable {
         emit(rec, "restart")
     }
 
-    func remove(_ ref: String, force: Bool) throws {
+    func remove(_ ref: String, force: Bool, volumes removeVolumes: Bool = false) throws {
         let rec = try resolve(ref)
         if rec.state.running {
             guard force else {
@@ -560,6 +510,7 @@ public final class ContainerService: @unchecked Sendable {
             awaitExit(rec.id, seconds: 10)
         }
         removeNow(rec.id, code: (try? resolve(rec.id))?.state.exitCode ?? 0)
+        if removeVolumes { removeAnonymousVolumes(rec) }
     }
 
     private func removeNow(_ id: String, code: Int) {

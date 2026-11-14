@@ -61,7 +61,7 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 
 - [x] Default `bridge` network present at start (AC-26); networking works without restricted entitlements such as `com.apple.vm.networking` (no paid Apple Developer account)
 - [x] Custom networks: create/connect/disconnect/rm, containers resolve each other by name (AC-27)
-- [ ] Named volumes shared between containers; create/ls/rm (AC-28)
+- [x] Named volumes shared between containers; create/ls/rm/prune, anonymous volumes for `-v /path` and image `VOLUME`, `rm -v`, Disk menu slice and cleanup (AC-28, D-32)
 
 ## Login
 
@@ -114,7 +114,9 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 - [ ] `docker save` of several images at once
 - [ ] A per-install CA for egress interception (with the egress task)
 - [ ] `docker build` (BuildKit or an equivalent)
-- [ ] Hot-connect and uplink e2e checks are flaky when the Mac is under load; make them wait on state, not time
+- [ ] Hot-connect, uplink, and socket-mount e2e checks are flaky when the Mac is under load; make them wait on state, not time
+- [ ] Volume copy-up: a new empty volume gets the image's files at its mount path, as in Docker
+- [ ] `tmpfs` mounts (`--tmpfs`, `--mount type=tmpfs`)
 - [ ] The menubar's new windows (Settings, Scan Results) need a visual pass on a real screen
 
 ## Backlog

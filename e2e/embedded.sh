@@ -377,7 +377,7 @@ docker run --name d-gone alpine sh -c 'head -c 5000000 /dev/urandom >/big' >/dev
 disk=$(curl -s --unix-socket "$SOCK" http://d/pratico/disk)
 check "disk use counts a stopped container's written data" python3 -c "import json,sys; d=json.loads(sys.argv[1]); assert d['Containers']['Stopped'] >= 5000000 and d['Images']['Unused'] > 0 and d['Total'] > 0" "$disk"
 check "cleanup plans: both covers the stopped container and every unused image" python3 -c "import json,sys; c=json.loads(sys.argv[1])['Cleanup']; n=lambda p,k: {i['Name'] for i in p[k]}; assert 'd-gone' in n(c['Both'],'Containers') and n(c['Images'],'Images') <= n(c['Both'],'Images') and 'busybox:latest' in n(c['Images'],'Images') and c['Both']['Bytes'] >= c['Images']['Bytes'] > 0 and c['Containers']['Bytes'] >= 5000000" "$disk"
-check "disk use slices add up to the total" python3 -c "import json,sys; d=json.loads(sys.argv[1]); i,c=d['Images'],d['Containers']; assert d['Total'] == i['Size']+c['Running']+c['Stopped']+c['Logs']+d['Runtime']+d['Scans']" "$disk"
+check "disk use slices add up to the total" python3 -c "import json,sys; d=json.loads(sys.argv[1]); i,c=d['Images'],d['Containers']; assert d['Total'] == i['Size']+c['Running']+c['Stopped']+c['Logs']+d['Volumes']['Size']+d['Runtime']+d['Scans']" "$disk"
 df=$(docker system df --format '{{.Type}} {{.TotalCount}} {{.Active}}' 2>&1)
 expect_has "docker system df counts images" "$df" "Images $(docker images -q | sort -u | wc -l | tr -d ' ') 1"
 expect_has "docker system df counts containers" "$df" "Containers 2 1"
@@ -389,6 +389,50 @@ check "image prune -a removes unused images" sh -c "! docker image inspect busyb
 check "image prune -a keeps images in use" docker image inspect alpine
 check "docker system prune finishes" docker system prune -f
 docker rm -f d-keep >/dev/null
+
+# AC-28, FR-25: named and anonymous volumes.
+since=$(date +%s)
+check "AC-28 docker volume create" docker volume create e2e-v
+docker run --rm -v e2e-v:/v alpine sh -c 'echo shared >/v/f' >/dev/null
+expect_eq "AC-28 a second container reads what the first wrote" "$(docker run --rm --mount type=volume,src=e2e-v,dst=/w alpine cat /w/f 2>&1)" "shared"
+expect_has "docker volume ls lists it" "$(docker volume ls --format '{{.Name}} {{.Driver}}')" "e2e-v local"
+expect_eq "inspect gives its host directory" "$(docker volume inspect e2e-v --format '{{.Mountpoint}}')" "$HOME_DIR/volumes/e2e-v/_data"
+docker run -d --name e2e-vuser -v e2e-v:/v alpine sleep 300 >/dev/null
+expect_eq "inspect reports a volume mount" "$(docker inspect e2e-vuser --format '{{range .Mounts}}{{.Type}} {{.Name}} {{.Destination}}{{end}}')" "volume e2e-v /v"
+expect_has "a volume in use is not removed" "$(docker volume rm e2e-v 2>&1)" "volume is in use"
+docker rm -f e2e-vuser >/dev/null
+check "run -v name:/path creates a missing volume" docker run --rm -v e2e-auto:/a alpine true
+check "and keeps it after --rm (named volumes stay)" docker volume inspect e2e-auto
+before=$(docker volume ls -q | wc -l | tr -d ' ')
+docker run --rm -v /scratch alpine sh -c 'echo x >/scratch/x' >/dev/null
+expect_eq "--rm removes the anonymous volume it made" "$(docker volume ls -q | wc -l | tr -d ' ')" "$before"
+docker run --name e2e-anon -v /scratch alpine true >/dev/null
+anon=$(docker inspect e2e-anon --format '{{range .Mounts}}{{.Name}}{{end}}')
+expect_eq "a bare -v /path gets an anonymous volume" "$(docker volume inspect "$anon" --format '{{index .Labels "com.docker.volume.anonymous"}}|{{.Name}}')" "|$anon"
+docker rm -v e2e-anon >/dev/null
+check "docker rm -v removes it" sh -c "! docker volume inspect $anon >/dev/null 2>&1"
+docker pull -q registry:2 >/dev/null 2>&1
+docker create --name e2e-imgvol registry:2 >/dev/null
+expect_has "an image VOLUME gets an anonymous volume" "$(docker inspect e2e-imgvol --format '{{range .Mounts}}{{.Type}} {{.Destination}} {{end}}')" "volume /var/lib/registry"
+docker rm -v e2e-imgvol >/dev/null
+expect_has "system df counts volumes" "$(docker system df --format '{{.Type}} {{.TotalCount}}')" "Local Volumes $(docker volume ls -q | wc -l | tr -d ' ')"
+disk=$(curl -s --unix-socket "$SOCK" http://d/pratico/disk)
+check "the volume cleanup plan lists unused volumes, named too" python3 -c "import json,sys; p=json.loads(sys.argv[1])['Cleanup']['Volumes']; n={v['Name'] for v in p['Volumes']}; assert {'e2e-v','e2e-auto'} <= n and not p['Images'] and not p['Containers']" "$disk"
+docker volume create --label keep=1 e2e-keep >/dev/null
+docker run --name e2e-anon2 -v /scratch alpine true >/dev/null
+anon=$(docker inspect e2e-anon2 --format '{{range .Mounts}}{{.Name}}{{end}}')
+docker rm e2e-anon2 >/dev/null
+docker volume prune -f >/dev/null
+check "volume prune removes unused anonymous volumes" sh -c "! docker volume inspect $anon >/dev/null 2>&1"
+check "and keeps named ones" docker volume inspect e2e-keep
+docker volume prune -a -f --filter label=keep=1 >/dev/null
+check "volume prune -a with a label removes the named volumes it matches" sh -c "! docker volume inspect e2e-keep >/dev/null 2>&1"
+check "AC-28 docker volume rm succeeds once no container uses it" docker volume rm e2e-v e2e-auto
+vev=$(docker events --since "$since" --until "$(($(date +%s) + 1))" --filter type=volume --format '{{.Action}} {{.Actor.ID}}' | tr '\n' ' ')
+expect_has "volume create is an event" "$vev" "create e2e-v "
+expect_has "volume destroy is an event" "$vev" "destroy e2e-v "
+expect_has "a bad volume name is refused" "$(docker volume create 'bad/name' 2>&1)" "invalid characters"
+docker rmi registry:2 >/dev/null 2>&1
 
 check "rmi removes the image" docker rmi alpine
 
