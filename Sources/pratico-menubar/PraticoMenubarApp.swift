@@ -56,6 +56,7 @@ struct StatusMenu: View {
         if daemon.isRunning {
             ContainersMenu(daemon: daemon)
             AlertsMenu(daemon: daemon)
+            SnapshotMenu(daemon: daemon)
             Divider()
             DiskMenu(daemon: daemon)
             ScannersMenu(daemon: daemon)

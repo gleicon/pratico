@@ -46,6 +46,13 @@ public enum JSON: Sendable, Equatable, Codable {
         return (try? e.encode(self)) ?? Data("null".utf8)
     }
 
+    /// Indented, keys sorted: for files people read (snapshots).
+    public func encodedPretty() -> Data {
+        let enc = JSONEncoder()
+        enc.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        return (try? enc.encode(self)) ?? Data("null".utf8)
+    }
+
     public subscript(key: String) -> JSON? {
         get {
             if case .object(let o) = self { return o[key] }

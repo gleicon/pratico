@@ -82,10 +82,11 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 
 ## Snapshot
 
-- [ ] Snapshot from the menubar writes a plain `.tar.gz` of JSON with `manifest.json` (AC-38.a)
-- [ ] Restore recreates containers, networks, volumes (AC-38)
-- [ ] Restore skips and reports existing names (AC-39)
-- [ ] Restore refuses an unsupported `format_version` and changes nothing (AC-39.a)
+- [x] Snapshot from the menubar writes a plain `.tar.gz` of JSON with `manifest.json` (AC-38.a)
+- [x] Restore recreates containers, networks, volumes, and starts the containers that ran (AC-38)
+- [x] Restore skips and reports existing names (AC-39); the menubar shows a dry run first
+- [x] Restore refuses an unsupported `format_version` and changes nothing (AC-39.a)
+- [ ] Optional volume data in snapshots (definitions only today)
 
 ## Bounds, performance, compatibility
 

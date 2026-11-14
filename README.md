@@ -53,6 +53,12 @@ image, a port published beyond loopback (`-p 8080:80` binds `0.0.0.0`, as in Doc
 `-p 127.0.0.1:8080:80` to keep it on the Mac), a container turning unhealthy. Each also
 becomes a notification once.
 
+**Snapshot** writes every container, network, and volume definition to a `.tar.gz` of
+plain JSON in `~/.pratico/snapshots` (read it with `tar -xzf` and any editor). **Restore
+from Snapshot…** shows what it would create and what it would skip, asks, then recreates
+them and starts the containers that were running. Images come back from their registries;
+volume data is not part of a snapshot.
+
 Volumes work as in Docker: `docker volume create`, `-v name:/path`, `--mount
 type=volume`, anonymous volumes for `-v /path` and an image's `VOLUME`, `docker rm -v`.
 They live in `~/.pratico/volumes/<name>/_data`, plain folders you can open in Finder.

@@ -5,8 +5,8 @@ import Foundation
 enum Tar {
     /// Writes `names`, relative to `base`, with everything under them. Symlinks are stored as
     /// links, never followed, wherever they point, as Docker's `cp` does; files are streamed.
-    static func create(_ file: URL, base: URL, names: [String]) throws {
-        let writer = try ArchiveWriter(configuration: ArchiveWriterConfiguration(format: .pax, filter: .none))
+    static func create(_ file: URL, base: URL, names: [String], gzip: Bool = false) throws {
+        let writer = try ArchiveWriter(configuration: ArchiveWriterConfiguration(format: .pax, filter: gzip ? .gzip : .none))
         try writer.open(file: file)
         for name in names { try add(writer.makeTransactionWriter(), base: base, path: name) }
         try writer.finishEncoding()

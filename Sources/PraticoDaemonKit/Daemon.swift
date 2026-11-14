@@ -22,6 +22,7 @@ public final class Daemon: @unchecked Sendable {
     let networks: NetworkService
     let volumes: VolumeService
     let alerts: AlertLog
+    let snapshots: SnapshotService
     let containerAlerts: ContainerAlerts
     let scans: ScanService
     let disk: DiskService
@@ -64,6 +65,8 @@ public final class Daemon: @unchecked Sendable {
         self.stats = StatsService(containers: containers)
         self.scans = ScanService(home: home, images: images, containers: containers, config: config, events: events, alerts: alerts)
         self.containerAlerts = ContainerAlerts(alerts: alerts, containers: containers, events: events)
+        self.snapshots = SnapshotService(dir: home.appending(path: "snapshots", directoryHint: .isDirectory),
+                                         containers: containers, networks: networks, volumes: volumes)
         self.disk = DiskService(home: home, images: images, containers: containers, volumes: volumes)
         containers.startGate = { [scans] rec in scans.blockReason(imageId: rec.imageId) }
     }
@@ -142,6 +145,16 @@ public final class Daemon: @unchecked Sendable {
             conn.json(200, ["Version": .string(Pratico.version), "Pid": .int(Int64(getpid())), "StartedAt": .string(startedAt.ISO8601Format()), "Socket": .string(socketPath),
                             "Containers": .int(Int64(c.total)), "ContainersRunning": .int(Int64(c.running)),
                             "Changes": .int(Int64(events.generation))])
+            return .keepAlive
+        case ("POST", "pratico") where parts.count == 2 && parts[1] == "snapshots":
+            conn.json(201, try snapshots.take())
+            return .keepAlive
+        case ("GET", "pratico") where parts.count == 2 && parts[1] == "snapshots":
+            conn.json(200, snapshots.list())
+            return .keepAlive
+        case ("POST", "pratico") where parts.count == 3 && parts[1] == "snapshots" && parts[2] == "restore":
+            guard let path = req.query["path"], !path.isEmpty else { throw APIError(400, "path is required") }
+            conn.json(200, try snapshots.restore(path: path, dryRun: req.flag("dry_run")))
             return .keepAlive
         case ("DELETE", "pratico") where parts.count == 2 && parts[1] == "alerts":
             alerts.clear()

@@ -434,6 +434,54 @@ expect_has "volume destroy is an event" "$vev" "destroy e2e-v "
 expect_has "a bad volume name is refused" "$(docker volume create 'bad/name' 2>&1)" "invalid characters"
 docker rmi registry:2 >/dev/null 2>&1
 
+# AC-38, AC-39: snapshot and restore.
+docker network create e2e-snet >/dev/null
+docker volume create --label k=v e2e-svol >/dev/null
+docker create --name e2e-s1 --network e2e-snet --network-alias api -v e2e-svol:/data -l role=api -p 127.0.0.1:18300:80 alpine sleep 300 >/dev/null
+docker run -d --name e2e-s2 -e MODE=x alpine sleep 300 >/dev/null
+snap=$(curl -s -X POST --unix-socket "$SOCK" http://d/pratico/snapshots | python3 -c 'import json,sys; print(json.load(sys.stdin)["Path"])')
+expect_has "FR-35 the snapshot lands in ~/.pratico/snapshots with its timestamped name" "$snap" "$HOME_DIR/snapshots/pratico-snapshot-"
+listing=$(python3 -I -c 'import sys,tarfile; print(" ".join(sorted(m.name for m in tarfile.open(sys.argv[1]) if m.isfile())))' "$snap")
+expect_has "AC-38.a it holds manifest.json" "$listing" "manifest.json"
+expect_has "AC-38.a and one JSON file per container, network, and volume" "$listing" "containers/e2e-s1.json containers/e2e-s2.json manifest.json networks/e2e-snet.json volumes/e2e-svol.json"
+docker rm -f e2e-s1 e2e-s2 >/dev/null
+docker network rm e2e-snet >/dev/null
+docker volume rm e2e-svol >/dev/null
+q=$(python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$snap")
+dry=$(curl -s -X POST --unix-socket "$SOCK" "http://d/pratico/snapshots/restore?path=$q&dry_run=1")
+check "a dry run lists what it would create and changes nothing" sh -c "echo '$dry' | grep -q e2e-s1 && ! docker inspect e2e-s1 >/dev/null 2>&1"
+report=$(curl -s -X POST --unix-socket "$SOCK" "http://d/pratico/snapshots/restore?path=$q")
+check "AC-38 restore reports everything created and the running one started" python3 -c "import json,sys; r=json.loads(sys.argv[1]); c=r['Created']; assert c['Containers']==['e2e-s1','e2e-s2'] or sorted(c['Containers'])==['e2e-s1','e2e-s2']; assert c['Networks']==['e2e-snet'] and c['Volumes']==['e2e-svol'] and r['Started']==['e2e-s2'] and not r['Failed']" "$report"
+expect_has "AC-38 docker ps -a shows them again" "$(docker ps -a --format '{{.Names}} {{.State}}' | sort | tr '\n' ' ')" "e2e-s1 created e2e-s2 running"
+expect_has "AC-38 docker network ls shows the network" "$(docker network ls --format '{{.Name}}')" "e2e-snet"
+expect_eq "AC-38 docker volume ls shows the volume, labels kept" "$(docker volume inspect e2e-svol --format '{{.Labels.k}}')" "v"
+expect_eq "restored settings: label, env, port, network alias, volume" \
+    "$(docker inspect e2e-s1 --format '{{index .Config.Labels "role"}} {{(index (index .HostConfig.PortBindings "80/tcp") 0).HostPort}} {{range .Mounts}}{{.Name}}{{end}} {{index .NetworkSettings.Networks "e2e-snet" | printf "%v" | len | lt 0}}') $(docker inspect e2e-s2 --format '{{range .Config.Env}}{{.}} {{end}}' | grep -o MODE=x)" \
+    "api 18300 e2e-svol true MODE=x"
+docker rm -f e2e-s2 >/dev/null
+docker run -d --name e2e-s2 alpine sleep 300 >/dev/null
+mine=$(docker inspect e2e-s2 --format '{{.Id}}')
+report=$(curl -s -X POST --unix-socket "$SOCK" "http://d/pratico/snapshots/restore?path=$q")
+check "AC-39 an existing name is skipped and named in the report" python3 -c "import json,sys; r=json.loads(sys.argv[1]); assert {'Kind':'container','Name':'e2e-s2','Reason':'a container with this name exists'} in r['Skipped'] and not r['Created']['Containers']" "$report"
+expect_eq "AC-39 and the existing one is unchanged" "$(docker inspect e2e-s2 --format '{{.Id}}')" "$mine"
+bad999="$HOME_DIR/bad-snapshot.tar.gz"
+python3 -I - "$bad999" <<'PY'
+import io, json, sys, tarfile
+with tarfile.open(sys.argv[1], "w:gz") as t:
+    for name, body in [("manifest.json", {"format_version": 999, "containers": ["e2e-new"]}),
+                       ("containers/e2e-new.json", {"Name": "e2e-new", "Create": {"Image": "alpine"}})]:
+        data = json.dumps(body).encode()
+        info = tarfile.TarInfo(name); info.size = len(data)
+        t.addfile(info, io.BytesIO(data))
+PY
+before=$(docker ps -aq | sort | tr '\n' ' ')
+q=$(python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$bad999")
+expect_has "AC-39.a an unsupported format_version is refused, naming it" "$(curl -s -X POST --unix-socket "$SOCK" "http://d/pratico/snapshots/restore?path=$q")" "format_version 999 is not supported"
+expect_eq "AC-39.a and docker ps -a is unchanged" "$(docker ps -aq | sort | tr '\n' ' ')" "$before"
+docker rm -f e2e-s1 e2e-s2 >/dev/null
+docker network rm e2e-snet >/dev/null
+docker volume rm e2e-svol >/dev/null
+
 check "rmi removes the image" docker rmi alpine
 
 echo "$pass passed, $fail failed"
