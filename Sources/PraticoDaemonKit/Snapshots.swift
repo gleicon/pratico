@@ -160,6 +160,12 @@ struct SnapshotService {
         ]
     }
 
+    /// A host path as it resolves (`..` and symlinks gone), so the review names the folder
+    /// that would really be shared.
+    static func shown(_ path: String) -> String {
+        path.hasPrefix("/") ? URL(filePath: path).standardizedFileURL.resolvingSymlinksInPath().path : path
+    }
+
     static let maxMember = 1 << 20
     static let maxEntries = 10_000
 
@@ -181,8 +187,11 @@ struct SnapshotService {
         let body = item["Create"] ?? [:]
         let host = body["HostConfig"] ?? [:]
         var risks: [String] = []
+        // The HostConfig as create would store it (bare `-v /path` named), parsed by the
+        // parser create uses; if that refuses it, every raw source is listed anyway.
+        let planned = ContainerService.planVolumes(host, imageVolumes: []).host
         do {
-            for m in try ContainerService.mounts(host, volumeData: volumes.dataPath) {
+            for m in try ContainerService.mounts(planned, volumeData: volumes.dataPath) {
                 let mode = m.readOnly ? "read-only" : "read and write"
                 if let vol = m.volume {
                     let state = (try? volumes.resolve(vol)) != nil ? "an existing volume on this Mac" : "a new, empty volume"
@@ -190,12 +199,15 @@ struct SnapshotService {
                 } else if ContainerService.dockerSocketPaths.contains(m.source) || m.source.hasSuffix(".sock") {
                     risks.append("controls Docker on this Mac: mounts the socket \(m.source) at \(m.destination)")
                 } else {
-                    risks.append("mounts the Mac folder \(m.source) at \(m.destination) (\(mode))")
+                    risks.append("mounts the Mac folder \(Self.shown(m.source)) at \(m.destination) (\(mode))")
                 }
             }
-        } catch let e as APIError {
-            risks.append("has mounts pratico refuses (\(e.message)); it will not be created")
-        } catch {}
+        } catch {
+            let message = (error as? APIError)?.message ?? "\(error)"
+            let raw = (planned["Binds"]?.strings ?? []).map { String($0.split(separator: ":").first ?? "") }
+                + (planned["Mounts"]?.array ?? []).compactMap { $0["Source"]?.string }
+            risks.append("has mounts pratico would refuse (\(message)); its mount sources: " + raw.map(Self.shown).joined(separator: ", "))
+        }
         let ports = (host["PortBindings"]?.object ?? [:]).flatMap { port, list in
             (list.array ?? []).map { b in "\(b["HostIp"]?.string.flatMap { $0.isEmpty ? nil : $0 } ?? "0.0.0.0"):\(b["HostPort"]?.string ?? "")→\(port)" }
         }

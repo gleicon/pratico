@@ -106,13 +106,21 @@ extension DaemonController {
     /// beyond it (Mac folders, published ports, privileges): a snapshot can come from
     /// anywhere. Starting them is a separate choice. nil is Cancel, else whether to start.
     private func confirmRestore(_ file: URL, _ plan: RestoreReport) -> Bool? {
-        // Every string here comes from the file: one line each, cut short, warnings first,
-        // so no text in a snapshot can pose as pratico's own words or push a warning away.
-        var text = Self.listed(plan.lines.filter { !$0.hasPrefix("container ") }.map { Self.oneLine($0, 160) })
-        for c in plan.Review {
+        // Every string here comes from the file: one line each, cut in the middle so a path
+        // keeps its end, warnings first and counted up top, containers with them listed
+        // first, so no text in a snapshot can pose as pratico's own words or hide a warning.
+        let risky = plan.Review.filter { !$0.Risks.isEmpty }
+        var text = risky.isEmpty ? "" : "⚠︎ \(risky.count) of \(plan.Review.count) containers reach beyond themselves (below).\n\n"
+        text += Self.listed(plan.lines.filter { !$0.hasPrefix("container ") }.map { Self.oneLine($0, 160) })
+        let shown = Array((risky + plan.Review.filter { $0.Risks.isEmpty }).prefix(Self.maxReviewed))
+        for c in shown {
             text += "\n"
-            text += c.Risks.map { "\n⚠︎ " + Self.oneLine($0, 200) }.joined()
+            text += c.Risks.map { "\n⚠︎ " + Self.oneLine($0, 240) }.joined()
             text += "\ncontainer " + Self.oneLine(c.Name, 64) + ": " + Self.oneLine(c.Image, 80) + " " + Self.oneLine(c.Command, 80)
+        }
+        if plan.Review.count > shown.count {
+            let hiddenRisky = risky.count - shown.filter { !$0.Risks.isEmpty }.count
+            text += "\n\n… and \(plan.Review.count - shown.count) more containers, \(hiddenRisky) of them reaching beyond themselves."
         }
         text += "\n\nExisting containers, networks, and volumes are left as they are. Only restore snapshots you trust."
         let running = plan.Review.filter(\.Running).count
@@ -145,10 +153,15 @@ extension DaemonController {
         return report
     }
 
-    /// Control characters (newlines included) become spaces; past `max`, an ellipsis.
+    static let maxReviewed = 8
+
+    /// Control characters (newlines included) become spaces; past `max`, the middle gives
+    /// way to an ellipsis, so the end of a path (the folder actually shared) stays.
     static func oneLine(_ s: String, _ max: Int) -> String {
         let flat = String(s.unicodeScalars.map { CharacterSet.controlCharacters.contains($0) ? " " : Character($0) })
-        return flat.count > max ? String(flat.prefix(max - 1)) + "…" : flat
+        guard flat.count > max else { return flat }
+        let keep = (max - 1) / 2
+        return String(flat.prefix(keep)) + "…" + String(flat.suffix(max - 1 - keep))
     }
 
     private static func listed(_ lines: [String]) -> String {

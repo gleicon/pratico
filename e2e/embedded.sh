@@ -489,6 +489,22 @@ with tarfile.open(sys.argv[1], "w:gz") as t:
 PY
 q=$(python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$bomb")
 expect_has "a member past its cap is refused unpacked size, not file size" "$(curl -s -X POST --unix-socket "$SOCK" "http://d/pratico/snapshots/restore?path=$q")" "larger than 1024 KiB"
+crafted="$HOME_DIR/crafted-snapshot.tar.gz"
+python3 -I - "$crafted" <<'PY'
+import io, json, sys, tarfile
+host = {"Binds": ["/data", "/tmp/../etc:/x:ro"], "PortBindings": {}}
+with tarfile.open(sys.argv[1], "w:gz") as t:
+    for name, body in [("manifest.json", {"format_version": 1, "containers": ["e2e-crafted"]}),
+                       ("containers/e2e-crafted.json", {"Name": "e2e-crafted", "Create": {"Image": "alpine", "HostConfig": host}})]:
+        data = json.dumps(body).encode()
+        info = tarfile.TarInfo(name); info.size = len(data)
+        t.addfile(info, io.BytesIO(data))
+PY
+q=$(python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$crafted")
+dry=$(curl -s -X POST --unix-socket "$SOCK" "http://d/pratico/snapshots/restore?path=$q&dry_run=1")
+risks=$(python3 -c "import json,sys; print(' | '.join(json.loads(sys.argv[1])['Review'][0]['Risks']))" "$dry")
+expect_has "the review resolves a Mac folder path" "$risks" "the Mac folder /etc at /x (read-only)"
+expect_has "and sees the volume create makes for a bare -v" "$risks" "at /data (a new, empty volume"
 docker rm -f e2e-s1 e2e-s2 >/dev/null
 docker network rm e2e-snet >/dev/null
 docker volume rm e2e-svol >/dev/null

@@ -32,6 +32,15 @@ extension ContainerService {
     /// and each image `VOLUME` no other mount covers get an anonymous volume, as in Docker. Mounts are checked before
     /// any volume is made, so a refused create leaves none behind.
     func namingVolumes(_ host: JSON, imageVolumes: [String]) throws -> JSON {
+        let (named, wanted) = Self.planVolumes(host, imageVolumes: imageVolumes)
+        _ = try mounts(named)
+        for (name, labels) in wanted { _ = try volumes.ensure(name, labels: labels) }
+        return named
+    }
+
+    /// The HostConfig `create` stores, and the volumes it must make, without making them:
+    /// what the snapshot review reads, so it sees exactly the mounts a create would.
+    static func planVolumes(_ host: JSON, imageVolumes: [String]) -> (host: JSON, wanted: [(name: String, labels: [String: String])]) {
         var host = host
         var wanted: [(name: String, labels: [String: String])] = []
         let anonymous = { () -> String in
@@ -71,9 +80,7 @@ extension ContainerService {
         let extra = imageVolumes.filter { !covered.contains($0) }.sorted().map { "\(anonymous()):\($0)" }
         if !extra.isEmpty { host["Binds"] = JSON((host["Binds"]?.strings ?? []) + extra) }
 
-        _ = try mounts(host)
-        for (name, labels) in wanted { _ = try volumes.ensure(name, labels: labels) }
-        return host
+        return (host, wanted)
     }
 
     func mounts(_ host: JSON) throws -> [Mount] { try Self.mounts(host, volumeData: volumes.dataPath) }
