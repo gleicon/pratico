@@ -10,18 +10,29 @@ final class ArchiveService: @unchecked Sendable {
         self.containers = containers
     }
 
-    private func running(_ ref: String) throws -> ContainerRecord {
+    /// The container when it runs (the guest agent copies); nil when it is stopped (its
+    /// rootfs is read or rewritten on the Mac, no VM needed).
+    private func running(_ ref: String) throws -> ContainerRecord? {
         let rec = try containers.resolve(ref)
-        guard rec.state.running else {
-            throw APIError(409, "copying files with a stopped container is not supported yet: \(rec.id)")
-        }
+        guard rec.state.running else { return nil }
         guard !containers.isPaused(rec.id) else { throw APIError(409, "Container \(rec.id) is paused") }
         return rec
     }
 
     /// The `X-Docker-Container-Path-Stat` header value: base64 JSON of the path's lstat.
     func stat(_ ref: String, path: String) throws -> String {
-        let rec = try running(ref)
+        guard let rec = try running(ref) else {
+            let s = try containers.whileStopped(ref) { rec, rootfs in
+                do { return try CopyUp.stat(rootfs: rootfs, path: Self.trimmed(path)) } catch {
+                    throw APIError(404, "Could not find the file \(path) in container \(rec.name)")
+                }
+            }
+            let stat: JSON = [
+                "name": .string(Self.baseName(path)), "size": .int(s.size), "mode": .int(Int64(Self.goFileMode(s.mode))),
+                "mtime": .string(Timestamp.format(Date(timeIntervalSince1970: Double(s.mtime)))), "linkTarget": .string(s.link),
+            ]
+            return stat.encoded().base64EncodedString()
+        }
         let script = #"stat -c '%s %f %Y' -- "$1" && readlink -- "$1"; true"#
         let r = try guestStat(rec, path: path, script: script)
         let lines = String(decoding: r.out, as: UTF8.self).split(separator: "\n").map(String.init)
@@ -74,13 +85,19 @@ final class ArchiveService: @unchecked Sendable {
     /// path out to the host, where it is tarred.
     func get(_ ref: String, path: String, conn: Connection) throws {
         let header = try stat(ref, path: path)
-        let rec = try running(ref)
-        let trimmed = path.count > 1 && path.hasSuffix("/") ? String(path.dropLast()) : path
+        let rec = try containers.resolve(ref)
+        let trimmed = Self.trimmed(path)
         let work = containers.shimFiles(rec.id).dir.appending(path: "cp-\(randomHexID().prefix(8))")
         defer { try? FileManager.default.removeItem(at: work) }
         try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
         let name = try Self.hostName(trimmed)
-        do { try copyOut(rec, trimmed, to: work.appending(path: name)) } catch {
+        do {
+            if let live = try running(ref) {
+                try copyOut(live, trimmed, to: work.appending(path: name))
+            } else {
+                try containers.whileStopped(ref) { _, rootfs in try CopyUp.copyOut(rootfs: rootfs, path: trimmed, into: work, as: name) }
+            }
+        } catch let e as APIError where e.status == 409 { throw e } catch {
             throw APIError(404, "Could not find the file \(path) in container \(rec.name)")
         }
         let archive = work.appending(path: "out.tar")
@@ -100,18 +117,30 @@ final class ArchiveService: @unchecked Sendable {
     /// Files end up owned by root, as with Docker's default `cp`, where the image has `chown`.
     /// `archive` is the request body, spooled to a file: it may be far larger than memory.
     func put(_ ref: String, path: String, tar archive: URL) throws {
-        let rec = try running(ref)
+        let found = try containers.resolve(ref)
         // Docker refuses a destination directory that does not exist.
         guard (try? stat(ref, path: path)) != nil else {
-            throw APIError(404, "Could not find the file \(path) in container \(rec.name)")
+            throw APIError(404, "Could not find the file \(path) in container \(found.name)")
         }
-        let files = containers.shimFiles(rec.id)
+        let files = containers.shimFiles(found.id)
         let scratch = files.dir.appending(path: "cp-\(randomHexID().prefix(8))")
         defer { try? FileManager.default.removeItem(at: scratch) }
         let work = scratch.appending(path: "tree")
         try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
         do { try Tar.extract(archive, to: work, links: true, maxBytes: Tar.unpackLimit(at: work)) } catch let e as APIError { throw e } catch {
             throw APIError(400, "invalid tar archive")
+        }
+        guard let rec = try running(ref) else {
+            // Stopped: the files, owned by root as Docker's `cp` leaves them, are unpacked
+            // into the rootfs on the Mac. Links stay links; nothing is followed.
+            let entries = try FileManager.default.contentsOfDirectory(atPath: work.path)
+            guard !entries.isEmpty else { return }
+            let dir = Self.trimmed(path)
+            let prefix = dir == "/" ? "" : String(dir.drop(while: { $0 == "/" })) + "/"
+            let layer = scratch.appending(path: "layer.tar")
+            try Tar.create(layer, base: work, names: entries, prefix: prefix, owner: (0, 0))
+            try containers.whileStopped(ref) { _, rootfs in try RootfsEdit.add(layer, to: rootfs) }
+            return
         }
         let q = { (s: String) in s.addingPercentEncoding(withAllowedCharacters: .alphanumerics.union(CharacterSet(charactersIn: "/._-"))) ?? s }
         var targets: [String] = []
@@ -150,6 +179,9 @@ final class ArchiveService: @unchecked Sendable {
             _ = try? embedded.shim.request(files, "POST", "/exec", body: body.encoded())
         }
     }
+
+    /// `/a/b/` is `/a/b`; `/` stays.
+    static func trimmed(_ path: String) -> String { path.count > 1 && path.hasSuffix("/") ? String(path.dropLast()) : path }
 
     /// Walks an extracted tree without following links. Returns symlinks whose target
     /// leaves the tree (relative path, target text); refuses devices, sockets, and fifos.

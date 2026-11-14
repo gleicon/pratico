@@ -74,6 +74,8 @@ public final class ContainerService: @unchecked Sendable {
     private var removeWaiters: [String: [@Sendable (Int) -> Void]] = [:]
     private var attached: [String: [Connection]] = [:]
     private var pausedVMs: Set<String> = []
+    /// Stopped containers whose rootfs is being read or rewritten (`docker cp`): no start.
+    private var busy: Set<String> = []
     private var published: [String: [String: [(ip: String, port: String)]]] = [:]  // bound host ports
     /// Serializes network connect and disconnect, which read, check, and write a
     /// container's endpoints and NIC slots.
@@ -260,11 +262,34 @@ public final class ContainerService: @unchecked Sendable {
         return "pratico_\(randomHexID().prefix(8))"
     }
 
+    /// Runs `body` with a stopped container's rootfs, which it may read or replace; the
+    /// container cannot start until it returns.
+    func whileStopped<T>(_ ref: String, _ body: (ContainerRecord, URL) throws -> T) throws -> T {
+        let rec = try resolve(ref)
+        lock.lock()
+        guard records[rec.id]?.state.running == false, !busy.contains(rec.id) else {
+            lock.unlock()
+            throw APIError(409, "container \(rec.name) started or is busy; try again")
+        }
+        busy.insert(rec.id)
+        lock.unlock()
+        defer {
+            lock.lock()
+            busy.remove(rec.id)
+            lock.unlock()
+        }
+        return try body(rec, dir(rec.id).appending(path: "rootfs.ext4"))
+    }
+
     // MARK: Lifecycle
 
     func start(_ ref: String) throws -> Bool {
         let rec = try resolve(ref)
         if rec.state.running { return false }
+        lock.lock()
+        let isBusy = busy.contains(rec.id)
+        lock.unlock()
+        if isBusy { throw APIError(409, "container \(rec.name) is busy: a copy into it is in progress") }
         if let reason = startGate?(rec) { throw APIError(409, reason) }
         try launch(rec)
         return true

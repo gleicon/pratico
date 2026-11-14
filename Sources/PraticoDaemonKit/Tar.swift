@@ -5,22 +5,23 @@ import Foundation
 enum Tar {
     /// Writes `names`, relative to `base`, with everything under them. Symlinks are stored as
     /// links, never followed, wherever they point, as Docker's `cp` does; files are streamed.
-    static func create(_ file: URL, base: URL, names: [String], gzip: Bool = false) throws {
+    /// `prefix` goes before every member's name; `owner` replaces the files' own uid/gid.
+    static func create(_ file: URL, base: URL, names: [String], gzip: Bool = false, prefix: String = "", owner: (uid_t, gid_t)? = nil) throws {
         let writer = try ArchiveWriter(configuration: ArchiveWriterConfiguration(format: .pax, filter: gzip ? .gzip : .none))
         try writer.open(file: file)
-        for name in names { try add(writer.makeTransactionWriter(), base: base, path: name) }
+        for name in names { try add(writer.makeTransactionWriter(), base: base, path: name, prefix: prefix, owner: owner) }
         try writer.finishEncoding()
     }
 
-    private static func add(_ w: ArchiveWriterTransaction, base: URL, path: String) throws {
+    private static func add(_ w: ArchiveWriterTransaction, base: URL, path: String, prefix: String, owner: (uid_t, gid_t)?) throws {
         let full = base.appending(path: path).path
         var st = stat()
         guard lstat(full, &st) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .ENOENT) }
         let entry = WriteEntry()
-        entry.path = path
+        entry.path = prefix + path
         entry.permissions = st.st_mode & 0o7777
-        entry.owner = st.st_uid
-        entry.group = st.st_gid
+        entry.owner = owner?.0 ?? st.st_uid
+        entry.group = owner?.1 ?? st.st_gid
         entry.modificationDate = Date(timeIntervalSince1970: TimeInterval(st.st_mtimespec.tv_sec))
         entry.size = 0
         switch st.st_mode & S_IFMT {
@@ -29,7 +30,7 @@ enum Tar {
             try w.writeHeader(entry: entry)
             try w.finish()
             for child in try FileManager.default.contentsOfDirectory(atPath: full).sorted() {
-                try add(w, base: base, path: path + "/" + child)
+                try add(w, base: base, path: path + "/" + child, prefix: prefix, owner: owner)
             }
         case S_IFLNK:
             entry.fileType = .symbolicLink

@@ -112,7 +112,7 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 
 - [ ] More than 4 networks per container (Virtualization.framework allows 4 NICs per VM)
 - [ ] IPv6 on pratico-net
-- [ ] `docker cp` with a stopped container (the guest agent needs a running VM)
+- [x] `docker cp` with a stopped container: read from its ext4 rootfs on the Mac; copies in rewrite the rootfs (no VM), and the container cannot start meanwhile
 - [x] `docker save` of several images at once; `docker load` (OCI archives, Docker 25+); request bodies of `cp` in and `load` stream to disk past the 64 MiB in-memory limit
 - [ ] A per-install CA for egress interception (with the egress task)
 - [ ] `docker build` (BuildKit or an equivalent)

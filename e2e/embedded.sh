@@ -125,9 +125,8 @@ check "inner symlinks leaving the tree arrive as links" test "$(docker exec e-bo
 code=$(curl -s -o /dev/null -w '%{http_code}' --unix-socket "$SOCK" "http://d/containers/e-box/archive?path=/tmp/..")
 expect_eq "cp of a .. path is refused" "$code" "400"
 docker run -d --name e-busy alpine sh -c 'while true; do :; done' >/dev/null
-sleep 2
-cpu=$(docker stats --no-stream --format '{{.CPUPerc}}' e-busy | tr -d '%' | cut -d. -f1)
-check "stats shows a busy container's CPU" test "${cpu:-0}" -gt 50
+busy_cpu() { test "$(docker stats --no-stream --format '{{.CPUPerc}}' e-busy | tr -d '%' | cut -d. -f1)" -gt 50; }
+eventually "stats shows a busy container's CPU" busy_cpu
 expect_has_mem=$(docker stats --no-stream --format '{{.MemUsage}}' e-box)
 check "stats shows memory usage and limit" grep -q 'GiB' <<<"$expect_has_mem"
 docker rm -f e-box e-busy >/dev/null
@@ -392,6 +391,24 @@ check "image prune -a removes unused images" sh -c "! docker image inspect busyb
 check "image prune -a keeps images in use" docker image inspect alpine
 check "docker system prune finishes" docker system prune -f
 docker rm -f d-keep >/dev/null
+
+# docker cp with stopped containers: the rootfs is read or rewritten on the Mac.
+CPS="$HOME_DIR/cps"; mkdir -p "$CPS/conf.d"
+echo hello-from-cp >"$CPS/greeting"; echo nested >"$CPS/conf.d/a.conf"
+docker create --name e2e-cps alpine sh -c 'stat -c "%u %a" /etc/greeting; cat /etc/greeting /etc/conf.d/a.conf' >/dev/null
+check "cp into a created container" docker cp "$CPS/greeting" e2e-cps:/etc/
+check "cp a directory into a created container" docker cp "$CPS/conf.d" e2e-cps:/etc/
+expect_eq "it starts with the files, owned by root" "$(docker start -a e2e-cps | tr '\n' ' ')" "0 644 hello-from-cp nested "
+docker run --name e2e-cpo alpine sh -c 'echo made-inside > /out.txt' >/dev/null
+check "cp out of an exited container" docker cp e2e-cpo:/out.txt "$CPS/out.txt"
+expect_eq "with its contents" "$(cat "$CPS/out.txt")" "made-inside"
+check "cp a directory out of an exited container" docker cp e2e-cpo:/etc/apk "$CPS/apk"
+check "with what is inside it" test -s "$CPS/apk/repositories"
+docker cp e2e-cpo:/bin/ls "$CPS/ls" >/dev/null 2>&1
+expect_eq "a symlink comes out as a link" "$(readlink "$CPS/ls")" "/bin/busybox"
+expect_has "a missing path is a 404" "$(docker cp e2e-cpo:/nope "$CPS/nope" 2>&1)" "Could not find the file /nope"
+check "the exited container still starts" docker start e2e-cpo
+docker rm -f e2e-cps e2e-cpo >/dev/null
 
 # tmpfs: memory in the VM, Docker's default options, sizes enforced.
 expect_has "--tmpfs mounts a tmpfs with Docker's defaults" "$(docker run --rm --tmpfs /scratch alpine sh -c 'grep " /scratch " /proc/mounts')" "tmpfs /scratch tmpfs rw,nosuid,nodev,noexec"

@@ -126,7 +126,7 @@ Measured on an M-series Mac, idle `alpine sleep` containers:
 ## Not yet
 
 `docker build` and egress interception (next, after parity and scanning), more than 4
-networks per container, IPv6, `docker cp` with a stopped container, Developer ID signing.
+networks per container, IPv6, Developer ID signing.
 The checklist, with what is done: [.project/roadmap.md](.project/roadmap.md).
 
 ## Build from source
