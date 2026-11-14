@@ -186,7 +186,7 @@ final class ScanService: @unchecked Sendable {
     let containers: ContainerService
     let config: Config
     let dir: URL
-    let alertsPath: URL
+    let alerts: AlertLog
     let events: EventBus
     private let dbDir: URL
     private let queue = DispatchQueue(label: "pratico.scan")
@@ -199,14 +199,14 @@ final class ScanService: @unchecked Sendable {
     static let kevURL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
     static let rescanInterval: TimeInterval = 24 * 3600
 
-    init(home: URL, images: ImageService, containers: ContainerService, config: Config, events: EventBus) {
+    init(home: URL, images: ImageService, containers: ContainerService, config: Config, events: EventBus, alerts: AlertLog) {
         self.images = images
         self.containers = containers
         self.config = config
         self.events = events
         dir = home.appending(path: "scans", directoryHint: .isDirectory)
         dbDir = home.appending(path: "scan-db", directoryHint: .isDirectory)
-        alertsPath = home.appending(path: "alerts.json")
+        self.alerts = alerts
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: dbDir, withIntermediateDirectories: true)
         loadBlocked()
@@ -408,9 +408,10 @@ final class ScanService: @unchecked Sendable {
         for rec in containers.all() where rec.imageId == r.imageId && rec.state.running {
             if (try? containers.stop(rec.id, timeout: 10)) == true { stopped.append(rec.name) }
         }
-        alert(image: r.imageId, level: "serious", title: "\(name) blocked: \(reasons.first ?? "serious finding")",
-              detail: (reasons.prefix(5) + (stopped.isEmpty ? [] : ["stopped: " + stopped.joined(separator: ", ")]))
-                  .joined(separator: "\n"))
+        // One alert per image: a rescan replaces the earlier one instead of piling up.
+        alerts.raise(key: "image:\(r.imageId)", level: "serious", title: "\(name) blocked: \(reasons.first ?? "serious finding")",
+                     detail: (reasons.prefix(5) + (stopped.isEmpty ? [] : ["stopped: " + stopped.joined(separator: ", ")]))
+                         .joined(separator: "\n"), replace: true)
     }
 
     // MARK: Storage
@@ -435,19 +436,6 @@ final class ScanService: @unchecked Sendable {
         let dec = JSONDecoder()
         dec.dateDecodingStrategy = .iso8601
         return (try? Data(contentsOf: url)).flatMap { try? dec.decode(ScanReport.self, from: $0) }
-    }
-
-    /// `~/.pratico/alerts.json`, newest last, capped at 50; the menubar shows them.
-    /// One alert per image: a rescan replaces the image's earlier alert instead of piling up.
-    private func alert(image: String, level: String, title: String, detail: String) {
-        lock.lock()
-        defer { lock.unlock() }
-        var list = (try? Data(contentsOf: alertsPath)).flatMap { JSON.parse($0)?.array } ?? []
-        list.removeAll { $0["image"]?.string == image }
-        list.append(["time": .string(Timestamp.format(Date())), "level": .string(level), "image": .string(image),
-                     "title": .string(title), "detail": .string(detail)])
-        if list.count > 50 { list.removeFirst(list.count - 50) }
-        try? JSON.array(list).encoded().write(to: alertsPath, options: .atomic)
     }
 
     // MARK: Feeds and tools

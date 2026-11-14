@@ -189,7 +189,14 @@ else
     bad "AC-15 needs a LAN IP on en0 or en1"
 fi
 expect_eq "docker port shows the binding" "$(docker port e2e-p2 80/tcp)" "127.0.0.1:18081"
+alerts() { cat "$HOME_DIR/alerts.json" 2>/dev/null || echo '[]'; }
+check "AC-36 one alert names the container, 0.0.0.0, and 18080" python3 -c "import json,sys; a=[x for x in json.loads(sys.argv[1]) if x.get('key','').startswith('port:')]; assert len(a)==1 and 'e2e-p1' in a[0]['title'] and '18080' in a[0]['title'] and '0.0.0.0' in a[0]['detail']" "$(alerts)"
+docker restart e2e-p1 >/dev/null
+check "a restart does not repeat it" python3 -c "import json,sys; assert len([x for x in json.loads(sys.argv[1]) if x.get('key','').startswith('port:')])==1" "$(alerts)"
+running=$(curl -s --unix-socket "$SOCK" http://d/pratico/containers)
+check "the menubar's list shows running containers with their ports" python3 -c "import json,sys; c={x['Name']: x for x in json.loads(sys.argv[1])}; assert c['e2e-p1']['Ports'][0]['PublicPort']==18080 and c['e2e-p2']['Ports'][0]['IP']=='127.0.0.1' and c['e2e-p1']['Image']=='busybox:latest'" "$running"
 docker rm -f e2e-p1 e2e-p2 >/dev/null
+check "Clear Alerts empties the list" sh -c "curl -s -o /dev/null -w '%{http_code}' -X DELETE --unix-socket '$SOCK' http://d/pratico/alerts | grep -q 204 && test \"\$(cat '$HOME_DIR/alerts.json')\" = '[]'"
 
 docker run -d --name e2e-web -l a=1 -v "$MNT:/x:ro" alpine sleep 300 >/dev/null
 docker run -d --name e2e-other -l a=2 alpine sleep 300 >/dev/null
@@ -254,15 +261,27 @@ docker run -d --name e2e-h --health-cmd 'test -f /ok' --health-interval 1s --hea
 hs=""
 for _ in $(seq 50); do hs=$(docker inspect e2e-h --format '{{.State.Health.Status}}'); [ "$hs" = unhealthy ] && break; sleep 0.1; done
 expect_eq "AC-52 State.Health.Status becomes unhealthy within 5 s" "$hs" "unhealthy"
+check "AC-52 the menubar gets one alert naming e2e-h" python3 -c "import json,sys; a=[x for x in json.loads(sys.argv[1]) if x.get('key','').startswith('health:')]; assert len(a)==1 and 'e2e-h' in a[0]['title']" "$(alerts)"
 expect_has "ps shows the health status" "$(docker ps --filter name=e2e-h --format '{{.Status}}')" "(unhealthy)"
 docker exec e2e-h touch /ok
 for _ in $(seq 30); do hs=$(docker inspect e2e-h --format '{{.State.Health.Status}}'); [ "$hs" = healthy ] && break; sleep 0.1; done
 expect_eq "AC-52 status becomes healthy within 3 s of the fix" "$hs" "healthy"
+check "recovering resolves the alert" python3 -c "import json,sys; assert not [x for x in json.loads(sys.argv[1]) if x.get('key','').startswith('health:')]" "$(alerts)"
 expect_eq "ps filters by health" "$(docker ps --filter health=healthy --format '{{.Names}}')" "e2e-h"
 sleep 0.5
 kill "$hev_pid" 2>/dev/null; wait "$hev_pid" 2>/dev/null
 expect_eq "AC-52 health_status events emitted" "$(tr '\n' ' ' <"$HOME_DIR/hevents")" "health_status: unhealthy health_status: healthy "
 docker rm -f e2e-h >/dev/null
+
+# AC-43: the menubar's usage measure, from the daemon's own sampling (no client asking).
+docker run -d --name e2e-yes --cpus 1 alpine sh -c 'yes >/dev/null' >/dev/null
+use() { curl -s --unix-socket "$SOCK" http://d/pratico/containers | python3 -c 'import json,sys; c=[x for x in json.load(sys.stdin) if x["Name"]=="e2e-yes"]; print("%d %d" % (c[0]["CPU"], c[0]["Memory"]) if c else "gone")'; }
+cpu=""
+for _ in $(seq 10); do cpu=$(use); [ "${cpu%% *}" -ge 80 ] 2>/dev/null && break; sleep 0.5; done
+check "AC-43 a busy --cpus 1 container reads 80-120% CPU and some memory within 5 s" python3 -c "import sys; c,m=map(int,sys.argv[1].split()); assert 80 <= c <= 120 and m > 0" "$cpu"
+docker stop -t 1 e2e-yes >/dev/null
+expect_eq "AC-43 a stopped container leaves the list" "$(use)" "gone"
+docker rm e2e-yes >/dev/null
 
 # AC-22: stats one-shot and streamed.
 docker run -d --name e2e-stats alpine sh -c 'while true; do :; done' >/dev/null

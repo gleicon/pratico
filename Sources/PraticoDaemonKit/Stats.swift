@@ -22,7 +22,8 @@ final class StatsService: @unchecked Sendable {
     private var lastDemand = Date.distantPast
     private var generation = 0
     private let wakeup = DispatchSemaphore(value: 0)
-    static let idleInterval: TimeInterval = 10
+    /// The menubar's usage measure refreshes at least every 5 s (FR-40).
+    static let idleInterval: TimeInterval = 4
     static let demandWindow: TimeInterval = 60
     static let epoch = Date()
 
@@ -78,6 +79,19 @@ final class StatsService: @unchecked Sendable {
             o["fetchedAt"] = .double(Date().timeIntervalSince1970)
             return .object(o)
         }
+    }
+
+    /// CPU (100 = one busy CPU, as `docker stats`) and memory from the last two samples,
+    /// for the menubar. Reading it does not count as demand: the idle sampler is enough.
+    func usage(_ id: String) -> (cpu: Double, memory: Int64)? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let s = samples[id] else { return nil }
+        let memory = s.now.raw["memoryUsageBytes"]?.int ?? 0
+        guard let pre = s.pre else { return (0, memory) }
+        let seconds = s.now.time.timeIntervalSince(pre.time)
+        let usec = (s.now.raw["cpuUsageUsec"]?.int ?? 0) - (pre.raw["cpuUsageUsec"]?.int ?? 0)
+        return (seconds > 0 ? max(Double(usec) / 1e6 / seconds * 100, 0) : 0, memory)
     }
 
     private func current(_ id: String) -> (now: Sample, pre: Sample?, generation: Int)? {

@@ -21,6 +21,8 @@ public final class Daemon: @unchecked Sendable {
     let events = EventBus()
     let networks: NetworkService
     let volumes: VolumeService
+    let alerts: AlertLog
+    let containerAlerts: ContainerAlerts
     let scans: ScanService
     let disk: DiskService
     /// Registry trust and kept logins.
@@ -43,6 +45,7 @@ public final class Daemon: @unchecked Sendable {
         case .success(let opened): (embedded, store, content) = opened
         case .failure(let error): throw RuntimeUnavailable(message: error.message)
         }
+        self.alerts = AlertLog(path: home.appending(path: "alerts.json"))
         let registries = Registries(policy: policy, home: home)
         for w in policy.warnings { Pratico.log("pratico-daemon: \(w)") }
         registries.writeState()
@@ -59,7 +62,8 @@ public final class Daemon: @unchecked Sendable {
         self.execs = ExecService(containers: containers)
         self.archives = ArchiveService(containers: containers)
         self.stats = StatsService(containers: containers)
-        self.scans = ScanService(home: home, images: images, containers: containers, config: config, events: events)
+        self.scans = ScanService(home: home, images: images, containers: containers, config: config, events: events, alerts: alerts)
+        self.containerAlerts = ContainerAlerts(alerts: alerts, containers: containers, events: events)
         self.disk = DiskService(home: home, images: images, containers: containers, volumes: volumes)
         containers.startGate = { [scans] rec in scans.blockReason(imageId: rec.imageId) }
     }
@@ -138,6 +142,13 @@ public final class Daemon: @unchecked Sendable {
             conn.json(200, ["Version": .string(Pratico.version), "Pid": .int(Int64(getpid())), "StartedAt": .string(startedAt.ISO8601Format()), "Socket": .string(socketPath),
                             "Containers": .int(Int64(c.total)), "ContainersRunning": .int(Int64(c.running)),
                             "Changes": .int(Int64(events.generation))])
+            return .keepAlive
+        case ("DELETE", "pratico") where parts.count == 2 && parts[1] == "alerts":
+            alerts.clear()
+            conn.respond(204)
+            return .keepAlive
+        case ("GET", "pratico") where parts.count == 2 && parts[1] == "containers":
+            conn.json(200, runningContainers())
             return .keepAlive
         case ("GET", "pratico") where parts.count == 2 && parts[1] == "registries":
             conn.json(200, registries.state)
@@ -254,6 +265,24 @@ public final class Daemon: @unchecked Sendable {
             return nil
         }
         return .keepAlive
+    }
+
+    /// `GET /pratico/containers`: the menubar's list of running containers (FR-31, FR-40),
+    /// with ports, health, and usage, in one call.
+    private func runningContainers() -> JSON {
+        .array(containers.all().filter(\.state.running).map { rec in
+            let use = stats.usage(rec.id)
+            return [
+                "Id": .string(rec.id), "Name": .string(rec.name), "Image": .string(ImageRef.familiar(ImageRef.normalize(rec.image))),
+                "StartedAt": .string(rec.state.startedAt?.ISO8601Format() ?? ""),
+                "Paused": .bool(containers.isPaused(rec.id)),
+                "Health": containers.health.state(rec.id).map { .string($0.status) } ?? .null,
+                "Ports": .array(containers.ports(rec).map { p in
+                    ["IP": p["IP"] ?? "", "PublicPort": p["PublicPort"] ?? 0, "PrivatePort": p["PrivatePort"] ?? 0, "Type": p["Type"] ?? "tcp"]
+                }),
+                "CPU": .double(use?.cpu ?? 0), "Memory": .int(use?.memory ?? 0),
+            ]
+        })
     }
 
     private func routeVolumes(_ m: String, _ p: [String], _ req: Request, _ conn: Connection) throws -> Disposition? {

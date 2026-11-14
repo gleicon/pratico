@@ -9,7 +9,9 @@ struct PraticoMenubarApp: App {
         MenuBarExtra {
             StatusMenu(daemon: daemon)
         } label: {
-            Image(systemName: daemon.menubarSymbol)
+            // The running-container count beside the icon (FR-29), none when nothing runs.
+            let n = daemon.containers.count
+            Text(n > 0 ? "\(Image(systemName: daemon.menubarSymbol)) \(n)" : "\(Image(systemName: daemon.menubarSymbol))")
         }
         // Which scanner found what, per image.
         Window("Scan Results", id: "scan-results") {
@@ -52,6 +54,9 @@ struct StatusMenu: View {
         }
         // Space used and cleanup, better than `docker system df` and `prune`.
         if daemon.isRunning {
+            ContainersMenu(daemon: daemon)
+            AlertsMenu(daemon: daemon)
+            Divider()
             DiskMenu(daemon: daemon)
             ScannersMenu(daemon: daemon)
         }

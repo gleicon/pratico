@@ -15,11 +15,14 @@ final class DaemonController {
     }
 
     private(set) var state: State = .stopped
-    private(set) var error: String?
+    var error: String?
     private(set) var status: Status?
     private(set) var disk: DiskUsage?
     var scanners: ScannerReport?
     private(set) var scanSummary: ScanSummary?
+    private(set) var containers: [RunningContainer] = []
+    /// Whether one of the app's menus is open, tracked from AppKit's menu notifications.
+    @ObservationIgnored private var menuOpen = false
     private(set) var alerts: [Alert] = []
     private(set) var registries = Registries()
     /// Time of the newest alert already notified, so a relaunch does not repeat it.
@@ -118,12 +121,13 @@ final class DaemonController {
         update(\.scanSummary, await DaemonProbe.fetch("/pratico/scans/summary", as: ScanSummary.self))
     }
 
-    /// New serious alerts also become a notification: the daemon stopped containers.
+    /// New alerts also become a notification: a blocked image, a port other machines can
+    /// reach, an unhealthy container.
     private func refreshAlerts() {
         let data = (try? Data(contentsOf: Pratico.alertsPath())) ?? Data("[]".utf8)
         let latest = (try? JSONDecoder().decode([Alert].self, from: data)) ?? []
         let known = Set(alerts.map(\.id))
-        let fresh = latest.filter { $0.level == "serious" && !known.contains($0.id) && $0.time > seenUntil }
+        let fresh = latest.filter { !known.contains($0.id) && $0.time > seenUntil }
         update(\.alerts, latest)
         guard !fresh.isEmpty else { return }
         if let newest = fresh.map(\.time).max(), newest > seenUntil {
@@ -144,6 +148,11 @@ final class DaemonController {
 
     init() {
         poll()
+        for (name, open) in [(NSMenu.didBeginTrackingNotification, true), (NSMenu.didEndTrackingNotification, false)] {
+            NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.menuOpen = open }
+            }
+        }
         Task {
             // FR-1: launching the app starts the daemon when it is not running. Asked
             // directly: restarting a live daemon would cost its containers' supervision.
@@ -265,7 +274,7 @@ final class DaemonController {
     }
 
     /// Every removal asks first.
-    private func confirm(_ title: String, _ text: String, button: String) -> Bool {
+    func confirm(_ title: String, _ text: String, button: String) -> Bool {
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = text
@@ -337,6 +346,15 @@ final class DaemonController {
         return (obj["SpaceReclaimed"] as? NSNumber)?.int64Value ?? 0
     }
 
+    func refreshContainers() async {
+        let running = (status?.ContainersRunning ?? 0) > 0
+        let fresh = running ? await DaemonProbe.fetch("/pratico/containers", as: [RunningContainer].self) ?? [] : []
+        // A write re-renders an open menu and closes its submenus: while one is open, only
+        // a change in which containers run (or their ports, health) is worth that.
+        if menuOpen && fresh.map(\.withoutUsage) == containers.map(\.withoutUsage) { return }
+        update(\.containers, fresh)
+    }
+
     /// Disk use and the scan summary, together: the slow disk walk does not hold up the other.
     func refreshAfterChange() async {
         async let usage = DaemonProbe.fetch("/pratico/disk", as: DiskUsage.self, timeout: 30)
@@ -363,6 +381,8 @@ final class DaemonController {
                 self.refreshRegistries()
                 self.refreshDefaultSocket()
                 if changed || tick % 30 == 0 { await self.refreshAfterChange() }
+                // Usage moves without events; the daemon samples it every 4 s.
+                if changed || tick % 2 == 0 { await self.refreshContainers() }
                 // Each check runs every scanner's --version: once a minute is plenty.
                 if tick % 60 == 0 { await self.refreshScanners() }
                 tick += 1

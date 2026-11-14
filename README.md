@@ -41,10 +41,21 @@ Virtualization.framework; nothing else needs installing (see [How it runs](#how-
 
 The menubar's **Disk** menu shows what pratico uses, sized by blocks actually allocated
 and with shared layers counted once: images (and how much is unused), leftover image
-data, running and stopped containers, logs, the guest init, scan data, the largest items,
-and the Mac's free space. Its cleanup actions list what they remove and ask first;
-running containers and the images they use are kept. `docker system df` and
-`docker system prune` work too.
+data, running and stopped containers, logs, volumes, the guest init, scan data, the
+largest items, and the Mac's free space. Its cleanup actions list what they remove and ask
+first; running containers and the images they use are kept, and Remove Unused Volumes
+says the data cannot be recovered. `docker system df` and `docker system prune` work too.
+
+The icon shows how many containers run. **Containers** lists each with its image, CPU,
+memory, health, and published ports (⚠︎ marks one other machines can reach), and can open
+a port in the browser, stop, or restart it. **Alerts** lists what pratico raised: a blocked
+image, a port published beyond loopback (`-p 8080:80` binds `0.0.0.0`, as in Docker; use
+`-p 127.0.0.1:8080:80` to keep it on the Mac), a container turning unhealthy. Each also
+becomes a notification once.
+
+Volumes work as in Docker: `docker volume create`, `-v name:/path`, `--mount
+type=volume`, anonymous volumes for `-v /path` and an image's `VOLUME`, `docker rm -v`.
+They live in `~/.pratico/volumes/<name>/_data`, plain folders you can open in Finder.
 
 Pratico has no CLI of its own: `docker` is the CLI, the menubar is the control panel.
 
