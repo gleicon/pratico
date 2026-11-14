@@ -166,11 +166,14 @@ final class DaemonController {
         state = .starting
         startDeadline = Date() + 30
         try? FileManager.default.removeItem(at: Pratico.startupErrorPath())
-        if let failure = agent.start() {
+        if let failure = agent.start(atLogin: Self.startAtLogin) {
             error = "Could not start daemon: \(failure)"
             state = .stopped
         }
     }
+
+    /// `start_at_login` from config.toml; on when the file cannot be read (its default).
+    nonisolated static var startAtLogin: Bool { (try? Config.load())?.startAtLogin ?? true }
 
     func stop() {
         state = .stopping
@@ -385,6 +388,8 @@ final class DaemonController {
                 if changed || tick % 2 == 0 { await self.refreshContainers() }
                 // Each check runs every scanner's --version: once a minute is plenty.
                 if tick % 60 == 0 { await self.refreshScanners() }
+                // Follows start_at_login as Settings or a hand edit changes it, no restart.
+                if tick % 5 == 0 && self.isRunning { self.agent.startAtLogin(Self.startAtLogin) }
                 tick += 1
                 try? await Task.sleep(for: .seconds(1))
             }

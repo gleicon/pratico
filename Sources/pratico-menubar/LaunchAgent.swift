@@ -3,9 +3,10 @@ import PraticoCore
 import ServiceManagement
 
 /// Runs the bundled daemon (SPEC D-13), natively: no `launchctl`, no shell. Start spawns it
-/// in its own session, so it outlives the menubar, and writes
-/// `~/Library/LaunchAgents/dev.pratico.daemon.plist`, which launchd reads at the next login.
-/// Stop sends it SIGTERM (a clean `docker`-style shutdown) and removes the plist.
+/// in its own session, so it outlives the menubar. While it runs and `start_at_login` is
+/// on, `~/Library/LaunchAgents/dev.pratico.daemon.plist` is there for launchd to read at
+/// the next login (FR-4). Stop sends it SIGTERM (a clean `docker`-style shutdown) and
+/// removes the plist.
 /// Not `SMAppService`: with ad-hoc signing (D-10) its record pins the daemon's code
 /// signature, and launchd refuses the daemon after any rebuild or update.
 struct LaunchAgent {
@@ -14,10 +15,21 @@ struct LaunchAgent {
     private var daemon: String { Bundle.main.bundleURL.appending(path: "Contents/MacOS/pratico-daemon").path }
 
     /// nil on success.
-    func start() -> String? {
+    func start(atLogin: Bool) -> String? {
         // Agents registered through SMAppService by older builds hold the same label.
         try? SMAppService.agent(plistName: "\(Self.label).plist").unregister()
         rotateLog()
+        if let failure = startAtLogin(atLogin) { return failure }
+        return spawn(log: Pratico.logPath().path)
+    }
+
+    /// Writes or removes the login job; nil on success. Writing an unchanged job is skipped.
+    @discardableResult
+    func startAtLogin(_ on: Bool) -> String? {
+        guard on else {
+            try? FileManager.default.removeItem(at: plist)
+            return nil
+        }
         let log = Pratico.logPath().path
         let job: [String: Any] = [
             "Label": Self.label,
@@ -30,13 +42,15 @@ struct LaunchAgent {
             "AssociatedBundleIdentifiers": [Bundle.main.bundleIdentifier ?? "dev.pratico.menubar"],
         ]
         do {
+            let data = try PropertyListSerialization.data(fromPropertyList: job, format: .xml, options: 0)
+            if (try? Data(contentsOf: plist)) == data { return nil }
             try FileManager.default.createDirectory(at: plist.deletingLastPathComponent(), withIntermediateDirectories: true)
             try FileManager.default.createDirectory(at: Pratico.home(), withIntermediateDirectories: true)
-            try PropertyListSerialization.data(fromPropertyList: job, format: .xml, options: 0).write(to: plist, options: .atomic)
+            try data.write(to: plist, options: .atomic)
         } catch {
             return "cannot write \(plist.path): \(error.localizedDescription)"
         }
-        return spawn(log: log)
+        return nil
     }
 
     /// SIGTERM to the running daemon, then no start at login.

@@ -65,7 +65,7 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 
 ## Login
 
-- [~] Daemon starts at login when `start_at_login = true` (AC-4): the launch agent always starts it at login; `start_at_login = false` is not honored yet
+- [x] Daemon starts at login when `start_at_login = true` (AC-4); `false` removes the login job within 5 s of the change, no restart
 
 ## Menubar
 

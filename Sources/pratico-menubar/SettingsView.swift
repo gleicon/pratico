@@ -36,7 +36,8 @@ final class SettingsModel {
             try FileManager.default.createDirectory(at: Pratico.home(), withIntermediateDirectories: true)
             try Config.setting(name, to: value, in: text).write(to: Config.path(), atomically: true, encoding: .utf8)
             saveError = nil
-            needsRestart = true
+            // The menubar applies start_at_login itself; the daemon reads the rest at start.
+            if name != "start_at_login" { needsRestart = true }
         } catch {
             saveError = "\(error)"
         }
