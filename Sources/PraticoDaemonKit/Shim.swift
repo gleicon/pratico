@@ -78,7 +78,7 @@ struct ShimFiles: Sendable {
         dir.deletingLastPathComponent().deletingLastPathComponent()
             .appending(path: "run/\(dir.lastPathComponent.prefix(12)).sock")
     }
-    var state: URL { dir.appending(path: "state.json") }  // {"pid", "status": "starting|running"}
+    var state: URL { dir.appending(path: "state.json") }  // {"pid", "status": "starting|created|running|paused"}
     var exit: URL { dir.appending(path: "exit.json") }  // {"exitCode", "finishedAt"}; written last
     var log: URL { dir.appending(path: "log") }
     var shimLog: URL { dir.appending(path: "shim.log") }
@@ -159,12 +159,13 @@ public enum ShimHost {
                     try await agent.close()
                 }
             }
-            try await container.start()
         } catch {
             log.finish()
             return fail("cannot start: \(error)")
         }
-        writeJSON(["pid": .int(Int64(getpid())), "status": "running"], to: files.state)
+        // The VM is up; the process waits for the daemon's `POST /start`, so its ports are
+        // bound and it reads as running before its first instruction, as in Docker.
+        writeJSON(["pid": .int(Int64(getpid())), "status": "created"], to: files.state)
 
         try? FileManager.default.createDirectory(at: files.socket.deletingLastPathComponent(), withIntermediateDirectories: true)
         // SIGTERM (logout, shutdown, `kill`) stops the container like `docker stop`, so the
@@ -181,6 +182,17 @@ public enum ShimHost {
         let control = ShimControl(container: container, files: files, spec: spec, stdin: stdin)
         let server = HTTPServer(path: files.socket.path) { req, conn in control.handle(req, conn) }
         try? server.start()
+        // A daemon that died before saying go leaves no VM behind.
+        let go = await withCheckedContinuation { done in
+            DispatchQueue.global().async { done.resume(returning: control.awaitStart()) }
+        }
+        if !go || control.startError.value != nil {
+            log.finish()
+            server.stop()
+            try? await container.stop()
+            return fail("cannot start: \(control.startError.value ?? "the daemon did not start the process")")
+        }
+        writeJSON(["pid": .int(Int64(getpid())), "status": "running"], to: files.state)
 
         let code: Int32
         do { code = try await container.wait().exitCode } catch { code = 137 }
@@ -244,11 +256,28 @@ final class ShimControl: Sendable {
         ShimHost.writeJSON(["pid": .int(Int64(getpid())), "status": .string(status)], to: files.state)
     }
 
+    /// Signaled once `POST /start` ran the process, or failed to (`startError`).
+    let started = DispatchSemaphore(value: 0)
+    let startError = Box<String?>(nil)
+    private let startOnce = Box(false)
+    static let startPatience: TimeInterval = 120
+
+    /// Blocks until `POST /start` came, up to `startPatience`; false if it never did.
+    func awaitStart() -> Bool { started.wait(timeout: .now() + Self.startPatience) == .success }
+
     func handle(_ req: Request, _ conn: Connection) -> Disposition {
         let c = container
         let parts = req.path.split(separator: "/").map(String.init)
         do {
             switch (req.method, parts.first) {
+            case ("POST", "start"):
+                guard !startOnce.value else { throw APIError(409, "already started") }
+                startOnce.value = true
+                defer { started.signal() }
+                do { try blocking { try await c.start() } } catch {
+                    startError.value = "\(error)"
+                    throw APIError(500, "\(error)")
+                }
             case ("POST", "kill"):
                 let sig = Int32(req.query["signal"] ?? "") ?? 9
                 try blocking { try await c.kill(Signal(rawValue: sig)) }
@@ -605,7 +634,7 @@ struct ShimClient: Sendable {
         let deadline = Date().addingTimeInterval(60)
         while Date() < deadline {
             if FileManager.default.fileExists(atPath: files.exit.path) { break }
-            if ["running", "paused"].contains(Self.read(files.state)?["status"]?.string),
+            if ["created", "running", "paused"].contains(Self.read(files.state)?["status"]?.string),
                 FileManager.default.fileExists(atPath: files.socket.path)
             { break }
             Thread.sleep(forTimeInterval: 0.02)

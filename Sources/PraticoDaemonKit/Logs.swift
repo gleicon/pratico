@@ -181,7 +181,11 @@ final class LogStore: @unchecked Sendable {
         defer { lock.unlock() }
         followers[nextFollower] = f
         nextFollower += 1
-        return read()
+        // With an external writer, bytes past `tailOffset` are not delivered yet: the next
+        // `refresh()` sends them to this follower too, so the snapshot stops there.
+        guard let tailOffset else { return read() }
+        let current = (try? Data(contentsOf: path)) ?? Data()
+        return Self.parse(try? Data(contentsOf: olderPath)) + Self.parse(current.prefix(tailOffset))
     }
 }
 

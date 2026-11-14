@@ -450,7 +450,7 @@ docker volume rm e2e-svol >/dev/null
 q=$(python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$snap")
 dry=$(curl -s -X POST --unix-socket "$SOCK" "http://d/pratico/snapshots/restore?path=$q&dry_run=1")
 check "a dry run lists what it would create and changes nothing" sh -c "echo '$dry' | grep -q e2e-s1 && ! docker inspect e2e-s1 >/dev/null 2>&1"
-check "the dry run reviews each container: image and published ports" python3 -c "import json,sys; r={c['Name']: c for c in json.loads(sys.argv[1])['Review']}; assert r['e2e-s1']['Image']=='alpine' and any('127.0.0.1:18300' in x for x in r['e2e-s1']['Risks']) and r['e2e-s2']['Running']" "$dry"
+check "the dry run reviews each container: image and published ports" python3 -c "import json,sys; r={c['Name']: c for c in json.loads(sys.argv[1])['Review']}; assert r['e2e-s1']['Image']=='alpine' and any('127.0.0.1:18300' in x for x in r['e2e-s1']['Risks']) and any('volume e2e-svol at /data (a new, empty volume' in x for x in r['e2e-s1']['Risks']) and r['e2e-s2']['Running']" "$dry"
 report=$(curl -s -X POST --unix-socket "$SOCK" "http://d/pratico/snapshots/restore?path=$q&start=1")
 check "AC-38 restore reports everything created and the running one started" python3 -c "import json,sys; r=json.loads(sys.argv[1]); c=r['Created']; assert c['Containers']==['e2e-s1','e2e-s2'] or sorted(c['Containers'])==['e2e-s1','e2e-s2']; assert c['Networks']==['e2e-snet'] and c['Volumes']==['e2e-svol'] and r['Started']==['e2e-s2'] and not r['Failed']" "$report"
 expect_has "AC-38 docker ps -a shows them again" "$(docker ps -a --format '{{.Names}} {{.State}}' | sort | tr '\n' ' ')" "e2e-s1 created e2e-s2 running"

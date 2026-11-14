@@ -316,11 +316,16 @@ public final class ContainerService: @unchecked Sendable {
         }
         update(rec.id) { $0.state = ContainerState(status: "running", startedAt: Date()) }
         track(rec.id, pid: pid, log: log, shim: embedded.shim)
-        // The process never ran (bad image config, missing executable): fail the start, as
-        // Docker does, instead of reporting a container that exited at once.
-        if let status = ShimClient.exitStatus(files), !status.error.isEmpty {
+        // Networks, ports, and state are in place: now the process runs (Docker's order).
+        // One that cannot (bad image config, missing executable) fails the start, as Docker
+        // does, instead of reporting a container that exited at once.
+        var failure = ShimClient.exitStatus(files)?.error ?? ""
+        if failure.isEmpty {
+            do { try embedded.shim.call(files, "POST", "/start") } catch let e as APIError { failure = e.message } catch { failure = "\(error)" }
+        }
+        if !failure.isEmpty {
             awaitExit(rec.id, seconds: 5)
-            throw Self.startError(status.error, executable: rec.path)
+            throw Self.startError(failure, executable: rec.path)
         }
         emit(rec, "start")
         health.started(rec)

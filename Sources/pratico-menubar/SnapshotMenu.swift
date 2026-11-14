@@ -106,10 +106,13 @@ extension DaemonController {
     /// beyond it (Mac folders, published ports, privileges): a snapshot can come from
     /// anywhere. Starting them is a separate choice. nil is Cancel, else whether to start.
     private func confirmRestore(_ file: URL, _ plan: RestoreReport) -> Bool? {
-        var text = Self.listed(plan.lines.filter { !$0.hasPrefix("container ") })
+        // Every string here comes from the file: one line each, cut short, warnings first,
+        // so no text in a snapshot can pose as pratico's own words or push a warning away.
+        var text = Self.listed(plan.lines.filter { !$0.hasPrefix("container ") }.map { Self.oneLine($0, 160) })
         for c in plan.Review {
-            text += "\n\ncontainer \(c.Name): \(c.Image) \(c.Command)"
-            text += c.Risks.map { "\n⚠︎ \($0)" }.joined()
+            text += "\n"
+            text += c.Risks.map { "\n⚠︎ " + Self.oneLine($0, 200) }.joined()
+            text += "\ncontainer " + Self.oneLine(c.Name, 64) + ": " + Self.oneLine(c.Image, 80) + " " + Self.oneLine(c.Command, 80)
         }
         text += "\n\nExisting containers, networks, and volumes are left as they are. Only restore snapshots you trust."
         let running = plan.Review.filter(\.Running).count
@@ -140,6 +143,12 @@ extension DaemonController {
             return nil
         }
         return report
+    }
+
+    /// Control characters (newlines included) become spaces; past `max`, an ellipsis.
+    static func oneLine(_ s: String, _ max: Int) -> String {
+        let flat = String(s.unicodeScalars.map { CharacterSet.controlCharacters.contains($0) ? " " : Character($0) })
+        return flat.count > max ? String(flat.prefix(max - 1)) + "…" : flat
     }
 
     private static func listed(_ lines: [String]) -> String {

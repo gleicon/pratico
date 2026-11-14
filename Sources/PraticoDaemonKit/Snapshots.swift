@@ -123,7 +123,7 @@ struct SnapshotService {
         var skipped: [JSON] = []
         var failed: [JSON] = []
         var started: [String] = []
-        var review: [JSON] = []
+        var reviews: [JSON] = []
         for kind in Kind.allCases {
             for name in manifest[kind.folder]?.strings ?? [] {
                 guard Self.isPlainName(name), let item = members["\(kind.folder)/\(name).json"].flatMap(JSON.parse) else {
@@ -134,7 +134,7 @@ struct SnapshotService {
                     skipped.append(["Kind": .string(kind.rawValue), "Name": .string(name), "Reason": .string("a \(kind.rawValue) with this name exists")])
                     continue
                 }
-                if kind == .container { review.append(Self.review(name, item)) }
+                if kind == .container { reviews.append(review(name, item)) }
                 if dryRun {
                     created[kind, default: []].append(name)
                     continue
@@ -156,7 +156,7 @@ struct SnapshotService {
             "DryRun": .bool(dryRun),
             "Created": .object(Dictionary(uniqueKeysWithValues: Kind.allCases.map { ($0.folder.capitalized, JSON(created[$0] ?? [])) })),
             "Started": JSON(started), "Skipped": .array(skipped), "Failed": .array(failed),
-            "Review": .array(review),
+            "Review": .array(reviews),
         ]
     }
 
@@ -175,14 +175,27 @@ struct SnapshotService {
     static func isPlainName(_ name: String) -> Bool { !name.isEmpty && !name.contains("/") && !name.hasPrefix(".") }
 
     /// What a restored container could do to this Mac, for the confirmation: a snapshot can
-    /// come from anywhere, and a container from it can reach whatever these give it.
-    static func review(_ name: String, _ item: JSON) -> JSON {
+    /// come from anywhere, and a container from it can reach whatever these give it. Mounts
+    /// come from the parser `create` uses, so the review lists exactly what gets mounted.
+    func review(_ name: String, _ item: JSON) -> JSON {
         let body = item["Create"] ?? [:]
         let host = body["HostConfig"] ?? [:]
         var risks: [String] = []
-        let binds = (host["Binds"]?.strings ?? []).filter { $0.hasPrefix("/") }.map { String($0.split(separator: ":")[0]) }
-            + (host["Mounts"]?.array ?? []).filter { $0["Type"]?.string == "bind" }.compactMap { $0["Source"]?.string }
-        if !binds.isEmpty { risks.append("reads and writes Mac folders: " + binds.joined(separator: ", ")) }
+        do {
+            for m in try ContainerService.mounts(host, volumeData: volumes.dataPath) {
+                let mode = m.readOnly ? "read-only" : "read and write"
+                if let vol = m.volume {
+                    let state = (try? volumes.resolve(vol)) != nil ? "an existing volume on this Mac" : "a new, empty volume"
+                    risks.append("mounts volume \(vol) at \(m.destination) (\(state), \(mode))")
+                } else if ContainerService.dockerSocketPaths.contains(m.source) || m.source.hasSuffix(".sock") {
+                    risks.append("controls Docker on this Mac: mounts the socket \(m.source) at \(m.destination)")
+                } else {
+                    risks.append("mounts the Mac folder \(m.source) at \(m.destination) (\(mode))")
+                }
+            }
+        } catch let e as APIError {
+            risks.append("has mounts pratico refuses (\(e.message)); it will not be created")
+        } catch {}
         let ports = (host["PortBindings"]?.object ?? [:]).flatMap { port, list in
             (list.array ?? []).map { b in "\(b["HostIp"]?.string.flatMap { $0.isEmpty ? nil : $0 } ?? "0.0.0.0"):\(b["HostPort"]?.string ?? "")→\(port)" }
         }
