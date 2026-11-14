@@ -50,12 +50,15 @@ struct ShimMount: Codable, Sendable, Equatable {
     var readOnly: Bool
     /// A host Unix socket, relayed into the guest rather than shared.
     var socket = false
+    /// A tmpfs in the guest's memory, with these mount options; nothing on the Mac.
+    var tmpfs: [String]? = nil
 
-    init(source: String, destination: String, readOnly: Bool, socket: Bool = false) {
+    init(source: String, destination: String, readOnly: Bool, socket: Bool = false, tmpfs: [String]? = nil) {
         self.source = source
         self.destination = destination
         self.readOnly = readOnly
         self.socket = socket
+        self.tmpfs = tmpfs
     }
 
     /// Specs written before socket mounts have no `socket`.
@@ -65,6 +68,7 @@ struct ShimMount: Codable, Sendable, Equatable {
         destination = try c.decode(String.self, forKey: .destination)
         readOnly = try c.decode(Bool.self, forKey: .readOnly)
         socket = try c.decodeIfPresent(Bool.self, forKey: .socket) ?? false
+        tmpfs = try c.decodeIfPresent([String].self, forKey: .tmpfs)
     }
 }
 
@@ -146,7 +150,11 @@ public enum ShimHost {
                         source: URL(filePath: m.source), destination: URL(filePath: m.destination), direction: .into))
                 }
                 for m in spec.mounts where !m.socket {
-                    config.mounts.append(.share(source: m.source, destination: m.destination, options: m.readOnly ? ["ro"] : []))
+                    if let options = m.tmpfs {
+                        config.mounts.append(.any(type: "tmpfs", source: "tmpfs", destination: m.destination, options: options))
+                    } else {
+                        config.mounts.append(.share(source: m.source, destination: m.destination, options: m.readOnly ? ["ro"] : []))
+                    }
                 }
             }
             try await container.create()

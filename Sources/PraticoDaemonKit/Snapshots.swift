@@ -193,7 +193,9 @@ struct SnapshotService {
         do {
             for m in try ContainerService.mounts(planned, volumeData: volumes.dataPath) {
                 let mode = m.readOnly ? "read-only" : "read and write"
-                if let vol = m.volume {
+                if m.tmpfs != nil {
+                    continue  // memory in the VM: reaches nothing on the Mac
+                } else if let vol = m.volume {
                     let state = (try? volumes.resolve(vol)) != nil ? "an existing volume on this Mac" : "a new, empty volume"
                     risks.append("mounts volume \(vol) at \(m.destination) (\(state), \(mode))")
                 } else if ContainerService.dockerSocketPaths.contains(m.source) || m.source.hasSuffix(".sock") {

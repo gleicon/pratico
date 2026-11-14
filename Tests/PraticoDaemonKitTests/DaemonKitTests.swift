@@ -71,7 +71,18 @@ private func volumeData(_ name: String) -> String { "/vols/\(name)/_data" }
     #expect(throws: APIError.self) { try ContainerService.mounts(["Binds": ["/tmp:relative"]], volumeData: volumeData) }
     #expect(throws: APIError.self) { try ContainerService.mounts(["Binds": ["bad/name:/d"]], volumeData: volumeData) }
     #expect(throws: APIError.self) { try ContainerService.mounts(["Mounts": [["Type": "volume", "Target": "/v"]]], volumeData: volumeData) }
-    #expect(throws: APIError.self) { try ContainerService.mounts(["Mounts": [["Type": "tmpfs", "Target": "/t"]]], volumeData: volumeData) }
+    #expect(throws: APIError.self) { try ContainerService.mounts(["Mounts": [["Type": "npipe", "Target": "/t"]]], volumeData: volumeData) }
+    #expect(throws: APIError.self) { try ContainerService.mounts(["Tmpfs": ["relative": ""]], volumeData: volumeData) }
+}
+
+@Test func tmpfsTakesDockerDefaultsAndOverrides() throws {
+    let m = try ContainerService.mounts(
+        ["Tmpfs": ["/run": "size=64m,exec"], "Mounts": [["Type": "tmpfs", "Target": "/t", "TmpfsOptions": ["SizeBytes": 1048576, "Mode": 0o1777]]]],
+        volumeData: volumeData)
+    #expect(m.map(\.destination) == ["/t", "/run"])
+    #expect(m[0].tmpfs == ["rw", "noexec", "nosuid", "nodev", "size=1048576", "mode=1777"])
+    #expect(m[1].tmpfs == ["rw", "nosuid", "nodev", "size=64m", "exec"])
+    #expect(ContainerService.shimMount(m[1], dockerSocket: "").tmpfs != nil)
 }
 
 @Test func mountFlagNeedsExistingSource() {

@@ -12,6 +12,21 @@ extension ContainerService {
         var createSource: Bool
         /// The volume's name, for a volume mount.
         var volume: String? = nil
+        /// Mount options of a tmpfs (memory in the guest, nothing on the Mac).
+        var tmpfs: [String]? = nil
+    }
+
+    /// Docker's tmpfs defaults; options the client gives replace a default of the same key.
+    static func tmpfsOptions(_ given: [String], readOnly: Bool = false) -> [String] {
+        var opts = ["rw", "noexec", "nosuid", "nodev"]
+        for o in given where !o.isEmpty {
+            let key = o.splitOnce("=").0
+            let flips = ["rw": "ro", "ro": "rw", "exec": "noexec", "noexec": "exec", "suid": "nosuid", "nosuid": "suid", "dev": "nodev", "nodev": "dev"]
+            opts.removeAll { $0 == key || $0 == flips[key] || $0.splitOnce("=").0 == key }
+            opts.append(o)
+        }
+        if readOnly { opts = opts.filter { $0 != "rw" } + ["ro"] }
+        return opts
     }
 
     /// Where Docker clients and tools expect the daemon. A container that mounts it gets
@@ -21,6 +36,7 @@ extension ContainerService {
     /// The guest side of a mount: a host Unix socket is relayed over vsock, since virtiofs
     /// shares files but not the connections behind a socket.
     static func shimMount(_ m: Mount, dockerSocket: String) -> ShimMount {
+        if let options = m.tmpfs { return ShimMount(source: "tmpfs", destination: m.destination, readOnly: m.readOnly, tmpfs: options) }
         let source = dockerSocketPaths.contains(m.source) ? dockerSocket : m.source
         var st = stat()
         let socket = stat(source, &st) == 0 && st.st_mode & S_IFMT == S_IFSOCK
@@ -48,7 +64,7 @@ extension ContainerService {
             wanted.append((name, [VolumeRecord.anonymousLabel: ""]))
             return name
         }
-        var covered: Set<String> = []
+        var covered = Set((host["Tmpfs"]?.object ?? [:]).keys)
         if let binds = host["Binds"]?.strings {
             host["Binds"] = JSON(binds.map { bind -> String in
                 let parts = bind.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
@@ -127,9 +143,23 @@ extension ContainerService {
                 try VolumeService.validate(name)
                 out.append(Mount(source: volumeData(name), destination: dst, readOnly: readOnly,
                                  createSource: false, volume: name))
+            case "tmpfs":
+                // `--mount type=tmpfs,tmpfs-size=…,tmpfs-mode=…`
+                var given: [String] = []
+                if let size = m["TmpfsOptions"]?["SizeBytes"]?.int, size > 0 { given.append("size=\(size)") }
+                if let mode = m["TmpfsOptions"]?["Mode"]?.int, mode > 0 { given.append("mode=" + String(mode, radix: 8)) }
+                out.append(Mount(source: "", destination: dst, readOnly: readOnly, createSource: false,
+                                 tmpfs: tmpfsOptions(given, readOnly: readOnly)))
             default:
                 throw APIError(400, "pratico: mount type \(type) is not supported yet")
             }
+        }
+        // `--tmpfs /path[:options]`
+        for (dst, opts) in (host["Tmpfs"]?.object ?? [:]).sorted(by: { $0.key < $1.key }) {
+            guard dst.hasPrefix("/") else { throw APIError(400, "invalid tmpfs mount: \(dst) is not an absolute path") }
+            let given = (opts.string ?? "").split(separator: ",").map(String.init)
+            let options = tmpfsOptions(given)
+            out.append(Mount(source: "", destination: dst, readOnly: options.contains("ro"), createSource: false, tmpfs: options))
         }
         return out
     }
@@ -137,7 +167,7 @@ extension ContainerService {
     func mountsJSON(_ rec: ContainerRecord) -> JSON {
         .array(((try? mounts(rec.hostConfig)) ?? []).map { m in
             var j: JSON = [
-                "Type": m.volume == nil ? "bind" : "volume", "Source": .string(m.source), "Destination": .string(m.destination),
+                "Type": .string(m.tmpfs != nil ? "tmpfs" : m.volume == nil ? "bind" : "volume"), "Source": .string(m.source), "Destination": .string(m.destination),
                 "Mode": .string(m.readOnly ? "ro" : ""), "RW": .bool(!m.readOnly), "Propagation": "rprivate",
             ]
             if let name = m.volume {

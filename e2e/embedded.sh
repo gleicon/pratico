@@ -393,6 +393,13 @@ check "image prune -a keeps images in use" docker image inspect alpine
 check "docker system prune finishes" docker system prune -f
 docker rm -f d-keep >/dev/null
 
+# tmpfs: memory in the VM, Docker's default options, sizes enforced.
+expect_has "--tmpfs mounts a tmpfs with Docker's defaults" "$(docker run --rm --tmpfs /scratch alpine sh -c 'grep " /scratch " /proc/mounts')" "tmpfs /scratch tmpfs rw,nosuid,nodev,noexec"
+expect_has "--tmpfs size is enforced" "$(docker run --rm --tmpfs /scratch:size=1m alpine sh -c 'head -c 2000000 /dev/zero >/scratch/f; echo rc=$?' 2>&1)" "rc=1"
+expect_has "--mount type=tmpfs takes size and mode" "$(docker run --rm --mount type=tmpfs,dst=/t,tmpfs-size=1048576,tmpfs-mode=1777 alpine sh -c 'grep " /t " /proc/mounts; stat -c %a /t')" "1777"
+expect_eq "inspect reports a tmpfs mount" "$(docker run -d --name e2e-tmp --tmpfs /run/x alpine sleep 30 >/dev/null; docker inspect e2e-tmp --format '{{range .Mounts}}{{.Type}} {{.Destination}}{{end}}')" "tmpfs /run/x"
+docker rm -f e2e-tmp >/dev/null
+
 # AC-28, FR-25: named and anonymous volumes.
 since=$(date +%s)
 check "AC-28 docker volume create" docker volume create e2e-v
