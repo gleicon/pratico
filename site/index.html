@@ -103,9 +103,9 @@
 
   /* Code */
   pre, code { font-family: var(--font-mono); }
-  code { font-size: 0.92em; background: color-mix(in srgb, var(--ink) 8%, transparent); padding: 0.1em 0.35em; border-radius: 5px; }
+  code { overflow-wrap: anywhere; font-size: 0.92em; background: color-mix(in srgb, var(--ink) 8%, transparent); padding: 0.1em 0.35em; border-radius: 5px; }
   .term { position: relative; background: var(--code-bg); color: var(--code-ink); border-radius: var(--radius); padding: var(--space-5); overflow-x: auto; font-size: var(--step--1); line-height: 1.7; box-shadow: 0 1px 0 var(--rule), 0 24px 48px -28px rgb(0 0 0 / 0.45); }
-  .term code { background: none; padding: 0; font-size: inherit; color: inherit; }
+  .term code { background: none; padding: 0; font-size: inherit; color: inherit; overflow-wrap: normal; }
   .term .p { color: var(--signal-bright); user-select: none; }
   .term .o { color: #9fb3c8; }
   .copy { position: absolute; top: var(--space-3); right: var(--space-3); font: 600 var(--step--1)/1 var(--font-body); background: transparent; color: var(--code-ink); border: 1px solid #3b5168; border-radius: 6px; padding: var(--space-2) var(--space-3); cursor: pointer; }
@@ -149,7 +149,7 @@
   footer p { margin: 0; }
 
   @media (max-width: 52rem) {
-    .hero .wrap, .split { grid-template-columns: 1fr; }
+    .hero .wrap, .split { grid-template-columns: minmax(0, 1fr); }
     .hero { padding-top: var(--space-7); }
     section { padding: var(--space-7) 0; }
   }
