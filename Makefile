@@ -12,7 +12,7 @@ DMG          := $(DIST_DIR)/Pratico-$(VERSION).dmg
 
 ASSETS_DIR   := $(BUILD_DIR)/runtime-assets
 
-.PHONY: all build assets probe test e2e e2e-embedded e2e-registry app sign dmg release install run uninstall clean
+.PHONY: all build assets probe test e2e e2e-embedded e2e-registry bench app sign dmg release install run uninstall clean
 
 all: build
 
@@ -40,6 +40,10 @@ e2e: build assets
 # The runtime underneath: shims, the guest agent, pratico-net, registries.
 e2e-embedded: build assets
 	e2e/embedded.sh "$(BIN_DIR)"
+
+# Bounds, performance, and CLI compatibility (AC-44 to AC-49): minutes, and 32 VMs at once.
+bench: build assets
+	e2e/bench.sh "$(BIN_DIR)"
 
 # Test harness only: spins up a throwaway private registry to check docker login + pull.
 e2e-registry: build

@@ -90,14 +90,14 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 
 ## Bounds, performance, compatibility
 
-- [ ] Connection and request-body limits hold: 65th connection handled cleanly, RSS ≤ 100 MiB (AC-47)
-- [ ] 100 start/stop cycles leave idle fd count unchanged (AC-48)
-- [ ] Oldest allowed and current Docker CLI both pass; 20.10 rejected like Docker Engine (AC-49)
+- [x] Connection and request-body limits hold: 65th connection handled cleanly, RSS ≤ 100 MiB (AC-47)
+- [x] 100 start/stop cycles leave idle fd count unchanged (AC-48)
+- [x] Oldest allowed and current Docker CLI both pass; 20.10 rejected like Docker Engine (AC-49)
 - [x] `/var/run/docker.sock` on request: help popup with the `sudo ln -s` and optional boot-job commands; pratico never asks for root (D-30)
 - [x] Containers mounting `/var/run/docker.sock` reach pratico; any host Unix socket bind is relayed (D-30, embedded)
-- [ ] `docker run --rm alpine true` P99 ≤ 1500 ms (AC-44)
-- [ ] Control calls P99 ≤ 50 ms with 100 containers (AC-45)
-- [ ] 64 concurrent clients with 32 running containers: zero errors, RSS ≤ 100 MiB (AC-46)
+- [x] `docker run --rm alpine true` P99 ≤ 1500 ms (AC-44): 436 ms
+- [x] Control calls P99 ≤ 50 ms with 100 containers (AC-45): ≤ 2 ms
+- [x] 64 concurrent clients with 32 running containers: zero errors, RSS ≤ 100 MiB (AC-46): 48 MiB
 
 ## Release
 
@@ -115,7 +115,7 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 - [ ] `docker save` of several images at once
 - [ ] A per-install CA for egress interception (with the egress task)
 - [ ] `docker build` (BuildKit or an equivalent)
-- [ ] Hot-connect, uplink, and socket-mount e2e checks are flaky when the Mac is under load; make them wait on state, not time
+- [ ] Hot-connect and uplink e2e checks are flaky (the socket-mount one was a real start-order race, fixed in D-34) when the Mac is under load; make them wait on state, not time
 - [ ] Volume copy-up: a new empty volume gets the image's files at its mount path, as in Docker
 - [ ] `tmpfs` mounts (`--tmpfs`, `--mount type=tmpfs`)
 - [ ] The menubar's new windows (Settings, Scan Results) need a visual pass on a real screen
