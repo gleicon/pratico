@@ -146,6 +146,20 @@ print(m["RepoTags"][0] if ok else "broken")
 PY
 )
 expect_eq "docker save writes a Docker archive scanners can read" "$saved" "busybox:latest"
+docker pull -q alpine >/dev/null 2>&1
+docker save busybox alpine -o "$HOME_DIR/both.tar"
+both=$(python3 -I - "$HOME_DIR/both.tar" <<'PY'
+import json, sys, tarfile
+t = tarfile.open(sys.argv[1])
+names = set(t.getnames())
+ms = json.load(t.extractfile("manifest.json"))
+ok = all(p in names for m in ms for p in [m["Config"], *m["Layers"]])
+print(" ".join(sorted(m["RepoTags"][0] for m in ms)) if ok else "broken")
+PY
+)
+expect_eq "docker save of two images writes both in one archive" "$both" "alpine:latest busybox:latest"
+docker rmi busybox >/dev/null 2>&1; docker load -i "$HOME_DIR/both.tar" >/dev/null 2>&1
+check "and docker load reads it back" docker image inspect busybox
 check "AC-24 docker image prune -f" docker image prune -f
 expect_has "docker rmi of a missing image is 404" "$(docker rmi pratico-e2e/none 2>&1)" "No such image"
 
@@ -311,6 +325,10 @@ check "AC-21 docker cp out succeeds" docker cp e2e-cp:/etc/hostname "$CP/h"
 expect_eq "AC-21 copied file has the container hostname" "$(cat "$CP/h" 2>/dev/null)" "$(docker inspect e2e-cp --format '{{.Config.Hostname}}')"
 check "AC-21 docker cp in succeeds" docker cp "$CP/h" e2e-cp:/tmp/h
 expect_eq "AC-21 contents match after the round trip" "$(docker exec e2e-cp cat /tmp/h)" "$(cat "$CP/h")"
+head -c 100000000 /dev/urandom >"$CP/big"
+check "docker cp in of 100 MB (past the in-memory body limit)" docker cp "$CP/big" e2e-cp:/tmp/big
+expect_eq "and it arrives intact" "$(docker exec e2e-cp sha256sum /tmp/big | cut -d' ' -f1)" "$(shasum -a 256 "$CP/big" | cut -d' ' -f1)"
+rm -f "$CP/big"
 mkdir -p "$CP/d/sub" && echo deep >"$CP/d/sub/f"
 docker cp "$CP/d" e2e-cp:/tmp/ >/dev/null 2>&1
 expect_eq "cp copies a directory tree in" "$(docker exec e2e-cp cat /tmp/d/sub/f)" "deep"

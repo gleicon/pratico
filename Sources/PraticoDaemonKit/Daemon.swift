@@ -83,7 +83,7 @@ public final class Daemon: @unchecked Sendable {
         }
         Uplink.raiseDescriptorLimit()  // pratico-net holds a socket per container connection
         try networks.startSwitch()  // pratico-net
-        let s = HTTPServer(path: socketPath) { [self] req, conn in handle(req, conn) }
+        let s = HTTPServer(path: socketPath, spool: Self.streamsBody) { [self] req, conn in handle(req, conn) }
         try s.start()
         server = s
         scans.startBackground()
@@ -92,6 +92,13 @@ public final class Daemon: @unchecked Sendable {
     public func stop() { server?.stop() }
 
     // MARK: Routing
+
+    /// Routes whose bodies can be larger than memory (NFR-4's streamed tar and image bodies):
+    /// `docker cp` into a container and `docker load`. They are spooled to a file.
+    @Sendable static func streamsBody(_ method: String, _ path: String) -> Bool {
+        (method == "PUT" && path.hasPrefix("/containers/") && path.hasSuffix("/archive"))
+            || (method == "POST" && path == "/images/load")
+    }
 
     func handle(_ req: Request, _ conn: Connection) -> Disposition {
         do {
@@ -262,7 +269,8 @@ public final class Daemon: @unchecked Sendable {
         case ("GET", 2, "archive"):
             try archives.get(p[0], path: req.query["path"] ?? "/", conn: conn)
         case ("PUT", 2, "archive"):
-            try archives.put(p[0], path: req.query["path"] ?? "/", tar: req.body)
+            guard let file = req.bodyFile else { throw APIError(400, "no archive in the request") }
+            try archives.put(p[0], path: req.query["path"] ?? "/", tar: file)
             conn.respond(200, body: Data())
         case ("POST", 2, "wait"):
             try containers.wait(p[0], condition: req.query["condition"] ?? "not-running", conn: conn)
@@ -381,11 +389,13 @@ public final class Daemon: @unchecked Sendable {
             images.pull(ref, platform: req.query["platform"], auth: RegistryAuth.header(req.headers["x-registry-auth"]), conn: conn)
             scans.enqueue(ref)  // background; the pull reply is already complete
         case "GET" where p == ["get"]:
-            // `docker save` of one image; several at once are not supported yet.
-            guard let names = req.query["names"], !names.isEmpty else { throw APIError(400, "names is required") }
-            try images.save(names, conn: conn)
+            // `docker save a b`: the CLI repeats `names`.
+            try images.save(req.queryAll["names"] ?? [], conn: conn)
         case "GET" where p.count >= 2 && p.last == "get":
-            try images.save(name, conn: conn)
+            try images.save([name], conn: conn)
+        case "POST" where p == ["load"]:
+            guard let file = req.bodyFile else { throw APIError(400, "no archive in the request") }
+            for ref in try images.load(file, quiet: req.flag("quiet"), conn: conn) { scans.enqueue(ref) }
         case "POST" where p == ["prune"]:
             conn.json(200, images.prune(filters: ContainerService.parseFilters(req.query["filters"])))
         case "GET" where p.count >= 2 && p.last == "json":

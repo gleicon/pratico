@@ -21,6 +21,8 @@ protocol ImageBackend: Sendable {
     func push(_ ref: String, auth: RegistryAuth?, progress: @escaping @Sendable (JSON) -> Void) throws
     /// Writes the image's OCI layout (`index.json`, `oci-layout`, `blobs/`) for one platform.
     func saveLayout(_ ref: String, os: String, arch: String, into dir: URL) throws
+    /// Imports every image an OCI layout directory names (`docker load`); their references.
+    func loadLayout(from dir: URL) throws -> [String]
     /// `docker login`: checks the credentials with the registry and keeps them for later
     /// pulls and pushes that come without `X-Registry-Auth`. Throws `APIError(401)` when
     /// the registry refuses them.
@@ -126,6 +128,10 @@ final class EmbeddedImageBackend: ImageBackend, @unchecked Sendable {
             _ = try await operation.export(index: img.descriptor, platforms: { $0.os == current.os && $0.architecture == current.architecture })
         }
         meter.flush()
+    }
+
+    func loadLayout(from dir: URL) throws -> [String] {
+        try blocking { [store] in try await store.load(from: dir).map(\.reference) }
     }
 
     func saveLayout(_ ref: String, os: String, arch: String, into dir: URL) throws {

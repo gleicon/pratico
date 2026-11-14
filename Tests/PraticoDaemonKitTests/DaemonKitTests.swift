@@ -34,10 +34,11 @@ func normalizesImageRefs(input: String, expected: String) {
 }
 
 @Test func parsesQueryEncoding() {
-    let q = Connection.parseQuery("filters=%7B%22label%22%3A%5B%22a%3D1%22%5D%7D&all=1&x=a+b")
-    #expect(q["all"] == "1")
-    #expect(q["x"] == "a b")
-    #expect(ContainerService.parseFilters(q["filters"]) == ["label": ["a=1"]])
+    let q = Connection.parseQuery("filters=%7B%22label%22%3A%5B%22a%3D1%22%5D%7D&all=1&x=a+b&names=a&names=b%3A1")
+    #expect(q["all"] == ["1"])
+    #expect(q["x"] == ["a b"])
+    #expect(q["names"] == ["a", "b:1"])
+    #expect(ContainerService.parseFilters(q["filters"]?.last) == ["label": ["a=1"]])
 }
 
 @Test func filtersAcceptMapForm() {

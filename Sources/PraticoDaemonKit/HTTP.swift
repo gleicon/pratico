@@ -6,6 +6,8 @@ public enum Limits {
     public static let maxConnections = 64
     public static let maxHeaderBytes = 64 * 1024
     public static let maxBodyBytes = 64 * 1024 * 1024
+    /// A streamed body (`docker cp` in, `docker load`) goes to a file, not memory, up to this.
+    public static let maxSpooledBytes: Int64 = 64 << 30
     static let readChunk = 64 * 1024
 }
 
@@ -18,6 +20,11 @@ public struct Request: Sendable {
     public var body: Data
     /// The `/vX.Y` prefix the client asked for, if any.
     public var apiVersion: String? = nil
+    /// Every value of each query key (`names=a&names=b`); `query` keeps the last.
+    public var queryAll: [String: [String]] = [:]
+    /// The body, written to a temporary file, for routes that stream large bodies; `body`
+    /// is then empty. Removed once the handler returns.
+    public var bodyFile: URL? = nil
 
     public func flag(_ name: String) -> Bool {
         guard let v = query[name]?.lowercased() else { return false }
@@ -107,8 +114,9 @@ public final class Connection: @unchecked Sendable {
         return take(n)
     }
 
-    /// Reads one request, or nil on EOF / malformed input / limit exceeded.
-    func readRequest() -> Request? {
+    /// Reads one request, or nil on EOF / malformed input / limit exceeded. When `spool`
+    /// says so for its method and path, the body goes to a file (`bodyFile`), not memory.
+    func readRequest(spool: (String, String) -> Bool = { _, _ in false }) -> Request? {
         guard let head = readUntil(Array("\r\n\r\n".utf8), max: Limits.maxHeaderBytes),
             let text = String(bytes: head, encoding: .utf8)
         else { return nil }
@@ -122,36 +130,68 @@ public final class Connection: @unchecked Sendable {
             headers[key] = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
         }
 
-        var body = Data()
-        if headers["transfer-encoding"]?.lowercased().contains("chunked") == true {
-            while true {
-                guard let sizeLine = readUntil(Array("\r\n".utf8), max: 1024),
-                    let size = Int(String(decoding: sizeLine, as: UTF8.self).split(separator: ";")[0], radix: 16)
-                else { return nil }
-                if size == 0 {
-                    _ = readUntil(Array("\r\n".utf8), max: Limits.maxHeaderBytes)
-                    break
-                }
-                guard body.count + size <= Limits.maxBodyBytes, let chunk = readExact(size),
-                    readExact(2) != nil
-                else { return nil }
-                body.append(contentsOf: chunk)
-            }
-        } else if let len = headers["content-length"].flatMap(Int.init), len > 0 {
-            guard len <= Limits.maxBodyBytes, let bytes = readExact(len) else { return nil }
-            body = Data(bytes)
-        }
-
         let target = String(parts[1])
         let (rawPath, rawQuery) = target.splitOnce("?")
         let (path, version) = Self.splitVersion(rawPath.removingPercentEncoding ?? rawPath)
+
+        var body = Data()
+        var bodyFile: URL?
+        if spool(String(parts[0]), path) {
+            let file = FileManager.default.temporaryDirectory.appending(path: "pratico-body-\(UUID().uuidString)")
+            guard FileManager.default.createFile(atPath: file.path, contents: nil, attributes: [.posixPermissions: 0o600]),
+                let h = try? FileHandle(forWritingTo: file)
+            else { return nil }
+            let ok = readBody(headers, limit: Limits.maxSpooledBytes) { (try? h.write(contentsOf: $0)) != nil }
+            try? h.close()
+            guard ok else { try? FileManager.default.removeItem(at: file); return nil }
+            bodyFile = file
+        } else {
+            guard readBody(headers, limit: Int64(Limits.maxBodyBytes), { body.append($0); return true }) else { return nil }
+        }
         return Request(
             method: String(parts[0]),
             path: path,
-            query: Self.parseQuery(rawQuery ?? ""),
+            query: Self.parseQuery(rawQuery ?? "").mapValues { $0.last ?? "" },
             headers: headers,
             body: body,
-            apiVersion: version)
+            apiVersion: version,
+            queryAll: Self.parseQuery(rawQuery ?? ""),
+            bodyFile: bodyFile)
+    }
+
+    /// The body (chunked or `Content-Length`), handed to `sink` piece by piece, at most
+    /// `limit` bytes; false if it breaks off, overruns, or `sink` fails.
+    private func readBody(_ headers: [String: String], limit: Int64, _ sink: (Data) -> Bool) -> Bool {
+        var total: Int64 = 0
+        if headers["transfer-encoding"]?.lowercased().contains("chunked") == true {
+            while true {
+                guard let sizeLine = readUntil(Array("\r\n".utf8), max: 1024),
+                    let size = Int(String(decoding: sizeLine, as: UTF8.self).split(separator: ";")[0], radix: 16), size >= 0
+                else { return false }
+                if size == 0 {
+                    _ = readUntil(Array("\r\n".utf8), max: Limits.maxHeaderBytes)
+                    return true
+                }
+                total += Int64(size)
+                guard total <= limit else { return false }
+                var left = size
+                while left > 0 {
+                    let n = min(left, 1 << 20)
+                    guard let piece = readExact(n), sink(Data(piece)) else { return false }
+                    left -= n
+                }
+                guard readExact(2) != nil else { return false }
+            }
+        } else if let len = headers["content-length"].flatMap(Int64.init), len > 0 {
+            guard len <= limit else { return false }
+            var left = len
+            while left > 0 {
+                let n = Int(min(left, 1 << 20))
+                guard let piece = readExact(n), sink(Data(piece)) else { return false }
+                left -= Int64(n)
+            }
+        }
+        return true
     }
 
     /// `/v1.55/containers/json` is `/containers/json` at API 1.55.
@@ -166,14 +206,14 @@ public final class Connection: @unchecked Sendable {
         return (path, nil)
     }
 
-    static func parseQuery(_ q: String) -> [String: String] {
-        var out: [String: String] = [:]
+    static func parseQuery(_ q: String) -> [String: [String]] {
+        var out: [String: [String]] = [:]
         for pair in q.split(separator: "&") {
             let (k, v) = String(pair).splitOnce("=")
             func decode(_ s: String) -> String {
                 s.replacingOccurrences(of: "+", with: " ").removingPercentEncoding ?? s
             }
-            out[decode(k)] = decode(v ?? "")
+            out[decode(k), default: []].append(decode(v ?? ""))
         }
         return out
     }
@@ -278,11 +318,14 @@ public final class HTTPServer: @unchecked Sendable {
 
     let path: String
     let handler: Handler
+    /// Routes whose request bodies are streamed to a file (see `Request.bodyFile`).
+    let spool: @Sendable (String, String) -> Bool
     private var listenFD: Int32 = -1
     private let slots = DispatchSemaphore(value: Limits.maxConnections)
 
-    public init(path: String, handler: @escaping Handler) {
+    public init(path: String, spool: @escaping @Sendable (String, String) -> Bool = { _, _ in false }, handler: @escaping Handler) {
         self.path = path
+        self.spool = spool
         self.handler = handler
     }
 
@@ -350,8 +393,10 @@ public final class HTTPServer: @unchecked Sendable {
     }
 
     private func serve(_ conn: Connection) {
-        while let req = conn.readRequest() {
-            switch handler(req, conn) {
+        while let req = conn.readRequest(spool: spool) {
+            let disposition = handler(req, conn)
+            if let file = req.bodyFile { try? FileManager.default.removeItem(at: file) }
+            switch disposition {
             // HTTP/1.1: the client asked for the connection to end with this response.
             case .keepAlive where req.headers["connection"]?.lowercased() == "close": conn.close(); return
             case .keepAlive: continue

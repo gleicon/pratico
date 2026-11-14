@@ -112,7 +112,7 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 - [ ] More than 4 networks per container (Virtualization.framework allows 4 NICs per VM)
 - [ ] IPv6 on pratico-net
 - [ ] `docker cp` with a stopped container (the guest agent needs a running VM)
-- [ ] `docker save` of several images at once
+- [x] `docker save` of several images at once; `docker load` (OCI archives, Docker 25+); request bodies of `cp` in and `load` stream to disk past the 64 MiB in-memory limit
 - [ ] A per-install CA for egress interception (with the egress task)
 - [ ] `docker build` (BuildKit or an equivalent)
 - [x] Hot-connect and uplink e2e checks wait on state (`eventually`, listener and size polls), not time; pass with every core busy (the socket-mount one was a real start-order race, D-34)

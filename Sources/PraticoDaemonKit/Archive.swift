@@ -98,7 +98,8 @@ final class ArchiveService: @unchecked Sendable {
     /// on the host (`Tar.extract` refuses `..` and writing through symlinks), then each top
     /// entry is copied in by the agent.
     /// Files end up owned by root, as with Docker's default `cp`, where the image has `chown`.
-    func put(_ ref: String, path: String, tar data: Data) throws {
+    /// `archive` is the request body, spooled to a file: it may be far larger than memory.
+    func put(_ ref: String, path: String, tar archive: URL) throws {
         let rec = try running(ref)
         // Docker refuses a destination directory that does not exist.
         guard (try? stat(ref, path: path)) != nil else {
@@ -109,8 +110,6 @@ final class ArchiveService: @unchecked Sendable {
         defer { try? FileManager.default.removeItem(at: scratch) }
         let work = scratch.appending(path: "tree")
         try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
-        let archive = scratch.appending(path: "in.tar")
-        try data.write(to: archive)
         do { try Tar.extract(archive, to: work) } catch let e as APIError { throw e } catch {
             throw APIError(400, "invalid tar archive")
         }

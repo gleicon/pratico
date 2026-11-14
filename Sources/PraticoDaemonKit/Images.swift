@@ -275,12 +275,49 @@ public final class ImageService: Sendable {
         emit(["progressDetail": [:], "aux": ["Tag": .string(tag), "Digest": .string(digest), "Size": .int(size)]])
     }
 
-    /// `GET /images/{name}/get` (`docker save`), D-23.
-    func save(_ nameOrId: String, conn: Connection) throws {
+    /// `POST /images/load` (`docker load`): an archive with an OCI `index.json`, as Docker 25
+    /// and later and `docker save` here write. Index entries without a name take, in order,
+    /// the `RepoTags` of `manifest.json`. Replies with Docker's JSON lines.
+    func load(_ archive: URL, quiet: Bool, conn: Connection) throws -> [String] {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appending(path: "pratico-load-\(UUID().uuidString)")
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: dir) }
+        try Tar.extract(archive, to: dir)
+        let indexFile = dir.appending(path: "index.json")
+        guard var index = (try? Data(contentsOf: indexFile)).flatMap(JSON.parse), var entries = index["manifests"]?.array else {
+            throw APIError(400, "pratico: this archive has no OCI index.json (Docker before 25 wrote archives without one); save it again with Docker 25 or later, or pull the image")
+        }
+        let tags = ((try? Data(contentsOf: dir.appending(path: "manifest.json"))).flatMap(JSON.parse)?.array ?? [])
+            .compactMap { $0["RepoTags"]?.strings?.first }
+        let nameKeys = ["com.apple.containerization.image.name", "io.containerd.image.name"]
+        for i in entries.indices where nameKeys.allSatisfy({ entries[i]["annotations"]?[$0] == nil }) && i < tags.count {
+            var notes = entries[i]["annotations"]?.object ?? [:]
+            notes["io.containerd.image.name"] = .string(ImageRef.normalize(tags[i]))
+            entries[i]["annotations"] = .object(notes)
+        }
+        index["manifests"] = .array(entries)
+        try index.encoded().write(to: indexFile)
+        let refs: [String]
+        do { refs = try backend.loadLayout(from: dir) } catch {
+            throw APIError(400, "cannot load the archive: \(error)")
+        }
+        conn.beginChunked()
+        for ref in refs {
+            let name = ImageRef.familiar(ref)
+            if let img = resolve(ref)?.image { events.emit("image", "load", id: img.id, attributes: ["name": name]) }
+            conn.chunk((["stream": .string("Loaded image: \(name)\n")] as JSON).encoded() + Data("\n".utf8))
+        }
+        conn.endChunked()
+        return refs
+    }
+
+    /// `GET /images/{name}/get` and `GET /images/get?names=…` (`docker save`, D-23).
+    func save(_ names: [String], conn: Connection) throws {
         let fm = FileManager.default
         let file = fm.temporaryDirectory.appending(path: "pratico-save-\(UUID().uuidString).tar")
         defer { try? fm.removeItem(at: file) }
-        _ = try exportArchive(nameOrId, to: file)
+        _ = try exportArchive(names, to: file)
         let h = try FileHandle(forReadingFrom: file)
         defer { try? h.close() }
         conn.beginChunked(contentType: "application/x-tar")
@@ -290,55 +327,79 @@ public final class ImageService: Sendable {
         conn.endChunked()
     }
 
-    /// Writes a Docker archive of the image to `file`. Backends save an OCI layout; Docker's
-    /// archive is that layout plus a `manifest.json`, which scanners (osv-scanner, grype,
-    /// trivy, snyk) need. Entries are written without a `./` prefix, which some reject.
     @discardableResult
     func exportArchive(_ nameOrId: String, to file: URL) throws -> LocalImage {
-        guard let (img, matched) = resolve(nameOrId) else { throw APIError(404, "No such image: \(nameOrId)") }
-        let ref = matched ?? img.refs[0]
+        try exportArchive([nameOrId], to: file)[0]
+    }
+
+    /// Writes a Docker archive of the images to `file`. Backends save an OCI layout; Docker's
+    /// archive is that layout plus a `manifest.json`, which scanners (osv-scanner, grype,
+    /// trivy, snyk) need. Several images share one `blobs/` (a layer two hold is stored
+    /// once), one `index.json`, and one `manifest.json` entry each, as `docker save a b`
+    /// writes them. Entries are written without a `./` prefix, which some tools reject.
+    @discardableResult
+    func exportArchive(_ names: [String], to file: URL) throws -> [LocalImage] {
+        guard !names.isEmpty else { throw APIError(400, "names is required") }
         let fm = FileManager.default
         let work = fm.temporaryDirectory.appending(path: "pratico-export-\(UUID().uuidString)")
         let dir = work.appending(path: "image")
-        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        let blobs = dir.appending(path: "blobs/sha256")
+        try fm.createDirectory(at: blobs, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: work) }
-        let platform = Self.variant(img.record)?["platform"]
-        let arch = platform?["architecture"]?.string ?? "arm64"
-        let os = platform?["os"]?.string ?? "linux"
-        do { try backend.saveLayout(ref, os: os, arch: arch, into: dir) } catch {
-            throw APIError(500, "cannot save \(ImageRef.familiar(ref)): \(error)")
-        }
 
-        // Digests come from the archive's JSON: only well-formed ones become paths.
-        func blob(_ digest: String?) -> JSON? {
-            guard let digest, Self.isDigest(digest) else { return nil }
-            return (try? Data(contentsOf: dir.appending(path: "blobs/sha256/\(digest.dropFirst(7))"))).flatMap(JSON.parse)
+        var saved: [LocalImage] = []
+        var docker: [JSON] = []
+        var index: [JSON] = []
+        for (n, nameOrId) in names.enumerated() {
+            guard let (img, matched) = resolve(nameOrId) else { throw APIError(404, "No such image: \(nameOrId)") }
+            let ref = matched ?? img.refs[0]
+            let one = work.appending(path: "one-\(n)")
+            try fm.createDirectory(at: one, withIntermediateDirectories: true)
+            let platform = Self.variant(img.record)?["platform"]
+            let arch = platform?["architecture"]?.string ?? "arm64"
+            let os = platform?["os"]?.string ?? "linux"
+            do { try backend.saveLayout(ref, os: os, arch: arch, into: one) } catch {
+                throw APIError(500, "cannot save \(ImageRef.familiar(ref)): \(error)")
+            }
+
+            // Digests come from the archive's JSON: only well-formed ones become paths.
+            func blob(_ digest: String?) -> JSON? {
+                guard let digest, Self.isDigest(digest) else { return nil }
+                return (try? Data(contentsOf: one.appending(path: "blobs/sha256/\(digest.dropFirst(7))"))).flatMap(JSON.parse)
+            }
+            // index.json → (nested indexes, bounded) → the platform's image manifest.
+            let top = (try? Data(contentsOf: one.appending(path: "index.json"))).flatMap(JSON.parse)
+            var node = top
+            var depth = 0
+            while let manifests = node?["manifests"]?.array {
+                depth += 1
+                guard depth <= 8 else { throw APIError(500, "saved image index nests too deeply") }
+                let pick = manifests.first { $0["platform"]?["architecture"]?.string == arch } ?? manifests.first
+                node = blob(pick?["digest"]?.string)
+            }
+            let layers = (node?["layers"]?.array ?? []).compactMap { $0["digest"]?.string }
+            guard let config = node?["config"]?["digest"]?.string, Self.isDigest(config), layers.allSatisfy(Self.isDigest) else {
+                throw APIError(500, "saved image has no valid manifest for \(os)/\(arch)")
+            }
+            let path: (String) -> JSON = { .string("blobs/sha256/\($0.dropFirst(7))") }
+            docker.append(["Config": path(config), "RepoTags": [.string(ImageRef.familiar(ref))], "Layers": .array(layers.map(path))])
+            index += top?["manifests"]?.array ?? []
+            for name in (try? fm.contentsOfDirectory(atPath: one.appending(path: "blobs/sha256").path)) ?? [] {
+                let target = blobs.appending(path: name)
+                if !fm.fileExists(atPath: target.path) { try fm.moveItem(at: one.appending(path: "blobs/sha256/\(name)"), to: target) }
+            }
+            if n == 0 { try fm.copyItem(at: one.appending(path: "oci-layout"), to: dir.appending(path: "oci-layout")) }
+            try? fm.removeItem(at: one)
+            saved.append(img)
         }
-        // index.json → (nested indexes, bounded) → the platform's image manifest.
-        var node = (try? Data(contentsOf: dir.appending(path: "index.json"))).flatMap(JSON.parse)
-        var depth = 0
-        while let manifests = node?["manifests"]?.array {
-            depth += 1
-            guard depth <= 8 else { throw APIError(500, "saved image index nests too deeply") }
-            let pick = manifests.first { $0["platform"]?["architecture"]?.string == arch } ?? manifests.first
-            node = blob(pick?["digest"]?.string)
-        }
-        let layers = (node?["layers"]?.array ?? []).compactMap { $0["digest"]?.string }
-        guard let config = node?["config"]?["digest"]?.string, Self.isDigest(config), layers.allSatisfy(Self.isDigest) else {
-            throw APIError(500, "saved image has no valid manifest for \(os)/\(arch)")
-        }
-        let path: (String) -> JSON = { .string("blobs/sha256/\($0.dropFirst(7))") }
-        let docker: JSON = [[
-            "Config": path(config),
-            "RepoTags": [.string(ImageRef.familiar(ref))],
-            "Layers": .array(layers.map(path)),
-        ]]
-        try docker.encoded().write(to: dir.appending(path: "manifest.json"))
+        try JSON.array(docker).encoded().write(to: dir.appending(path: "manifest.json"))
+        try (["schemaVersion": 2, "mediaType": "application/vnd.oci.image.index.v1+json", "manifests": .array(index)] as JSON)
+            .encoded().write(to: dir.appending(path: "index.json"))
 
         do { try Tar.create(file, base: dir, names: ["manifest.json", "index.json", "oci-layout", "blobs"]) } catch {
             throw APIError(500, "cannot write image archive: \(error)")
         }
-        return img
+        return saved
     }
 
     static func isDigest(_ s: String) -> Bool {
