@@ -27,6 +27,9 @@ ok() { echo "ok   $1"; pass=$((pass + 1)); }
 bad() { echo "FAIL $1${2:+ — $2}"; fail=$((fail + 1)); }
 check() { local name="$1"; shift; if "$@" >/dev/null 2>&1; then ok "$name"; else bad "$name"; fi; }
 expect_has() { if grep -qF -- "$3" <<<"$2"; then ok "$1"; else bad "$1" "want [$3] in [$2]"; fi; }
+# A check on state that settles (a NIC coming up, ARP, a listener): retried for up to 5 s,
+# so it waits on the state, not on a guess at how long it takes.
+eventually() { local name="$1"; shift; for _ in $(seq 25); do "$@" >/dev/null 2>&1 && { ok "$name"; return; }; sleep 0.2; done; bad "$name"; }
 expect_eq() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "want [$3] got [$2]"; fi; }
 
 start_daemon() {
@@ -173,7 +176,7 @@ docker run -d --name e-c2 --network e-n1 --network-alias db alpine sleep 600 >/d
 check "names resolve on a user network" docker exec e-c1 ping -c1 -W2 e-c2
 check "aliases resolve on a user network" docker exec e-c1 ping -c1 -W2 db
 if docker exec e-c1 ping -c1 -W2 "$b2" >/dev/null 2>&1; then bad "networks are isolated"; else ok "networks are isolated"; fi
-check "external names resolve through the Mac" docker exec e-c1 nslookup example.com
+eventually "external names resolve through the Mac" docker exec e-c1 nslookup example.com
 expect_eq "host.docker.internal is the gateway" "$(docker exec e-c1 nslookup host.docker.internal 2>/dev/null | awk '/^Address/ {a=$2} END {print a}')" \
     "$(docker network inspect e-n1 --format '{{(index .IPAM.Config 0).Gateway}}')"
 # The uplink: UDP, ping, TCP to the internet and to the Mac (host.docker.internal).
@@ -185,18 +188,18 @@ big_sum=$(shasum -a 256 "$WWW/big.bin" | cut -d' ' -f1)
 WWW_PORT=18093
 (cd "$WWW" && exec python3 -m http.server "$WWW_PORT" --bind 127.0.0.1 >/dev/null 2>&1) &
 WWW_PID=$!
-sleep 1
-check "UDP leaves the network (DNS to 1.1.1.1)" docker exec e-c1 nslookup example.com 1.1.1.1
-check "ping leaves the network" docker exec e-c1 ping -c1 -W3 1.1.1.1
-check "HTTPS to the internet" docker exec e-c1 wget -qO /dev/null -T10 https://example.com
+for _ in $(seq 50); do curl -s -m 1 "http://127.0.0.1:$WWW_PORT/" >/dev/null && break; sleep 0.1; done
+eventually "UDP leaves the network (DNS to 1.1.1.1)" docker exec e-c1 nslookup example.com 1.1.1.1
+eventually "ping leaves the network" docker exec e-c1 ping -c1 -W3 1.1.1.1
+eventually "HTTPS to the internet" docker exec e-c1 wget -qO /dev/null -T10 https://example.com
 expect_eq "host.docker.internal reaches the Mac" "$(docker exec e-c1 wget -qO- -T5 "http://host.docker.internal:$WWW_PORT/")" "hello-from-mac"
 if docker exec e-c1 wget -qO- -T5 http://host.docker.internal:1 >/dev/null 2>&1; then bad "a closed port is refused"; else ok "a closed port is refused"; fi
 expect_eq "20 MB download arrives intact" \
     "$(docker exec e-c1 sh -c "wget -qO /tmp/big.bin http://host.docker.internal:$WWW_PORT/big.bin && sha256sum /tmp/big.bin" | cut -d' ' -f1)" "$big_sum"
 (nc -l 127.0.0.1 18094 >"$HOME_DIR/up.bin" &)
-sleep 0.5
+for _ in $(seq 50); do lsof -nP -iTCP:18094 -sTCP:LISTEN >/dev/null 2>&1 && break; sleep 0.1; done
 docker exec e-c1 sh -c 'nc host.docker.internal 18094 < /tmp/big.bin'
-sleep 1
+for _ in $(seq 50); do [ "$(wc -c <"$HOME_DIR/up.bin" | tr -d ' ')" = 20000000 ] && break; sleep 0.1; done
 expect_eq "20 MB upload arrives intact" "$(shasum -a 256 "$HOME_DIR/up.bin" | cut -d' ' -f1)" "$big_sum"
 kill "$WWW_PID" 2>/dev/null
 
@@ -212,8 +215,8 @@ if docker exec e-i1 wget -qO- -T3 "http://$gw:18093/" >/dev/null 2>&1; then bad 
 c2=$(docker inspect e-c2 --format '{{(index .NetworkSettings.Networks "e-n1").IPAddress}}')
 check "connect a running container" docker network connect e-n1 e-b1
 n1=$(docker inspect e-b1 --format '{{(index .NetworkSettings.Networks "e-n1").IPAddress}}')
-check "a hot-connected container reaches the network by name" docker exec e-b1 ping -c1 -W2 e-c2
-check "the network resolves a hot-connected container" docker exec e-c1 ping -c1 -W2 e-b1
+eventually "a hot-connected container reaches the network by name" docker exec e-b1 ping -c1 -W2 e-c2
+eventually "the network resolves a hot-connected container" docker exec e-c1 ping -c1 -W2 e-b1
 check "disconnect a running container" docker network disconnect e-n1 e-b1
 if docker exec e-b1 ping -c1 -W2 "$c2" >/dev/null 2>&1; then bad "disconnect cuts traffic"; else ok "disconnect cuts traffic"; fi
 docker exec e-b1 ip link set eth1 up >/dev/null 2>&1
@@ -222,12 +225,12 @@ if docker exec e-c1 nslookup e-b1 >/dev/null 2>&1; then bad "a disconnected cont
 docker network connect e-n1 e-b1
 expect_eq "reconnect gets the same address back" "$(docker inspect e-b1 --format '{{(index .NetworkSettings.Networks "e-n1").IPAddress}}')" "$n1"
 check "disconnect the primary network" docker network disconnect bridge e-b1
-check "DNS survives losing the primary network" docker exec e-b1 ping -c1 -W2 e-c2
-check "the default route moves to the next network" docker exec e-b1 wget -qO /dev/null -T10 https://example.com
+eventually "DNS survives losing the primary network" docker exec e-b1 ping -c1 -W2 e-c2
+eventually "the default route moves to the next network" docker exec e-b1 wget -qO /dev/null -T10 https://example.com
 if docker exec e-b1 ping -c1 -W2 "$b2" >/dev/null 2>&1; then bad "the old primary network is cut"; else ok "the old primary network is cut"; fi
 stop_daemon
 start_daemon
-check "hot-connected NICs survive a daemon restart" docker exec e-b1 ping -c1 -W2 e-c2
+eventually "hot-connected NICs survive a daemon restart" docker exec e-b1 ping -c1 -W2 e-c2
 
 docker rm -f e-b1 e-b2 e-c1 e-c2 e-i1 e-i2 >/dev/null
 check "network rm" docker network rm e-n1

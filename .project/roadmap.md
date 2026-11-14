@@ -115,7 +115,7 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 - [ ] `docker save` of several images at once
 - [ ] A per-install CA for egress interception (with the egress task)
 - [ ] `docker build` (BuildKit or an equivalent)
-- [ ] Hot-connect and uplink e2e checks are flaky (the socket-mount one was a real start-order race, fixed in D-34) when the Mac is under load; make them wait on state, not time
+- [x] Hot-connect and uplink e2e checks wait on state (`eventually`, listener and size polls), not time; pass with every core busy (the socket-mount one was a real start-order race, D-34)
 - [ ] Volume copy-up: a new empty volume gets the image's files at its mount path, as in Docker
 - [ ] `tmpfs` mounts (`--tmpfs`, `--mount type=tmpfs`)
 - [ ] The menubar's new windows (Settings, Scan Results) need a visual pass on a real screen

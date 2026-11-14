@@ -37,6 +37,7 @@ fail=0
 ok() { echo "ok   $1"; pass=$((pass + 1)); }
 bad() { echo "FAIL $1${2:+ — $2}"; fail=$((fail + 1)); }
 check() { local name="$1"; shift; if "$@" >/dev/null 2>&1; then ok "$name"; else bad "$name"; fi; }
+eventually() { local name="$1"; shift; for _ in $(seq 25); do "$@" >/dev/null 2>&1 && { ok "$name"; return; }; sleep 0.2; done; bad "$name"; }
 expect_eq() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "want [$3] got [$2]"; fi; }
 expect_has() { if grep -qi -- "$3" <<<"$2"; then ok "$1"; else bad "$1" "[$3] not in [$2]"; fi; }
 
@@ -384,13 +385,13 @@ if docker run --rm busybox ping -c1 -W1 "$nb_ip" >/dev/null 2>&1; then
 else
     ok "bridge containers cannot reach a custom network"
 fi
-check "custom network reaches the internet" docker exec e2e-na wget -qO- -T5 http://1.1.1.1
+eventually "custom network reaches the internet" docker exec e2e-na wget -qO- -T5 http://1.1.1.1
 docker run -d --name e2e-nbr busybox sleep 300 >/dev/null
 check "connect a running container" docker network connect e2e-n e2e-nbr
 docker create --name e2e-nc busybox sleep 300 >/dev/null
 check "connect a created container with an alias" docker network connect --alias cache e2e-n e2e-nc
 docker start e2e-nc >/dev/null
-check "the connected container is reachable by its alias" docker exec e2e-na ping -c1 -W2 cache
+eventually "the connected container is reachable by its alias" docker exec e2e-na ping -c1 -W2 cache
 check "it is on both networks" test "$(docker inspect e2e-nc --format '{{len .NetworkSettings.Networks}}')" = 2
 docker network disconnect e2e-n e2e-nb
 if docker exec e2e-na ping -c1 -W2 e2e-nb >/dev/null 2>&1; then bad "AC-27 after disconnect b is unreachable by name"; else ok "AC-27 after disconnect b is unreachable by name"; fi
