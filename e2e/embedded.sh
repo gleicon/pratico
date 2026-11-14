@@ -411,6 +411,12 @@ docker run -d --name e2e-vuser -v e2e-v:/v alpine sleep 300 >/dev/null
 expect_eq "inspect reports a volume mount" "$(docker inspect e2e-vuser --format '{{range .Mounts}}{{.Type}} {{.Name}} {{.Destination}}{{end}}')" "volume e2e-v /v"
 expect_has "a volume in use is not removed" "$(docker volume rm e2e-v 2>&1)" "volume is in use"
 docker rm -f e2e-vuser >/dev/null
+expect_has "copy-up: a new volume starts with the image's files" "$(docker run --rm -v e2e-cu:/etc alpine cat /etc/os-release)" "Alpine Linux"
+expect_eq "copy-up keeps symlinks and the exec bit" "$(docker run --rm -v e2e-cubin:/bin alpine /bin/sh -c 'readlink /bin/ls; test -x /bin/busybox && echo exec' | tr '\n' ' ')" "/bin/busybox exec "
+expect_eq "nocopy starts empty" "$(docker run --rm -v e2e-nocp:/lib/apk/db:nocopy alpine ls -A /lib/apk/db | wc -l | tr -d ' ')" "0"
+docker run --rm -v e2e-cu:/etc alpine rm /etc/motd
+expect_eq "a volume with files is not copied into again" "$(docker run --rm -v e2e-cu:/etc alpine sh -c 'test -e /etc/motd && echo back || echo gone')" "gone"
+docker volume rm e2e-cu e2e-cubin e2e-nocp >/dev/null
 check "run -v name:/path creates a missing volume" docker run --rm -v e2e-auto:/a alpine true
 check "and keeps it after --rm (named volumes stay)" docker volume inspect e2e-auto
 before=$(docker volume ls -q | wc -l | tr -d ' ')

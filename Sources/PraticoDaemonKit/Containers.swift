@@ -236,6 +236,7 @@ public final class ContainerService: @unchecked Sendable {
             try? FileManager.default.removeItem(at: dir(id))
             throw APIError(500, "container create failed: \(error)")
         }
+        copyUp(host, rootfs: dir(id).appending(path: "rootfs.ext4"))
 
         let rec = ContainerRecord(
             id: id, name: shortName, appleId: appleId, image: imageRef, imageId: ImageService.id(img),

@@ -1,4 +1,5 @@
 import Foundation
+import PraticoCore
 
 /// Bind mounts and volumes (SPEC FR-14, FR-25): parsed from the stored HostConfig, so
 /// `docker inspect` and every start see the same mounts.
@@ -14,6 +15,8 @@ extension ContainerService {
         var volume: String? = nil
         /// Mount options of a tmpfs (memory in the guest, nothing on the Mac).
         var tmpfs: [String]? = nil
+        /// `nocopy`: a new volume starts empty, without the image's files (copy-up).
+        var noCopy = false
     }
 
     /// Docker's tmpfs defaults; options the client gives replace a default of the same key.
@@ -111,14 +114,15 @@ extension ContainerService {
             guard parts.count == 2 || parts.count == 3, !parts[0].isEmpty, parts[1].hasPrefix("/") else {
                 throw APIError(400, "invalid volume specification: '\(bind)'")
             }
-            let readOnly = parts.count == 3 && parts[2].split(separator: ",").contains("ro")
+            let opts = parts.count == 3 ? parts[2].split(separator: ",").map(String.init) : []
+            let readOnly = opts.contains("ro")
             if parts[0].hasPrefix("/") {
                 out.append(Mount(source: parts[0], destination: parts[1], readOnly: readOnly,
                                  createSource: !Self.dockerSocketPaths.contains(parts[0])))
             } else {
                 try VolumeService.validate(parts[0])
                 out.append(Mount(source: volumeData(parts[0]), destination: parts[1], readOnly: readOnly,
-                                 createSource: false, volume: parts[0]))
+                                 createSource: false, volume: parts[0], noCopy: opts.contains("nocopy")))
             }
         }
         for m in host["Mounts"]?.array ?? [] {
@@ -142,7 +146,7 @@ extension ContainerService {
                 }
                 try VolumeService.validate(name)
                 out.append(Mount(source: volumeData(name), destination: dst, readOnly: readOnly,
-                                 createSource: false, volume: name))
+                                 createSource: false, volume: name, noCopy: m["VolumeOptions"]?["NoCopy"]?.bool ?? false))
             case "tmpfs":
                 // `--mount type=tmpfs,tmpfs-size=…,tmpfs-mode=…`
                 var given: [String] = []
@@ -177,6 +181,19 @@ extension ContainerService {
             }
             return j
         })
+    }
+
+    /// Docker's copy-up, for a new container: each volume it mounts that is still empty gets
+    /// the image's files at the mount path, unless the mount says `nocopy`. A failed copy is
+    /// logged; the container still gets its (empty) volume, as a volume without files would.
+    func copyUp(_ host: JSON, rootfs: URL) {
+        for m in (try? mounts(host)) ?? [] where m.volume != nil && !m.noCopy {
+            let data = URL(filePath: m.source, directoryHint: .isDirectory)
+            guard ((try? FileManager.default.contentsOfDirectory(atPath: data.path)) ?? ["?"]).isEmpty else { continue }
+            do { try CopyUp.copy(rootfs: rootfs, path: m.destination, into: data) } catch {
+                Pratico.log("pratico-daemon: copy-up of \(m.destination) into volume \(m.volume!) failed: \(error)")
+            }
+        }
     }
 
     /// Volume name → IDs of the containers, running or not, that mount it.

@@ -116,7 +116,7 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 - [ ] A per-install CA for egress interception (with the egress task)
 - [ ] `docker build` (BuildKit or an equivalent)
 - [x] Hot-connect and uplink e2e checks wait on state (`eventually`, listener and size polls), not time; pass with every core busy (the socket-mount one was a real start-order race, D-34)
-- [ ] Volume copy-up: a new empty volume gets the image's files at its mount path, as in Docker
+- [x] Volume copy-up: a new empty volume gets the image's files at its mount path, as in Docker; `nocopy` honored
 - [x] `tmpfs` mounts (`--tmpfs`, `--mount type=tmpfs`), Docker's default options, size and mode
 - [ ] The menubar's new windows (Settings, Scan Results) need a visual pass on a real screen
 
