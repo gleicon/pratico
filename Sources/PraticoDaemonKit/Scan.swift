@@ -13,6 +13,10 @@ struct ScanFinding: Codable, Equatable, Sendable {
     var cvss: Double?
     var malicious = false  // OpenSSF Malicious Packages (MAL-*)
     var kev = false  // CISA Known Exploited Vulnerabilities
+    /// FIRST EPSS: the probability (0–1) of exploitation in the next 30 days, and its
+    /// percentile among all CVEs; the highest among the finding's CVEs.
+    var epss: Double? = nil
+    var epssPercentile: Double? = nil
 
     var cves: [String] { ([id] + aliases).filter { $0.hasPrefix("CVE-") } }
 }
@@ -392,6 +396,12 @@ final class ScanService: @unchecked Sendable {
         let (kev, kevDate) = knownExploited()
         var findings = ScanParsers.merge(lists)
         for i in findings.indices where !kev.isDisjoint(with: findings[i].cves) { findings[i].kev = true }
+        let odds = exploitPrediction(Set(findings.flatMap(\.cves)))
+        for i in findings.indices {
+            guard let best = findings[i].cves.compactMap({ odds[$0] }).max(by: { $0.score < $1.score }) else { continue }
+            findings[i].epss = best.score
+            findings[i].epssPercentile = best.percentile
+        }
         let report = ScanReport(imageId: img.id, refs: img.refs, time: Date(), scanners: runs,
                                 findings: findings, packages: packages, kevDate: kevDate)
         // Deleted while it was scanned: `forget` already ran, so saving would bring it back.
@@ -493,6 +503,46 @@ final class ScanService: @unchecked Sendable {
         guard let json = (try? Data(contentsOf: cache)).flatMap(JSON.parse) else { return ([], nil) }
         let ids = (json["vulnerabilities"]?.array ?? []).compactMap { $0["cveID"]?.string }
         return (Set(ids), json["dateReleased"]?.string)
+    }
+
+    static let epssURL = "https://api.first.org/data/v1/epss"
+
+    /// FIRST EPSS scores for `cves`, from `scan-db/epss.json` when fetched in the last day,
+    /// else from the EPSS API in batches of 100 (only CVE IDs are sent). Offline, whatever
+    /// the cache holds; a `file://` URL (tests) is read whole, in the API's JSON shape.
+    private func exploitPrediction(_ cves: Set<String>) -> [String: (score: Double, percentile: Double)] {
+        guard !cves.isEmpty else { return [:] }
+        let cache = dbDir.appending(path: "epss.json")
+        var known = ((try? Data(contentsOf: cache)).flatMap(JSON.parse)?.object ?? [:])
+        let now = Date().timeIntervalSince1970
+        let stale = cves.filter { (known[$0]?["fetched"]?.double ?? 0) < now - 24 * 3600 }.sorted()
+        if !stale.isEmpty, let base = URL(string: env["PRATICO_EPSS_URL"] ?? Self.epssURL) {
+            let batches = base.isFileURL ? [stale] : stride(from: 0, to: stale.count, by: 100).map { Array(stale[$0..<min($0 + 100, stale.count)]) }
+            for batch in batches {
+                var url = base
+                if !base.isFileURL { url.append(queryItems: [URLQueryItem(name: "cve", value: batch.joined(separator: ","))]) }
+                let done = DispatchSemaphore(value: 0)
+                let fetched = Box<Data?>(nil)
+                URLSession.shared.dataTask(with: url) { data, response, _ in
+                    if (response as? HTTPURLResponse).map({ $0.statusCode == 200 }) ?? base.isFileURL { fetched.value = data }
+                    done.signal()
+                }.resume()
+                _ = done.wait(timeout: .now() + 30)
+                let wanted = Set(batch)
+                for row in fetched.value.flatMap(JSON.parse)?["data"]?.array ?? [] {
+                    guard let cve = row["cve"]?.string, wanted.contains(cve),
+                        let score = row["epss"]?.string.flatMap(Double.init), let pct = row["percentile"]?.string.flatMap(Double.init)
+                    else { continue }
+                    known[cve] = ["epss": .double(score), "percentile": .double(pct), "fetched": .double(now)]
+                }
+            }
+            try? JSON.object(known).encoded().write(to: cache, options: .atomic)
+        }
+        var out: [String: (score: Double, percentile: Double)] = [:]
+        for cve in cves {
+            if let s = known[cve]?["epss"]?.double, let p = known[cve]?["percentile"]?.double { out[cve] = (s, p) }
+        }
+        return out
     }
 
     /// Runs a scanner, by default with a 15-minute bound (grype's first run downloads its

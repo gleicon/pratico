@@ -18,13 +18,16 @@ struct ScanResult: Decodable, Identifiable, Equatable {
         var cvss: Double?
         var malicious: Bool
         var kev: Bool
+        /// FIRST EPSS: chance of exploitation in the next 30 days, and its percentile.
+        var epss: Double?
+        var epssPercentile: Double?
         /// One advisory often hits several packages; a row is the three together, which the
         /// daemon reports once each. Keyed by the advisory alone, the table repeated rows.
         var id: String { "\(advisory) \(package) \(version)" }
 
         enum CodingKeys: String, CodingKey {
             case advisory = "id"
-            case sources, package, version, fixed, severity, cvss, malicious, kev
+            case sources, package, version, fixed, severity, cvss, malicious, kev, epss, epssPercentile
         }
     }
     struct Report: Decodable, Equatable {
@@ -155,6 +158,11 @@ struct ScanResultsView: View {
                     TableColumn("Severity") { f in Text(f.severity + (f.cvss.map { String(format: " %.1f", $0) } ?? "")) }
                         .width(90)
                     TableColumn("Found by") { f in Text(f.sources.map(ScanResult.scannerName).sorted().joined(separator: ", ")).lineLimit(1) }
+                    TableColumn("Exploit odds") { f in
+                        Text(f.epss.map { String(format: "%.1f%%", $0 * 100) } ?? "")
+                            .help(f.epssPercentile.map { String(format: "EPSS: more likely to be exploited in the next 30 days than %.0f%% of CVEs", $0 * 100) } ?? "No EPSS score")
+                    }
+                    .width(90)
                     TableColumn("Flags") { f in Text([f.malicious ? "malware" : nil, f.kev ? "exploited (KEV)" : nil].compactMap { $0 }.joined(separator: ", ")) }
                     TableColumn("Fixed in") { f in Text(f.fixed.joined(separator: ", ")).lineLimit(1).help(f.fixed.joined(separator: "\n")) }
                 }
@@ -166,8 +174,9 @@ struct ScanResultsView: View {
         .padding()
     }
 
-    private func rank(_ f: ScanResult.Finding) -> Int {
-        (f.malicious ? 100 : 0) + (f.kev ? 50 : 0) + (["critical": 4, "high": 3, "medium": 2, "low": 1][f.severity] ?? 0)
+    private func rank(_ f: ScanResult.Finding) -> Double {
+        // Malware, then exploited, then severity, then the odds of exploitation within it.
+        Double(f.malicious ? 100 : 0) + Double(f.kev ? 50 : 0) + Double(["critical": 4, "high": 3, "medium": 2, "low": 1][f.severity] ?? 0) + (f.epss ?? 0)
     }
 
     static func fetch() async -> [ScanResult] {
