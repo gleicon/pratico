@@ -69,6 +69,11 @@ public final class Daemon: @unchecked Sendable {
                                          containers: containers, networks: networks, volumes: volumes)
         self.disk = DiskService(home: home, images: images, containers: containers, volumes: volumes)
         containers.startGate = { [scans] rec in scans.blockReason(imageId: rec.imageId) }
+        // An image's unpacked copy goes with it.
+        _ = events.subscribe(since: nil) { [embedded = containers.embedded] e in
+            if e.type == "image" && e.action == "delete" { embedded.dropRootfsCache(imageId: e.id) }
+            return true
+        }
     }
 
     public func start() throws {
@@ -87,6 +92,7 @@ public final class Daemon: @unchecked Sendable {
         try s.start()
         server = s
         scans.startBackground()
+        containers.embedded.sweepRootfsCache(keeping: Set(images.localImages().map(\.id)))
     }
 
     public func stop() { server?.stop() }

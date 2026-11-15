@@ -389,7 +389,7 @@ docker run --name d-gone alpine sh -c 'head -c 5000000 /dev/urandom >/big' >/dev
 disk=$(curl -s --unix-socket "$SOCK" http://d/pratico/disk)
 check "disk use counts a stopped container's written data" python3 -c "import json,sys; d=json.loads(sys.argv[1]); assert d['Containers']['Stopped'] >= 5000000 and d['Images']['Unused'] > 0 and d['Total'] > 0" "$disk"
 check "cleanup plans: both covers the stopped container and every unused image" python3 -c "import json,sys; c=json.loads(sys.argv[1])['Cleanup']; n=lambda p,k: {i['Name'] for i in p[k]}; assert 'd-gone' in n(c['Both'],'Containers') and n(c['Images'],'Images') <= n(c['Both'],'Images') and 'busybox:latest' in n(c['Images'],'Images') and c['Both']['Bytes'] >= c['Images']['Bytes'] > 0 and c['Containers']['Bytes'] >= 5000000" "$disk"
-check "disk use slices add up to the total" python3 -c "import json,sys; d=json.loads(sys.argv[1]); i,c=d['Images'],d['Containers']; assert d['Total'] == i['Size']+c['Running']+c['Stopped']+c['Logs']+d['Volumes']['Size']+d['Runtime']+d['Scans']" "$disk"
+check "disk use slices add up to the total" python3 -c "import json,sys; d=json.loads(sys.argv[1]); i,c=d['Images'],d['Containers']; assert d['Total'] == i['Size']+i['Unpacked']+c['Running']+c['Stopped']+c['Logs']+d['Volumes']['Size']+d['Runtime']+d['Scans']" "$disk"
 df=$(docker system df --format '{{.Type}} {{.TotalCount}} {{.Active}}' 2>&1)
 expect_has "docker system df counts images" "$df" "Images $(docker images -q | sort -u | wc -l | tr -d ' ') 1"
 expect_has "docker system df counts containers" "$df" "Containers 2 1"
@@ -426,6 +426,17 @@ expect_eq "a symlink comes out as a link" "$(readlink "$CPS/ls")" "/bin/busybox"
 expect_has "a missing path is a 404" "$(docker cp e2e-cpo:/nope "$CPS/nope" 2>&1)" "Could not find the file /nope"
 check "the exited container still starts" docker start e2e-cpo
 docker rm -f e2e-cps e2e-cpo >/dev/null
+
+# Each image is unpacked once; containers get clones that share it until they write.
+docker run --rm alpine true
+t0=$(python3 -c 'import time; print(time.time())')
+docker create --name e2e-clone1 alpine sh -c 'echo one > /mine; cat /mine' >/dev/null
+docker create --name e2e-clone2 alpine sh -c 'cat /mine 2>/dev/null || echo clean' >/dev/null
+check "a create after the first is fast (a clone, not an unpack)" python3 -c "import sys,time; assert time.time() - float(sys.argv[1]) < 2" "$t0"
+expect_eq "a write in one clone" "$(docker start -a e2e-clone1)" "one"
+expect_eq "does not reach the other" "$(docker start -a e2e-clone2)" "clean"
+check "the unpacked image is cached once" test "$(ls "$HOME_DIR/store/rootfs-cache" | grep -c 'ext4$')" -ge 1
+docker rm e2e-clone1 e2e-clone2 >/dev/null
 
 # tmpfs: memory in the VM, Docker's default options, sizes enforced.
 expect_has "--tmpfs mounts a tmpfs with Docker's defaults" "$(docker run --rm --tmpfs /scratch alpine sh -c 'grep " /scratch " /proc/mounts')" "tmpfs /scratch tmpfs rw,nosuid,nodev,noexec"

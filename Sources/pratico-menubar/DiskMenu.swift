@@ -21,6 +21,8 @@ struct DiskUsage: Decodable, Equatable {
         var Size: Int64
         var Unused: Int64
         var Unreferenced: Int64
+        /// Images unpacked once for new containers, which share it as clones.
+        var Unpacked: Int64?
         var Items: [Image]
     }
     struct ContainerGroup: Decodable, Equatable {
@@ -133,6 +135,7 @@ struct DiskMenu: View {
                 // Each line is its own slice; together they make the total above.
                 Text("Images: \(bytes(d.Images.Size - d.Images.Unreferenced))  (\(bytes(d.Images.Unused)) unused)")
                 if d.Images.Unreferenced > 0 { Text("Leftover image data: \(bytes(d.Images.Unreferenced))") }
+                if let u = d.Images.Unpacked, u > 0 { Text("Unpacked images, shared by containers: \(bytes(u))") }
                 Text("Running containers: \(bytes(d.Containers.Running))  (\(d.Containers.Items.count - d.stopped.count))")
                 Text("Stopped containers: \(bytes(d.Containers.Stopped))  (\(d.stopped.count))")
                 Text("Container logs: \(bytes(d.Containers.Logs))")

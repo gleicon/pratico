@@ -109,6 +109,8 @@ final class EmbeddedContainers: Sendable {
     let kernel: String
     let initfs: String
     let store: ImageStore
+    /// One image unpacked into the cache at a time (the first create of each image).
+    private let cacheLock = NSLock()
 
     init(shim: ShimClient, kernel: String, initfs: String, store: ImageStore) {
         self.shim = shim
@@ -132,13 +134,40 @@ final class EmbeddedContainers: Sendable {
         }
     }
 
-    /// Unpacks the image into the container's own ext4 root filesystem (sparse, 8 GiB
-    /// capacity). Done once at create; the file keeps the container's changes across
-    /// restarts, as Docker does.
+    /// The container's own ext4 root filesystem (sparse, 8 GiB capacity), which keeps its
+    /// changes across restarts, as Docker does. Each image is unpacked once into
+    /// `rootfsCache`; a container gets an APFS clone of it, which costs no time or space
+    /// until the container writes (a copy where cloning is not possible).
     func prepareRootfs(image ref: String, at url: URL) throws {
-        try blocking { [store] in
-            let image = try await store.get(reference: ref)
-            _ = try await EXT4Unpacker(capacityInBytes: 8.gib()).unpack(image, for: .current, at: url)
+        let digest = try blocking { [store] in try await store.get(reference: ref).digest }
+        let cached = rootfsCache.appending(path: "\(digest.dropFirst(7)).ext4")
+        try cacheLock.withLock {
+            guard !FileManager.default.fileExists(atPath: cached.path) else { return }
+            try FileManager.default.createDirectory(at: rootfsCache, withIntermediateDirectories: true)
+            let partial = rootfsCache.appending(path: "\(UUID().uuidString).partial")
+            defer { try? FileManager.default.removeItem(at: partial) }
+            try blocking { [store] in
+                let image = try await store.get(reference: ref)
+                _ = try await EXT4Unpacker(capacityInBytes: 8.gib()).unpack(image, for: .current, at: partial)
+            }
+            try FileManager.default.moveItem(at: partial, to: cached)
+        }
+        if clonefile(cached.path, url.path, 0) != 0 { try FileManager.default.copyItem(at: cached, to: url) }
+    }
+
+    /// Unpacked images, one ext4 per image digest (`prepareRootfs`).
+    var rootfsCache: URL { store.path.appending(path: "rootfs-cache", directoryHint: .isDirectory) }
+
+    /// Drops the unpacked copy of an image that is gone; with `keeping`, every copy whose
+    /// image is not in it (at start, for images removed while the daemon was down).
+    func dropRootfsCache(imageId: String) {
+        try? FileManager.default.removeItem(at: rootfsCache.appending(path: "\(imageId.dropFirst(7)).ext4"))
+    }
+
+    func sweepRootfsCache(keeping imageIds: Set<String>) {
+        let keep = Set(imageIds.map { "\($0.dropFirst(7)).ext4" })
+        for name in (try? FileManager.default.contentsOfDirectory(atPath: rootfsCache.path)) ?? [] where !keep.contains(name) {
+            try? FileManager.default.removeItem(at: rootfsCache.appending(path: name))
         }
     }
 }

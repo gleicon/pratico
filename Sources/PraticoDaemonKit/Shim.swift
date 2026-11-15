@@ -94,6 +94,9 @@ struct ShimFiles: Sendable {
 /// VM, writes the container's output to the log, serves `shim.sock`, and records the exit
 /// code in `exit.json` before exiting. A daemon restart does not touch it.
 public enum ShimHost {
+    /// The pipe `ShimClient.spawn` waits on: one byte once the container is created.
+    static let readyFD: Int32 = 3
+
     public static func run(directory: String) async -> Int32 {
         let files = ShimFiles(dir: URL(filePath: directory, directoryHint: .isDirectory))
         func fail(_ message: String) -> Int32 {
@@ -195,6 +198,10 @@ public enum ShimHost {
         let control = ShimControl(container: container, files: files, spec: spec, stdin: stdin)
         let server = HTTPServer(path: files.socket.path) { req, conn in control.handle(req, conn) }
         try? server.start()
+        // Created and listening: wake the daemon's `spawn` (no-op for a shim it did not start).
+        var one: UInt8 = 1
+        _ = write(Self.readyFD, &one, 1)
+        close(Self.readyFD)
         // A daemon that died before saying go leaves no VM behind.
         let go = await withCheckedContinuation { done in
             DispatchQueue.global().async { done.resume(returning: control.awaitStart()) }
@@ -640,15 +647,24 @@ struct ShimClient: Sendable {
         posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0)
         posix_spawn_file_actions_addopen(&actions, 1, files.shimLog.path, O_WRONLY | O_CREAT | O_APPEND, 0o644)
         posix_spawn_file_actions_adddup2(&actions, 1, 2)
+        // fd 3: the shim writes a byte once the container is created (`ShimHost.readyFD`),
+        // and the pipe ends when it exits; either wakes the wait below, without polling.
+        var ready: [Int32] = [-1, -1]
+        guard pipe(&ready) == 0 else { throw APIError(500, "cannot create a pipe for pratico-shim") }
+        defer { close(ready[0]) }
+        posix_spawn_file_actions_adddup2(&actions, ready[1], ShimHost.readyFD)
         let argv = [binary, files.dir.path]
         var cargs = argv.map { strdup($0) } + [nil]
         defer { cargs.forEach { free($0) } }
         var pid: pid_t = 0
         let rc = posix_spawn(&pid, binary, &actions, &attr, &cargs, environ)
+        close(ready[1])
         guard rc == 0 else { throw APIError(500, "cannot start pratico-shim: \(String(cString: strerror(rc)))") }
 
         let deadline = Date().addingTimeInterval(60)
         while Date() < deadline {
+            var p = pollfd(fd: ready[0], events: Int16(POLLIN), revents: 0)
+            _ = poll(&p, 1, Int32(max(deadline.timeIntervalSinceNow, 0) * 1000))
             if FileManager.default.fileExists(atPath: files.exit.path) { break }
             if ["created", "running", "paused"].contains(Self.read(files.state)?["status"]?.string),
                 FileManager.default.fileExists(atPath: files.socket.path)

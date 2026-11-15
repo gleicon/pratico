@@ -10,6 +10,22 @@ struct DiskService {
     let volumes: VolumeService
 
     private var store: URL { home.appending(path: "store", directoryHint: .isDirectory) }
+    /// Images unpacked once for new containers (`EmbeddedContainers.prepareRootfs`).
+    private var rootfsCache: URL { store.appending(path: "rootfs-cache", directoryHint: .isDirectory) }
+
+    /// Bytes only this file holds on APFS: a clone shares the rest with its source. nil
+    /// where the volume does not report it.
+    static func privateSize(_ path: String) -> Int64? {
+        var list = attrlist()
+        list.bitmapcount = u_short(ATTR_BIT_MAP_COUNT)
+        list.forkattr = attrgroup_t(ATTR_CMNEXT_PRIVATESIZE)
+        var buf = [UInt8](repeating: 0, count: 32)
+        guard getattrlist(path, &list, &buf, buf.count, UInt32(FSOPT_ATTR_CMN_EXTENDED | FSOPT_NOFOLLOW)) == 0 else { return nil }
+        return buf.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 4, as: Int64.self) }
+    }
+
+    /// The unpacked copy of `imageId`, if any.
+    func unpackedSize(_ imageId: String) -> Int64 { Self.allocated(rootfsCache.appending(path: "\(imageId.dropFirst(7)).ext4").path) }
     private var blobs: URL { store.appending(path: "content/blobs/sha256", directoryHint: .isDirectory) }
 
     /// Bytes allocated under `path`, symlinks not followed.
@@ -97,6 +113,7 @@ struct DiskService {
         let prunable = withVolumes ? Set(volumes.prunable(filters: ["all": ["true"]]).map(\.name)) : []
         let vols = m.volumes.filter { prunable.contains($0.record.name) }
         let bytes = gone.reduce(0) { $0 + $1.rootfs + $1.logs } + m.images.reclaimable(removed) + leftover + vols.reduce(0) { $0 + $1.size }
+            + removed.reduce(0) { $0 + unpackedSize($1) }
         return [
             "Containers": .array(gone.map { ["Id": .string($0.record.id), "Name": .string($0.record.name), "Size": .int($0.rootfs + $0.logs)] }),
             "Images": .array(m.images.items.filter { removed.contains($0.image.id) }.map {
@@ -117,7 +134,10 @@ struct DiskService {
         containers.all().map { rec in
             let files = ShimFiles(dir: containers.root.appending(path: rec.id, directoryHint: .isDirectory))
             let logs = Self.allocated(files.log.path) + Self.allocated(files.log.path + ".1")
-            return ContainerUse(record: rec, rootfs: Self.allocated(files.dir.path) - logs, logs: logs)
+            // The rootfs is a clone of the unpacked image: only its own blocks are its.
+            let rootfs = files.dir.appending(path: "rootfs.ext4").path
+            let own = Self.privateSize(rootfs).map { Self.allocated(files.dir.path) - Self.allocated(rootfs) + $0 } ?? Self.allocated(files.dir.path)
+            return ContainerUse(record: rec, rootfs: own - logs, logs: logs)
         }
     }
 
@@ -127,6 +147,7 @@ struct DiskService {
         let ctrs = containerUse()
         let vols = volumeUse()
         let content = Self.allocated(store.appending(path: "content").path)
+        let unpacked = Self.allocated(rootfsCache.path)
         let unreferenced = max(content - use.referenced, 0)
         let m = Measure(images: use, containers: ctrs, volumes: vols, unreferenced: unreferenced)
         let volumeBytes = vols.reduce(Int64(0)) { $0 + $1.size }
@@ -140,10 +161,10 @@ struct DiskService {
             .volumeAvailableCapacityForImportantUsage ?? 0
         return [
             // Every part below is its own slice: they add up to Total.
-            "Total": .int(content + runtime + scans + sum(ctrs) + logs + volumeBytes),
+            "Total": .int(content + unpacked + runtime + scans + sum(ctrs) + logs + volumeBytes),
             "Free": .int(free),
             "Images": [
-                "Size": .int(content), "Unused": .int(use.reclaimable(unusedIds(keeping: images.inUse()))),
+                "Size": .int(content), "Unpacked": .int(unpacked), "Unused": .int(use.reclaimable(unusedIds(keeping: images.inUse()))),
                 "Unreferenced": .int(unreferenced),
                 "Items": .array(use.items.map { u in
                     ["Id": .string(u.image.id), "Name": .string(u.image.displayName), "Tags": JSON(u.image.tags), "Size": .int(u.size), "Shared": .int(u.shared),
