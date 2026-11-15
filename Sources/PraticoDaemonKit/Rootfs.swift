@@ -84,7 +84,7 @@ enum CopyUp {
         return (size, UInt32(inode.mode), Int(inode.mtime), inode.mode & typeMask == linkType ? linkTarget(reader, FilePath(path), inode) ?? "" : "")
     }
 
-    private static func linkTarget(_ reader: EXT4.EXT4Reader, _ src: FilePath, _ inode: EXT4.Inode) -> String? {
+    static func linkTarget(_ reader: EXT4.EXT4Reader, _ src: FilePath, _ inode: EXT4.Inode) -> String? {
         // Targets under 60 bytes live in the inode itself (ext4 fast symlinks); longer
         // ones are read as the link's data.
         let size = Int(inode.sizeLow)

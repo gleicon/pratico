@@ -725,3 +725,26 @@ private func emptyDir() throws -> URL {
     #expect(throws: APIError.self) { try LogWindow(since: "10m", until: nil) }
     #expect(throws: APIError.self) { try LogWindow(since: "300", until: "200") }
 }
+
+@Test func psOutputBecomesDockerTop() {
+    let t = ContainerService.psTable("PID   USER  TIME  COMMAND\n    1 root  0:00  sleep 300\n    7 root  0:00  ps -ef\n", hiding: "ps -ef")
+    #expect(t["Titles"]?.strings == ["PID", "USER", "TIME", "COMMAND"])
+    #expect(t["Processes"]?.array?.count == 1 && t["Processes"]?.array?[0].strings == ["1", "root", "0:00", "sleep 300"])
+}
+
+@Test func diffReportsWhatDockerWould() {
+    typealias E = RootfsTree.Entry
+    let dir = E(mode: 0o040755, uid: 0, gid: 0, size: 4096, mtime: 1, link: "")
+    let file = E(mode: 0o100644, uid: 0, gid: 0, size: 3, mtime: 1, link: "")
+    let image: [String: E] = ["/etc": dir, "/etc/motd": file, "/etc/os": file, "/old": dir, "/old/a": file, "/usr": dir]
+    var mine = image
+    mine["/etc"]?.mtime = 9  // a timestamp alone is no change
+    mine["/usr"]?.mtime = 9
+    mine["/etc/motd"] = nil
+    mine["/etc/new"] = file
+    mine["/old"] = nil
+    mine["/old/a"] = nil
+    mine["/etc/hosts"] = file  // pratico's own
+    let c = RootfsTree.changes(from: image, to: mine).map { "\($0.kind) \($0.path)" }
+    #expect(c == ["0 /etc", "1 /etc/new", "2 /etc/motd", "2 /old"].sorted { $0.dropFirst(2) < $1.dropFirst(2) })
+}

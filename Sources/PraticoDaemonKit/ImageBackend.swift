@@ -164,6 +164,8 @@ final class EmbeddedImageBackend: ImageBackend, @unchecked Sendable {
                 "platform": ["architecture": .string(platform.architecture), "os": .string(platform.os),
                              "variant": platform.variant.map(JSON.string) ?? .null],
                 "size": .int(size),
+                // Compressed sizes, in the manifest's order (`docker history`).
+                "layers": .array(manifest.layers.map { JSON.int($0.size) }),
                 "config": config,
             ]],
         ]

@@ -86,10 +86,11 @@ Design notes: [docs/design/runtime.md](docs/design/runtime.md).
 
 Supported:
 
-- Containers: create, start, stop, restart, kill, pause, rm, logs (`-f`, `--tail`,
-  `-t`), attach, exec (`-it`, resize), cp (running or stopped containers), stats, wait,
-  inspect, healthchecks, events, prune.
-- Images: pull, push, tag, rm, inspect, prune, save (one or several), load (OCI archives),
+- Containers: create, start, stop, restart, kill, pause, rm, rename, update, logs
+  (`-f`, `--tail`, `-t`, `--since`, `--until`), attach, exec (`-it`, `--privileged`,
+  resize), top, diff, export, cp (running or stopped containers), stats, wait, inspect
+  and `ps` (`--size` too), healthchecks, events, prune.
+- Images: pull, push, tag, rm, inspect, history, prune, save (one or several), load (OCI archives),
   list filters (`reference`, `dangling`, `label`, `before`, `since`).
 - Networks: create (bridge, `--internal`), connect and disconnect running containers,
   aliases, DNS by name, prune.

@@ -203,6 +203,18 @@ public final class Daemon: @unchecked Sendable {
         case ("DELETE", 1, _):
             try containers.remove(p[0], force: req.flag("force"), volumes: req.flag("v"))
             conn.respond(204)
+        case ("POST", 2, "rename"):
+            try containers.rename(p[0], to: req.query["name"] ?? "")
+            conn.respond(204)
+        case ("GET", 2, "top"):
+            conn.json(200, try containers.top(p[0], psArgs: req.query["ps_args"]))
+        case ("GET", 2, "export"):
+            try containers.export(p[0], conn: conn)
+        case ("GET", 2, "changes"):
+            conn.json(200, .array(try containers.changes(p[0])))
+        case ("POST", 2, "update"):
+            guard let body = JSON.parse(req.body) else { throw APIError(400, "invalid JSON body") }
+            conn.json(200, try containers.update(p[0], body))
         case ("GET", 2, "json"):
             let view = containers.inspect(try containers.resolve(p[0]))
             conn.json(200, req.flag("size") ? disk.sized([view])[0] : view)
@@ -349,6 +361,9 @@ public final class Daemon: @unchecked Sendable {
         case "GET" where p.count >= 2 && p.last == "json":
             guard let img = images.resolve(name) else { throw APIError(404, "No such image: \(name)") }
             conn.json(200, ImageService.inspect(img.image))
+        case "GET" where p.count >= 2 && p.last == "history":
+            guard let img = images.resolve(name) else { throw APIError(404, "No such image: \(name)") }
+            conn.json(200, .array(ImageService.history(img.image.record, tags: img.image.tags)))
         case "POST" where p.count >= 2 && p.last == "push":
             try images.push(ImageRef.join(name, tag: req.query["tag"]), auth: RegistryAuth.header(req.headers["x-registry-auth"]),
                             conn: conn)

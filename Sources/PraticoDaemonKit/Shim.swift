@@ -447,6 +447,15 @@ final class ShimControl: Sendable {
         case ("POST", "nic"):
             guard let change = try? JSONDecoder().decode(NICChange.self, from: req.body) else { throw APIError(400, "not a NIC change") }
             try nic(change)
+        case ("POST", "sync"):
+            // Flushes the guest's page cache to its disk image, so the Mac reads what it wrote.
+            try blocking {
+                try await c.withVirtualMachineInstance { vm in
+                    let agent = try await vm.dialAgent()
+                    defer { Task { try? await agent.close() } }
+                    try await agent.sync()
+                }
+            }
         case ("POST", "pause"):
             try blocking { try await c.withVirtualMachineInstance { try await $0.pause() } }
             record("paused")
@@ -578,15 +587,19 @@ extension ShimControl {
         }
     }
 
-    /// One-shot exec with captured output (Docker keeps 4 KiB), for healthchecks:
-    /// `{"args": [...], "timeout": seconds}` → `{"exitCode", "output"}`; -1 on timeout.
+    /// One-shot exec with captured output, for healthchecks and `docker top`:
+    /// `{"args": [...], "timeout": seconds, "limit": bytes}` → `{"exitCode", "output"}`;
+    /// -1 on timeout.
     func run(_ body: JSON) throws -> JSON {
         let args = body["args"]?.strings ?? []
         guard !args.isEmpty else { throw APIError(400, "shim: exec needs args") }
         let timeout = Int64(body["timeout"]?.int ?? 30)
         let c = container
         let spec = spec
-        let output = CollectingWriter(limit: 4096)  // Docker keeps 4 KiB of probe output
+        // Docker keeps 4 KiB of probe output; `docker top` asks for more, up to 1 MiB.
+        let limit = Int(body["limit"]?.int ?? 4096)
+        guard (1...(1 << 20)).contains(limit) else { throw APIError(400, "shim: exec output limit \(limit) out of range") }
+        let output = CollectingWriter(limit: limit)
         let id = "exec-\(randomHexID().prefix(12))"
         let code: Int32 = try blocking {
             let p = try await c.exec(id) { cfg in

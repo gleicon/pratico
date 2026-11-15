@@ -54,6 +54,16 @@ container cannot start until that finishes.
 Archive extraction (`cp`, `load`) refuses paths that escape the target, follows no
 symlinks, and caps sizes and entry counts.
 
+## Export and diff
+
+`docker export` writes the root filesystem as a tar. `docker diff` compares it with the
+image's unpacked copy, as Docker lists changes: added, deleted, and changed, a directory
+when something under it changed. `/etc/hosts`, `/etc/hostname`, and `/etc/resolv.conf`,
+which pratico writes, are left out, as Docker leaves them out. For a running container
+both first flush the guest's writes and pause its VM while they read, then resume it.
+
+`docker history` lists each layer's compressed size, as stored.
+
 ## Disk use
 
 `docker system df`, `docker ps --size`, `docker inspect --size`, and the menubar's Disk

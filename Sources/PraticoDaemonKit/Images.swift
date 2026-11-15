@@ -83,6 +83,36 @@ public final class ImageService: Sendable {
 
     static func id(_ img: JSON) -> String { "sha256:" + (img["id"]?.string ?? "") }
 
+    /// `GET /images/{name}/history`, newest first. A config history entry that made a
+    /// layer gets that layer's size, compressed as stored; the newest entry carries the
+    /// image's ID and tags, as Docker reports them.
+    static func history(_ img: JSON, tags: [String]) -> [JSON] {
+        let variant = variant(img)
+        let entries = variant?["config"]?["history"]?.array ?? []
+        let layers = variant?["layers"]?.array?.compactMap(\.int) ?? []
+        precondition(entries.count < 100_000, "image history beyond any real image")
+        var next = 0
+        var out: [JSON] = []
+        for entry in entries {
+            let empty = entry["empty_layer"]?.bool ?? false
+            let size = empty || next >= layers.count ? 0 : layers[next]
+            if !empty { next += 1 }
+            out.append([
+                "Id": "<missing>",
+                "Created": .int(Int64(Timestamp.parse(entry["created"]?.string ?? "")?.timeIntervalSince1970 ?? 0)),
+                "CreatedBy": entry["created_by"] ?? "",
+                "Tags": .null,
+                "Size": .int(size),
+                "Comment": entry["comment"] ?? "",
+            ])
+        }
+        out.reverse()
+        if !out.isEmpty {
+            out[0] = .object((out[0].object ?? [:]).merging(["Id": .string(id(img)), "Tags": JSON(tags)]) { _, b in b })
+        }
+        return out
+    }
+
     static func created(_ img: JSON) -> String { img["configuration"]?["creationDate"]?.string ?? "" }
 
     static func digests(_ img: LocalImage) -> [String] {

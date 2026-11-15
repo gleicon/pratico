@@ -694,6 +694,25 @@ rw=$(docker ps --size --filter name=e-logs --format '{{.Size}}')
 expect_has "ps --size counts what the container wrote" "$rw" "virtual"
 expect_eq "inspect --size counts the MiB it wrote" "$(docker inspect --size e-logs --format '{{.SizeRw}}' | awk '{print ($1 > 1000000)}')" "1"
 docker rm -f e-logs >/dev/null
+# rename, top, diff, export, history, update.
+docker run -d --name e-ops alpine sh -c 'echo hi > /added; rm /etc/motd; sleep 300' >/dev/null
+sleep 1
+check "rename" docker rename e-ops e-ops2
+expect_eq "and the new name answers" "$(docker inspect e-ops2 --format '{{.Name}}')" "/e-ops2"
+expect_has "top lists the container's processes" "$(docker top e-ops2)" "sleep 300"
+expect_eq "and not the ps that answered" "$(curl -s --unix-socket "$SOCK" http://d/containers/e-ops2/top | python3 -c 'import json,sys; print([r[-1] for r in json.load(sys.stdin)["Processes"]])')" "['sleep 300']"
+expect_eq "diff shows what changed, not pratico's own files" "$(docker diff e-ops2 | tr '\n' ' ')" "A /added C /etc D /etc/motd "
+expect_eq "export of a running container" "$(docker export e-ops2 | tar -xOf - added)" "hi"
+expect_eq "and it keeps running, unpaused" "$(docker inspect e-ops2 --format '{{.State.Status}} {{.State.Paused}}')" "running false"
+expect_has "image history" "$(docker history alpine)" "CMD [\"/bin/sh\"]"
+check "update --restart on a running container" docker update --restart unless-stopped e-ops2
+expect_eq "takes effect" "$(docker inspect e-ops2 --format '{{.HostConfig.RestartPolicy.Name}}')" "unless-stopped"
+expect_has "update of limits while running is refused" "$(docker update --cpus 1 e-ops2 2>&1)" "change at its next start"
+docker stop -t 0 e-ops2 >/dev/null
+docker update --cpus 1 --memory 512m e-ops2 >/dev/null
+docker start e-ops2 >/dev/null
+expect_eq "and applied at the next start" "$(docker exec e-ops2 cat /sys/fs/cgroup/cpu.max /sys/fs/cgroup/memory.max | tr '\n' ' ')" "100000 100000 536870912 "
+docker rm -f e-ops2 >/dev/null
 docker run -d --name e-sig --stop-signal SIGWINCH alpine sh -c 'trap "echo got-winch; exit 0" WINCH; while :; do sleep 0.1; done' >/dev/null
 sleep 0.5
 docker stop e-sig >/dev/null
