@@ -6,15 +6,18 @@ multi-platform image.
 
 ## vCPUs
 
-A container's CPU limit is its VM's vCPU count.
+A container's VM has `--cpus` vCPUs, rounded up to a whole number, and the container's
+cgroup in the guest holds the exact limit.
 
-- `--cpus N` gives the VM `N` vCPUs, rounded up to a whole number: `--cpus 0.5` and
-  `--cpus 1` both get one.
+- `--cpus 0.5` boots one vCPU and sets `cpu.max` to `50000 100000`: half of it.
+- `--cpu-quota` and `--cpu-period` set `cpu.max` directly; the VM gets enough vCPUs for
+  the quota. `--cpus` and `--cpu-period` together are refused, as on Docker.
+- `--cpu-shares` sets `cpu.weight`. The container is the only workload in its VM, so the
+  weight only matters against processes it starts in other cgroups.
+- `--cpuset-cpus` pins to vCPUs, which must exist: `--cpuset-cpus 0-7` needs `--cpus 8`.
 - Without `--cpus`, a VM gets `default_cpus` (4) from `~/.pratico/config.toml`.
-- A vCPU is a thread on the Mac, scheduled by macOS. An idle guest's vCPUs sleep.
-- `--cpu-shares`, `--cpu-quota`, `--cpu-period`, and `--cpuset-cpus` are accepted and not
-  applied. The vCPU count is the only CPU control; VMs compete for the Mac's cores as
-  any other processes do.
+- A vCPU is a thread on the Mac, scheduled by macOS, competing for cores with every other
+  process. An idle guest's vCPUs sleep.
 
 ## Stats
 
@@ -28,4 +31,4 @@ all of a two-vCPU VM shows 200%. The menubar samples every
 `docker pause` pauses the VM: its vCPUs stop, with no freezer cgroup involved.
 `docker unpause` resumes them.
 
-Decisions: SPEC D-26, D-33, D-35.
+All run options: [run-options.md](run-options.md). Decisions: SPEC D-26, D-33, D-35, D-45.

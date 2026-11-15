@@ -73,6 +73,9 @@ vminitd ───────── guest agent: process, exec, cp, stats, healt
   outside every VM. One NIC per VM with an address and a MAC per network, no limit on
   networks, isolation enforced at the switch, DNS at each gateway, published ports bound
   on the Mac.
+- **[Run options](docs/run-options.md).** Every `docker run` option pratico accepts is
+  applied (cgroup limits, capabilities, restart policies, `--init`, `--read-only`, …);
+  one a VM cannot honor, such as `--device` or `--pid host`, is refused with an error.
 - **[Storage](docs/storage.md).** Images unpacked once into ext4 and cloned per
   container (APFS), so `create` takes milliseconds for any image. Volumes and bind
   mounts over virtiofs; `docker cp` on stopped containers; snapshots of definitions.
@@ -104,8 +107,8 @@ Limits:
   ([networking](docs/network.md#limits)).
 - Files on volumes and bind mounts are owned by the Mac user
   ([storage](docs/storage.md#volumes-and-bind-mounts)).
-- `--cap-add`, `--cap-drop`, and CPU shares, quotas, and sets are accepted and not
-  applied.
+- Host devices, host namespaces, blkio limits, and seccomp or AppArmor profiles are
+  refused ([run options](docs/run-options.md#refused)).
 
 ## Image scanning
 

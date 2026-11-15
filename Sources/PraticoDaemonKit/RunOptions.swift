@@ -330,6 +330,14 @@ extension RunOptions {
                 throw APIError(400, "pratico: \(n.flag)=\(v) is not supported: each container is its own VM, with its own namespaces")
             }
         }
+        for (port, list) in host["PortBindings"]?.object ?? [:] {
+            for b in list.array ?? [] {
+                let ip = b["HostIp"]?.string ?? ""
+                guard ip.isEmpty || IPv4.parse(ip) != nil else {
+                    throw APIError(400, "pratico: publishing \(port) on \(ip) is not supported: pratico-net is IPv4 only")
+                }
+            }
+        }
         if let r = host["Runtime"]?.string, !["", "runc"].contains(r) { throw APIError(400, "pratico: --runtime \(r) is not supported") }
         if let i = host["Isolation"]?.string, !["", "default"].contains(i) { throw APIError(400, "pratico: --isolation \(i) is not supported") }
         if config["NetworkDisabled"]?.bool == true { throw APIError(400, "pratico: NetworkDisabled is not supported; use --network none") }

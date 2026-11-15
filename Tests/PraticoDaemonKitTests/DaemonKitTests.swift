@@ -690,7 +690,8 @@ private func emptyDir() throws -> URL {
     #expect(throws: APIError.self) { try parse(["RestartPolicy": ["Name": "always"], "AutoRemove": true]) }
     // Refused when set, accepted at the CLI's defaults.
     for refused: JSON in [["Devices": [["PathOnHost": "/dev/null"]]], ["PidMode": "host"], ["VolumesFrom": ["a"]], ["OomKillDisable": true],
-                          ["LogConfig": ["Type": "syslog"]], ["MemorySwappiness": 10], ["BlkioWeight": 300]] {
+                          ["LogConfig": ["Type": "syslog"]], ["MemorySwappiness": 10], ["BlkioWeight": 300],
+                          ["PortBindings": ["80/tcp": [["HostIp": "::1", "HostPort": "8080"]]]]] {
         #expect(throws: APIError.self) { try parse(refused) }
     }
     _ = try parse(["Devices": [], "PidMode": "", "OomKillDisable": false, "MemorySwappiness": -1, "BlkioWeight": 0, "IpcMode": "private"])

@@ -30,7 +30,10 @@ vminitd ───────── guest init and agent: processes, exec, cp, s
   attaches networks, publishes ports, and records the container as running, and only
   then tells the shim to start the process, so a process that asks the daemon about
   itself at once sees itself running.
-- **stop** and **kill** send the signal through the agent, wait, then stop the VM.
+- **stop** sends the stop signal (`--stop-signal`, image `STOPSIGNAL`, else SIGTERM),
+  waits `--stop-timeout` (else 10 s), then SIGKILL. **kill** sends the signal asked.
+- **restart policies** start a container again when it exits; see
+  [run options](run-options.md#restart-policies).
 - **pause** pauses the whole VM: its vCPUs stop, not just a cgroup.
 - **exec**, **cp**, **stats**, and healthchecks go through the agent; images need no
   shell or tools for them.
@@ -39,12 +42,19 @@ Shims outlive the daemon. A daemon restart, upgrade, or crash reconnects to ever
 running shim; output goes to files the shim writes, and exit codes are kept in
 `exit.json`, so nothing is lost while the daemon is away.
 
+The root filesystem has no journal. A VM killed mid-run (a crash, power loss, `kill -9`)
+can leave it inconsistent, and the guest would then fail writes. pratico checks the
+ext4 superblock's clean flag before each start; when it is not set, it rebuilds the
+image from its own files first (the daemon log says so).
+
 ## Memory
 
 `--memory` (default `default_memory`, 1024 MiB) sets the guest's RAM, plus 128 MiB for
-the guest kernel and init. It is a ceiling: the Mac backs only the pages the guest
-touches. There is no memory balloon, so page cache the guest fills comes back when the
-container stops, not while it runs.
+the guest kernel and init, and the container's `memory.max`. It is a ceiling: the Mac
+backs only the pages the guest touches. `--memory-reservation`, `--memory-swap`, and
+`--pids-limit` are the cgroup's `memory.low`, `memory.swap.max`, and `pids.max`. There
+is no memory balloon, so page cache the guest fills comes back when the container
+stops, not while it runs.
 
 ## Resource use
 
@@ -72,4 +82,5 @@ one kernel exploit, one runaway process, or one `--privileged` container reaches
 them. Here each container has its own kernel, memory, and network card; a VM's limits
 are its size; and stopping the last container frees everything.
 
-Design notes: [design/runtime.md](design/runtime.md). Decisions: SPEC D-34, D-41, D-42.
+All run options: [run-options.md](run-options.md). Design notes: [design/runtime.md](design/runtime.md).
+Decisions: SPEC D-34, D-41, D-42, D-45.

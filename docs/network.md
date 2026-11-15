@@ -35,7 +35,9 @@ eth0 172.18.2.2/24
 ## Addresses and routes
 
 pratico assigns addresses per network and sets them through the guest agent; there is
-no DHCP. The first network gets the default route and DNS; a network that reaches out
+no DHCP. `--ip` asks for one on a user-defined network (refused on `bridge`, as on
+Docker; a taken address answers 409), and `--mac-address` sets the MAC that network
+sees. The first network gets the default route and DNS; a network that reaches out
 wins over an `--internal` one, then `NetworkMode`, then name.
 
 - **Connect** (`docker network connect`) adds an address to the running VM, then plugs
@@ -63,7 +65,8 @@ Nothing is written into the image, so distroless images resolve too.
 | anything else | the Mac's resolvers, except on `--internal` networks |
 
 Every pratico gateway answers as the asker's own networks, so a stale `resolv.conf`
-still works.
+still works. `--dns`, `--dns-search`, and `--dns-option` replace the resolver, and stay
+when the primary network changes. `--add-host` and `--link` add `/etc/hosts` entries.
 
 ## The internet
 
@@ -81,12 +84,13 @@ the Mac's own firewall and VPN.
 ## Published ports
 
 `-p` binds on the Mac, `0.0.0.0` unless an address is given (`-p 127.0.0.1:8080:80`).
+`-P` binds every exposed port, the image's `EXPOSE` included, on a free host port.
 Each connection is relayed through the uplink to the container's primary address. The
 menubar flags a port reachable beyond loopback, once per container and port.
 
 ## Limits
 
-- IPv4 only. IPv6 port binds are ignored.
+- IPv4 only: `-p` with an IPv6 address and `--ip6` are refused.
 - The guest sees one interface. Software that binds to `eth1` by name finds only `eth0`.
 - Containers started by a pratico release from before one-card networking keep a card
   per network until restarted; connecting one beyond its cards answers 409.

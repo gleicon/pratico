@@ -39,6 +39,8 @@ same files, live.
 - Host Unix sockets, `/var/run/docker.sock` included, are relayed into the VM over
   vsock, so a container can drive pratico through the mounted socket.
 
+`--read-only` mounts the root filesystem read-only; `--shm-size` sizes `/dev/shm`.
+
 Files on volumes and bind mounts are owned by the Mac user. An image that `chown`s its
 data to another uid sees the volume's owner instead.
 

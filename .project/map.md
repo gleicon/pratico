@@ -16,7 +16,7 @@ Pratico is a Docker Remote API daemon plus SwiftUI menubar app for Apple silicon
 
 | Path | Holds |
 |------|-------|
-| `Sources/PraticoDaemonKit/` | Daemon library: `Daemon.swift` (routing), `HTTP.swift` (Unix-socket HTTP server), `Containers.swift`, `Images.swift` + `ImageBackend.swift`, `Networks.swift`, `Exec.swift`, `Archive.swift`, `Logs.swift`, `Events.swift`, `Health.swift`, `Stats.swift`, `Scan.swift`, `Registry.swift`, `AppleContainer.swift` (CLI adapter), `Embedded.swift` + `Shim.swift` (embedded runtime) |
+| `Sources/PraticoDaemonKit/` | Daemon library: `Daemon.swift` (routing), `HTTP.swift`, `Containers.swift` (lifecycle), `RunOptions.swift` + `ContainerRun.swift` (run options, D-45), `Restarts.swift` (restart policies), `Images.swift` + `ImageBackend.swift`, `Networks.swift` + `ContainerNetworks.swift`, `Net/` (pratico-net switch, NICs, uplink), `Volumes.swift`, `Mounts.swift`, `Rootfs.swift`, `Exec.swift`, `Archive.swift`, `Logs.swift`, `Events.swift`, `Health.swift`, `Stats.swift`, `Scan*.swift`, `Registry*.swift`, `Snapshots.swift`, `Disk.swift`, `Embedded.swift` + `Shim.swift` (runtime) |
 | `Sources/pratico-daemon/` | Daemon executable (`main.swift`, `--home`) |
 | `Sources/pratico-shim/` | Per-container VM owner for the embedded runtime |
 | `Sources/pratico-runtime-probe/` | Dev-only: boots one VM (`make probe`) |
@@ -26,7 +26,7 @@ Pratico is a Docker Remote API daemon plus SwiftUI menubar app for Apple silicon
 | `e2e/` | `run.sh`, `embedded.sh`, `registry.sh`, `pty.py`, `fakes/` (scanners, KEV) |
 | `scripts/` | `fetch-runtime-assets.sh`, `release.sh` |
 | `Support/` | Info.plist, entitlements, launch agent plist, DMG readme |
-| `docs/` | user docs: `network.md`, `storage.md`, `vm.md`, `cpu.md` |
+| `docs/` | user docs: `network.md`, `storage.md`, `vm.md`, `cpu.md`, `run-options.md` |
 | `docs/design/` | `runtime.md`, `image-scanning.md` |
 | `README.md`, `START.md` | Overview and build/test; user quick start |
 | `SPEC.md` | Requirements, acceptance criteria, decisions D-1–D-28 (`SPEC.v0.md` superseded) |

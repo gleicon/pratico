@@ -549,7 +549,7 @@ final class NetworkService: @unchecked Sendable {
             guard let containerPort = UInt16(num) else { continue }
             for b in list.array ?? [] {
                 let hostIP = b["HostIp"]?.string.flatMap { $0.isEmpty ? nil : $0 } ?? "0.0.0.0"
-                guard let hostAddr = IPv4.parse(hostIP) else { continue }  // IPv6 binds: not yet
+                guard let hostAddr = IPv4.parse(hostIP) else { throw APIError(400, "pratico: publishing on \(hostIP) is not supported: pratico-net is IPv4 only") }
                 let asked = UInt16(b["HostPort"]?.string ?? "") ?? 0
                 do {
                     let bound = try netSwitch.uplink.publish(container: rec.id, nic: port, gateway: gw, hostIP: hostAddr,
