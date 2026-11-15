@@ -249,6 +249,12 @@ docker run -d --name e-peer5 --network e-many5 alpine sleep 300 >/dev/null
 expect_eq "a container on five networks has one card" "$(docker exec e-many sh -c 'ls /sys/class/net | grep -c ^eth')" "1"
 eventually "and reaches the fifth network by name" docker exec e-many ping -c1 -W2 e-peer5
 expect_eq "inspect lists all five networks" "$(docker inspect e-many --format '{{len .NetworkSettings.Networks}}')" "5"
+# A MAC per network, as on Docker (D-44): the switch shows each network its own, and the
+# guest's card keeps the first network's.
+expect_eq "each network sees its own MAC" "$(docker inspect e-many --format '{{range .NetworkSettings.Networks}}{{.MacAddress}} {{end}}' | tr ' ' '\n' | grep . | sort -u | wc -l | tr -d ' ')" "5"
+expect_eq "the card keeps the first network's MAC" "$(docker exec e-many cat /sys/class/net/eth0/address)" "$(docker inspect e-many --format '{{(index .NetworkSettings.Networks "e-many1").MacAddress}}')"
+docker exec e-peer5 ping -c1 -W2 e-many >/dev/null 2>&1 || true
+expect_has "a peer learns the network's MAC by ARP" "$(docker exec e-peer5 ip neigh)" "$(docker inspect e-many --format '{{(index .NetworkSettings.Networks "e-many5").MacAddress}}')"
 if docker exec e-peer5 ping -c1 -W2 "$(docker inspect e-many --format '{{(index .NetworkSettings.Networks "e-many1").IPAddress}}')" >/dev/null 2>&1; then
     bad "a peer on one network cannot reach the container's address on another"
 else

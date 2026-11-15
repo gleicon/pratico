@@ -2,13 +2,18 @@ import Foundation
 
 /// One endpoint of a running container: its address on one network, on the card whose
 /// frames the shim relays over the datagram socket bound at `path`. Endpoints on one card
-/// share the path and MAC (D-43); the switch tells them apart by their address.
+/// share the path (D-43); the switch tells them apart by their address.
 struct NetPort: Sendable, Equatable {
     var path: String
     var containerId: String
     var networkId: String
+    /// The endpoint's MAC as its network sees it, one per network as on Docker (D-44).
     var mac: MAC
     var ip: UInt32
+    /// The guest card's own MAC, which every endpoint on the card sends from; the switch
+    /// rewrites it to `mac` on the way out and back on the way in. Equal to `mac` for the
+    /// card's first endpoint.
+    var card: MAC
 }
 
 /// A network as the switch sees it: its gateway (pratico) and prefix.
@@ -141,14 +146,16 @@ final class NetSwitch: @unchecked Sendable {
     }
 
     func handle(_ frame: [UInt8], from port: NetPort) {
-        guard let eth = Ethernet(frame), eth.src == port.mac else { return }  // spoofed MAC
+        guard var eth = Ethernet(frame), eth.src == port.card else { return }  // spoofed MAC
+        let frame = Self.rewrite(frame, from: port.card, to: port.mac, at: [6, Self.arpSender])
+        eth.src = port.mac
         lock.lock()
         let segment = segments[port.networkId]
         lock.unlock()
         guard let segment else { return }
         switch eth.type {
         case EtherType.arp.rawValue:
-            guard let arp = ARP(eth.payload), arp.senderMAC == port.mac, arp.senderIP == port.ip else { return }
+            guard let arp = ARP(eth.payload), arp.senderMAC == port.card, arp.senderIP == port.ip else { return }
             if arp.op == 1 && arp.targetIP == segment.gateway {
                 let reply = ARP(op: 2, senderMAC: .gateway, senderIP: segment.gateway, targetMAC: port.mac, targetIP: port.ip)
                 send(Ethernet(dst: port.mac, src: .gateway, type: EtherType.arp.rawValue, payload: reply.bytes).bytes, to: port)
@@ -272,12 +279,28 @@ final class NetSwitch: @unchecked Sendable {
     }
 
     func send(_ frame: [UInt8], to port: NetPort) {
+        let frame = Self.rewrite(frame, from: port.mac, to: port.card, at: [0, Self.arpTarget])
         var addr = Self.address(port.path)
         _ = withUnsafePointer(to: &addr) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
                 sendto(fd, frame, frame.count, 0, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
             }
         }
+    }
+
+    /// Frame offsets of the ARP sender and target MACs (after the 14-byte Ethernet header).
+    private static let arpSender = 22, arpTarget = 32
+
+    /// Replaces the MAC `old` with `new` at each offset that holds it; ARP offsets only in
+    /// an ARP frame. Translates between a card's MAC and its endpoints' (D-44).
+    static func rewrite(_ frame: [UInt8], from old: MAC, to new: MAC, at offsets: [Int]) -> [UInt8] {
+        guard old != new, frame.count >= 14 else { return frame }
+        let isARP = frame[12] == 0x08 && frame[13] == 0x06
+        var out = frame
+        for o in offsets where (o < 14 || isARP) && o + 6 <= out.count && Array(out[o..<o + 6]) == old.bytes {
+            out.replaceSubrange(o..<o + 6, with: new.bytes)
+        }
+        return out
     }
 
     static func address(_ path: String) -> sockaddr_un {

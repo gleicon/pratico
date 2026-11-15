@@ -121,7 +121,9 @@ public enum ShimHost {
             // One relay per card, which boots with its boot endpoint's address (D-43).
             interfaces = try spec.nics.cards.indices.map { n in
                 let entry = spec.nics.bootEntry(card: n)
-                return try NICRelay.start(spec.nics.slots[entry], switchSocket: spec.switchSocket, primary: entry == spec.nics.primary)
+                var boot = spec.nics.slots[entry]
+                boot.mac = spec.nics.cardMAC(of: entry)  // the switch shows the others (D-44)
+                return try NICRelay.start(boot, switchSocket: spec.switchSocket, primary: entry == spec.nics.primary)
             }
         } catch {
             return fail("cannot set up networking: \(error)")

@@ -58,6 +58,10 @@ struct NICSlots: Codable, Sendable, Equatable {
     /// The card endpoint `entry` lives on.
     func card(of entry: Int) -> Int { cards.firstIndex(of: slots[entry].socket) ?? 0 }
 
+    /// The MAC the guest's card has: its first endpoint's. Other endpoints on the card have
+    /// their own, which the switch shows their networks instead (D-44).
+    func cardMAC(of entry: Int) -> String { slots.first { $0.socket == slots[entry].socket }!.mac }
+
     /// The endpoint whose address a card boots with: the primary when it is on that card,
     /// else the card's first. The others are added once the guest is up.
     func bootEntry(card n: Int) -> Int {
@@ -72,9 +76,9 @@ struct NICSlots: Codable, Sendable, Equatable {
     }
 
     /// A new endpoint on card 0 (one-card VMs, D-43); `revert` removes it.
-    mutating func add(networkId: String, address: String, gateway: String) -> Binding? {
+    mutating func add(networkId: String, mac: String, address: String, gateway: String) -> Binding? {
         guard let first = slots.first else { return nil }
-        slots.append(ShimNIC(networkId: networkId, mac: first.mac, address: address, gateway: gateway, socket: first.socket))
+        slots.append(ShimNIC(networkId: networkId, mac: mac, address: address, gateway: gateway, socket: first.socket))
         let b = Binding(slot: slots.count - 1, previous: nil, previousPrimary: primary)
         if primary == nil { primary = b.slot }
         return b

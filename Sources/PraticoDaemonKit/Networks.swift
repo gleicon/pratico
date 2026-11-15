@@ -351,12 +351,14 @@ final class NetworkService: @unchecked Sendable {
             }
         guard !nets.isEmpty else { return NICSlots() }
         let socket = runDir.appending(path: "\(rec.appleId).0").path
-        let mac = MAC.derive(rec.id + "eth0").description
+        let card = MAC.derive(rec.id + "eth0").description
         lock.lock()
         defer { lock.unlock() }
         var nics: [ShimNIC] = []
         for net in nets {
             guard let ip = freeAddress(net) else { continue }
+            // The first network shows the card's own MAC, the others their own (D-44).
+            let mac = nics.isEmpty ? card : Self.mac(rec, on: net)
             nics.append(ShimNIC(networkId: net.id, mac: mac, address: ip, gateway: net.gateway, socket: socket))
             record(rec.id, nics[nics.count - 1], on: net)
         }
@@ -387,17 +389,25 @@ final class NetworkService: @unchecked Sendable {
     func attach(_ rec: ContainerRecord, _ nics: NICSlots) {
         lock.lock()
         slots[rec.id] = nics
-        for nic in nics.slots where !nic.isSpare {
-            guard let net = records[nic.networkId], let port = Self.port(rec.id, nic) else { continue }
+        for (i, nic) in nics.slots.enumerated() where !nic.isSpare {
+            guard let net = records[nic.networkId], let port = Self.port(rec.id, nics, i) else { continue }
             record(rec.id, nic, on: net)
             netSwitch.register(port)
         }
         lock.unlock()
     }
 
-    private static func port(_ id: String, _ nic: ShimNIC) -> NetPort? {
-        guard let mac = MAC(nic.mac), let ip = IPv4.parse(nic.ip) else { return nil }
-        return NetPort(path: nic.socket, containerId: id, networkId: nic.networkId, mac: mac, ip: ip)
+    private static func port(_ id: String, _ nics: NICSlots, _ entry: Int?) -> NetPort? {
+        guard let entry else { return nil }
+        let nic = nics.slots[entry]
+        guard let mac = MAC(nic.mac), let card = MAC(nics.cardMAC(of: entry)), let ip = IPv4.parse(nic.ip) else { return nil }
+        return NetPort(path: nic.socket, containerId: id, networkId: nic.networkId, mac: mac, ip: ip, card: card)
+    }
+
+    /// An endpoint's MAC on a network other than the card's first: stable per container
+    /// and network.
+    private static func mac(_ rec: ContainerRecord, on net: NetworkRecord) -> String {
+        MAC.derive(rec.id + net.id).description
     }
 
     func nics(_ id: String) -> NICSlots {
@@ -423,7 +433,7 @@ final class NetworkService: @unchecked Sendable {
                 }
                 binding = nics.bind(slot, networkId: net.id, address: address, gateway: net.gateway)
             } else if nics.cards.count == 1, let address = freeAddress(net),
-                let added = nics.add(networkId: net.id, address: address, gateway: net.gateway)
+                let added = nics.add(networkId: net.id, mac: Self.mac(rec, on: net), address: address, gateway: net.gateway)
             {
                 binding = added
             } else {
@@ -446,7 +456,7 @@ final class NetworkService: @unchecked Sendable {
         }
         let nics = nics(rec.id)
         guard nics.slots.indices.contains(binding.slot) else { return }  // stopped meanwhile
-        if let port = Self.port(rec.id, nics.slots[binding.slot]) { netSwitch.register(port) }
+        if let port = Self.port(rec.id, nics, binding.slot) { netSwitch.register(port) }
         if nics.primary == binding.slot { retarget(rec) }
     }
 
@@ -477,7 +487,7 @@ final class NetworkService: @unchecked Sendable {
     /// interfaces unless a host IP is given, D-8). Returns the bound host ports per
     /// container port, or throws Docker's "port is already allocated" and unbinds all.
     func publish(_ rec: ContainerRecord, _ nics: NICSlots) throws -> [String: [(ip: String, port: String)]] {
-        guard let nic = nics.primaryNIC, let port = Self.port(rec.id, nic), let gw = IPv4.parse(nic.gateway)
+        guard let nic = nics.primaryNIC, let port = Self.port(rec.id, nics, nics.primary), let gw = IPv4.parse(nic.gateway)
         else { return [:] }
         var out: [String: [(ip: String, port: String)]] = [:]
         for (key, list) in (rec.hostConfig["PortBindings"]?.object ?? [:]).sorted(by: { $0.key < $1.key }) {
@@ -503,7 +513,8 @@ final class NetworkService: @unchecked Sendable {
     /// Points the container's published ports at its primary NIC. With none, they stay
     /// bound (no other process can take them) and lead nowhere until the next one.
     private func retarget(_ rec: ContainerRecord) {
-        guard let nic = nics(rec.id).primaryNIC, let port = Self.port(rec.id, nic),
+        let nics = nics(rec.id)
+        guard let nic = nics.primaryNIC, let port = Self.port(rec.id, nics, nics.primary),
             let gw = IPv4.parse(nic.gateway)
         else { return }
         netSwitch.uplink.retarget(container: rec.id, nic: port, gateway: gw)

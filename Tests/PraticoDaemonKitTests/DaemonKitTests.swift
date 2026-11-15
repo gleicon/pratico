@@ -387,15 +387,16 @@ private let grypeSample = Data(#"""
     let first = ShimNIC(networkId: "a", mac: "02:42:00:00:00:01", address: "172.17.0.2/16", gateway: "172.17.0.1", socket: "/s.0")
     var nics = NICSlots([first], primary: 0)
     for n in 1...5 {
-        _ = nics.add(networkId: "n\(n)", address: "172.\(18 + n).0.2/24", gateway: "172.\(18 + n).0.1")
+        _ = nics.add(networkId: "n\(n)", mac: MAC.derive("n\(n)").description, address: "172.\(18 + n).0.2/24", gateway: "172.\(18 + n).0.1")
     }
     #expect(nics.cards == ["/s.0"] && nics.slots.count == 6)
-    #expect(nics.slots.allSatisfy { $0.mac == first.mac } && nics.card(of: 5) == 0)
+    #expect(Set(nics.slots.map(\.mac)).count == 6 && nics.card(of: 5) == 0)
+    #expect((0..<6).allSatisfy { nics.cardMAC(of: $0) == first.mac })
     #expect(nics.cardShared(0))
     // Losing the primary hands the default route to the next network on the same card.
     let gone = nics.unbind("a")
     #expect(gone?.wasPrimary == true && gone?.successor == 1 && nics.bootEntry(card: 0) == 1)
-    let b = nics.add(networkId: "x", address: "10.9.0.2/24", gateway: "10.9.0.1")!
+    let b = nics.add(networkId: "x", mac: MAC.derive("x").description, address: "10.9.0.2/24", gateway: "10.9.0.1")!
     nics.revert(b)
     #expect(nics.slots.count == 6 && nics.primary == 1)
 }
@@ -638,6 +639,19 @@ private func emptyDir() throws -> URL {
     #expect(Filters.isTrue("TRUE") && Filters.isTrue("1") && !Filters.isTrue("0"))
 }
 
+@Test func switchRewritesCardMACToEndpointMAC() {
+    let card = MAC.derive("card"), endpoint = MAC.derive("n2")
+    let arp = ARP(op: 1, senderMAC: card, senderIP: 1, targetMAC: MAC(bytes: [0, 0, 0, 0, 0, 0]), targetIP: 2)
+    let out = Ethernet(dst: .broadcast, src: card, type: EtherType.arp.rawValue, payload: arp.bytes).bytes
+    let sent = NetSwitch.rewrite(out, from: card, to: endpoint, at: [6, 22])
+    #expect(Ethernet(sent)?.src == endpoint && Ethernet(sent).flatMap { ARP($0.payload) }?.senderMAC == endpoint)
+    #expect(Ethernet(sent)?.dst == .broadcast)
+    // IPv4: only the header; payload bytes that happen to equal the MAC stay.
+    let ip = Ethernet(dst: endpoint, src: .gateway, type: EtherType.ipv4.rawValue, payload: Array(repeating: 0, count: 18) + endpoint.bytes + Array(repeating: 0, count: 10)).bytes
+    let back = NetSwitch.rewrite(ip, from: endpoint, to: card, at: [0, 32])
+    #expect(Ethernet(back)?.dst == card && Array(back[32..<38]) == endpoint.bytes)
+}
+
 @Test func oneCardCarriesAnAddressPerNetwork() {
     let mac = MAC.derive("c").description
     let a = ShimNIC(networkId: "n1", mac: mac, address: "172.18.0.2/24", gateway: "172.18.0.1", socket: "/s.0")
@@ -647,8 +661,9 @@ private func emptyDir() throws -> URL {
     #expect(nics.card(of: 1) == 0)
     #expect(nics.bootEntry(card: 0) == 1)  // the primary's address boots the card
     #expect(nics.cardShared(0) && nics.cardShared(1))
-    let added = nics.add(networkId: "n3", address: "172.20.0.2/24", gateway: "172.20.0.1")!
-    #expect(nics.slots.count == 3 && nics.slots[2].socket == "/s.0" && nics.slots[2].mac == mac)
+    let n3 = MAC.derive("n3").description
+    let added = nics.add(networkId: "n3", mac: n3, address: "172.20.0.2/24", gateway: "172.20.0.1")!
+    #expect(nics.slots.count == 3 && nics.slots[2].socket == "/s.0" && nics.slots[2].mac == n3 && nics.cardMAC(of: 2) == mac)
     nics.revert(added)
     #expect(nics.slots == [a, b] && nics.primary == 1)
     _ = nics.unbind("n2")
