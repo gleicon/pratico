@@ -2,7 +2,7 @@ import Foundation
 
 /// Facts shared by the CLI, daemon, and menubar app.
 public enum Pratico {
-    public static let version = "0.2.3"
+    public static let version = "0.2.4"
 
     /// Root of all pratico state: `~/.pratico`.
     public static func home(for user: URL = FileManager.default.homeDirectoryForCurrentUser) -> URL {
