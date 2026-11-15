@@ -106,9 +106,13 @@ extension ScanService {
     var sbomPath: String? { ImageScanner.sbom.locate(environment: env) }
 
     /// SPDX and CycloneDX SBOMs of the image, written by syft next to its scan report.
-    func writeSBOM(_ archive: URL, imageId: String) {
+    func writeSBOM(_ archive: URL, image: LocalImage) {
         guard let syft = sbomPath else { return }
+        let imageId = image.id
+        // Named for the image, not the temporary archive syft reads.
+        let (name, tag) = image.displayName.splitOnce(":")
         let r = Self.run(syft, ["scan", "docker-archive:\(archive.path)", "-q",
+                                "--source-name", name, "--source-version", tag ?? image.shortId,
                                 "-o", "spdx-json=\(sbomFile(imageId, .spdx).path)",
                                 "-o", "cyclonedx-json=\(sbomFile(imageId, .cyclonedx).path)"])
         if !r.ok { Pratico.log("pratico-daemon: syft failed for \(imageId): \(ScanFailure(r).note)") }

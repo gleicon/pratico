@@ -409,7 +409,7 @@ final class ScanService: @unchecked Sendable {
         // Deleted while it was scanned: `forget` already ran, so saving would bring it back.
         guard images.resolve(img.id) != nil else { return }
         save(report)
-        writeSBOM(archive, imageId: img.id)
+        writeSBOM(archive, image: img)
         act(report)
     }
 
