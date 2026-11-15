@@ -27,8 +27,8 @@ public struct Request: Sendable {
     public var bodyFile: URL? = nil
 
     public func flag(_ name: String) -> Bool {
-        guard let v = query[name]?.lowercased() else { return false }
-        return v == "1" || v == "true"
+        guard let v = query[name] else { return false }
+        return Filters.isTrue(v)
     }
 }
 

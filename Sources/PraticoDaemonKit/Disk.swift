@@ -228,12 +228,13 @@ struct DiskService {
         ]
     }
 
-    /// `POST /containers/prune`: removes every container that is not running.
+    /// `POST /containers/prune`: removes every container that is not running and matches
+    /// Docker's `until` and `label` / `label!` filters.
     func pruneContainers(filters: [String: [String]]) throws -> JSON {
-        guard filters.isEmpty else { throw APIError(400, "pratico: container prune filters are not supported yet") }
+        let filter = try PruneFilter(filters)
         var deleted: [JSON] = []
         var reclaimed: Int64 = 0
-        for c in containerUse() where !c.record.state.running {
+        for c in containerUse() where !c.record.state.running && filter.matches(created: c.record.created, labels: c.record.labels) {
             guard (try? containers.remove(c.record.id, force: false)) != nil else { continue }
             deleted.append(.string(c.record.id))
             reclaimed += c.rootfs + c.logs
@@ -241,3 +242,4 @@ struct DiskService {
         return ["ContainersDeleted": deleted.isEmpty ? .null : .array(deleted), "SpaceReclaimed": .int(reclaimed)]
     }
 }
+

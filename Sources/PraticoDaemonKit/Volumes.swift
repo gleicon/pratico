@@ -124,27 +124,16 @@ final class VolumeService: @unchecked Sendable {
     func list(filters: [String: [String]]) -> JSON {
         let users = usedBy()
         let items = all().filter { rec in
-            for (key, values) in filters where !values.isEmpty {
-                let ok = values.contains { v in
-                    switch key {
-                    case "name": return rec.name.contains(v)
-                    case "driver": return v == "local"
-                    case "dangling": return (users[rec.name] ?? []).isEmpty == ["1", "true"].contains(v)
-                    case "label": return Self.matches(rec, v)
-                    default: return true
-                    }
+            Filters.pass(filters, labels: rec.labels) { key, v in
+                switch key {
+                case "name": return rec.name.contains(v)
+                case "driver": return v == "local"
+                case "dangling": return (users[rec.name] ?? []).isEmpty == Filters.isTrue(v)
+                default: return true
                 }
-                if !ok { return false }
             }
-            return true
         }
         return ["Volumes": .array(items.map { json($0) }), "Warnings": []]
-    }
-
-    private static func matches(_ rec: VolumeRecord, _ filter: String) -> Bool {
-        let (k, val) = filter.splitOnce("=")
-        guard let have = rec.labels[k] else { return false }
-        return val == nil || have == val
     }
 
     // MARK: Remove, prune
@@ -170,10 +159,9 @@ final class VolumeService: @unchecked Sendable {
     /// `all` filter is set (Docker API 1.42 and later), matching any `label` filters.
     func prunable(filters: [String: [String]]) -> [VolumeRecord] {
         let users = usedBy()
-        let everything = filters["all"]?.contains { ["1", "true"].contains($0) } ?? false
+        let everything = Filters.bool(filters, "all") ?? false
         return all().filter { rec in
-            (users[rec.name] ?? []).isEmpty && (everything || rec.anonymous)
-                && (filters["label"] ?? []).allSatisfy { Self.matches(rec, $0) }
+            (users[rec.name] ?? []).isEmpty && (everything || rec.anonymous) && Filters.labels(filters["label"], in: rec.labels)
         }
     }
 

@@ -110,12 +110,9 @@ public final class ImageService: Sendable {
                 if tags.isEmpty { continue }
             }
             // Every image here has a reference, so none is dangling.
-            if filters["dangling"]?.contains(where: { $0 == "true" || $0 == "1" }) == true { continue }
+            if Filters.bool(filters, "dangling") == true { continue }
             let labels = Self.config(img.record)["Labels"]?.object?.compactMapValues(\.string) ?? [:]
-            if !(filters["label"] ?? []).allSatisfy({ f in
-                let (k, v) = f.splitOnce("=")
-                return labels[k] != nil && (v == nil || labels[k] == v)
-            }) { continue }
+            if !Filters.labels(filters["label"], in: labels) { continue }
             let t = created(img)
             if let before, t >= before { continue }
             if let since, t <= since { continue }
@@ -247,7 +244,8 @@ public final class ImageService: Sendable {
     /// `POST /images/prune`. Every Apple image has a reference, so nothing is dangling and
     /// the default prune removes nothing; `dangling=false` (`prune -a`) removes unused images.
     /// Either way, blobs no image references are collected too.
-    func prune(filters: [String: [String]]) -> JSON {
+    func prune(filters: [String: [String]]) throws -> JSON {
+        let filter = try PruneFilter(filters, allowed: ["dangling", "until", "label", "label!"])
         guard filters["dangling"]?.contains(where: { $0 == "false" || $0 == "0" }) == true else {
             let reclaimed = backend.removeUnreferencedBlobs()
             events.emit("image", "prune", id: "", attributes: ["reclaimed": String(reclaimed)])
@@ -256,7 +254,9 @@ public final class ImageService: Sendable {
         var deleted: [JSON] = []
         var reclaimed: Int64 = 0
         for img in unused(keeping: inUse()) {
-            guard let items = try? remove(img.id, force: true) else { continue }
+            let created = Timestamp.parse(Self.created(img.record)) ?? .distantPast
+            let labels = Self.config(img.record)["Labels"]?.object?.compactMapValues(\.string) ?? [:]
+            guard filter.matches(created: created, labels: labels), let items = try? remove(img.id, force: true) else { continue }
             deleted += items
             reclaimed += Self.variant(img.record)?["size"]?.int ?? 0
         }

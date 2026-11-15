@@ -275,7 +275,7 @@ public final class Daemon: @unchecked Sendable {
             guard let body = JSON.parse(req.body) else { throw APIError(400, "invalid JSON body") }
             conn.json(201, ["Id": .string(try execs.create(p[0], body: body).id)])
         case ("GET", 2, "stats"):
-            let stream = req.query["stream"].map { $0 == "1" || $0 == "true" } ?? true
+            let stream = req.query["stream"].map(Filters.isTrue) ?? true
             try stats.stats(p[0], stream: stream, oneShot: req.flag("one-shot"), conn: conn)
         case ("HEAD", 2, "archive"):
             let stat = try archives.stat(p[0], path: req.query["path"] ?? "/")
@@ -411,7 +411,7 @@ public final class Daemon: @unchecked Sendable {
             guard let file = req.bodyFile else { throw APIError(400, "no archive in the request") }
             for ref in try images.load(file, quiet: req.flag("quiet"), conn: conn) { scans.enqueue(ref) }
         case "POST" where p == ["prune"]:
-            conn.json(200, images.prune(filters: ContainerService.parseFilters(req.query["filters"])))
+            conn.json(200, try images.prune(filters: ContainerService.parseFilters(req.query["filters"])))
         case "GET" where p.count >= 2 && p.last == "json":
             guard let img = images.resolve(name) else { throw APIError(404, "No such image: \(name)") }
             conn.json(200, ImageService.inspect(img.image))

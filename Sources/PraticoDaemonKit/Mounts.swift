@@ -155,7 +155,7 @@ extension ContainerService {
                 out.append(Mount(source: "", destination: dst, readOnly: readOnly, createSource: false,
                                  tmpfs: tmpfsOptions(given, readOnly: readOnly)))
             default:
-                throw APIError(400, "pratico: mount type \(type) is not supported yet")
+                throw APIError(400, "pratico: mount type \(type) is not supported")
             }
         }
         // `--tmpfs /path[:options]`

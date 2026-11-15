@@ -27,26 +27,18 @@ struct DockerEvent: Sendable {
         return .object(j)
     }
 
-    /// Docker `filters` semantics: OR within a key, AND across keys.
+    /// Docker `filters` semantics (`Filters.pass`); labels are the event's attributes.
     func matches(_ filters: [String: [String]]) -> Bool {
-        for (key, values) in filters where !values.isEmpty {
-            let ok = values.contains { v in
+        Filters.pass(filters, labels: attributes) { key, v in
                 switch key {
                 case "type": return type == v
                 case "event": return action == v || action.hasPrefix(v + ":")
                 case "container": return type == "container" && (id.hasPrefix(v) || attributes["name"] == v)
                 case "image": return attributes["image"] == v || (type == "image" && id == v)
                 case "network": return type == "network" && (id.hasPrefix(v) || attributes["name"] == v)
-                case "label":
-                    let (k, val) = v.splitOnce("=")
-                    guard let have = attributes[k] else { return false }
-                    return val == nil || have == val
                 default: return true
                 }
             }
-            if !ok { return false }
-        }
-        return true
     }
 }
 
