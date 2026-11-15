@@ -64,6 +64,18 @@ both first flush the guest's writes and pause its VM while they read, then resum
 
 `docker history` lists each layer's compressed size, as stored.
 
+## Commit
+
+`docker commit` turns what `docker diff` reports into one new layer on the container's
+image: changed and added files, directories, and links, and deletions as OCI whiteouts.
+The new image's config is the container's, with `--change` applied (`CMD`, `ENTRYPOINT`,
+`ENV`, `EXPOSE`, `LABEL`, `ONBUILD`, `STOPSIGNAL`, `USER`, `VOLUME`, `WORKDIR`); `-m`
+and `-a` become its history comment and author. A running container is paused while
+its disk is read (`--pause=false` only flushes its writes). Without a name the image is
+dangling, and `docker image prune` removes it. The new image is scanned like a pulled
+one. Device files, FIFOs, and sockets the container made are refused, and extended
+attributes of changed files are not carried into the layer.
+
 ## Disk use
 
 `docker system df`, `docker ps --size`, `docker inspect --size`, and the menubar's Disk

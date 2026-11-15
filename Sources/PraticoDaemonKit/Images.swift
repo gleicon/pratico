@@ -1,4 +1,5 @@
 import Foundation
+import PraticoCore
 
 /// Docker image references, normalized the way Docker does (`alpine` is
 /// `docker.io/library/alpine:latest`), which is also how Apple `container` names images.
@@ -35,8 +36,12 @@ public enum ImageRef {
 
     /// How people see an image: its first tag, else its short ID, as `docker images` does.
     static func displayName(refs: [String], id: String) -> String {
-        refs.first.map(familiar) ?? String(id.dropFirst(7).prefix(12))
+        refs.first(where: isName).map(familiar) ?? String(id.dropFirst(7).prefix(12))
     }
+
+    /// The store names an image with no tag (`docker commit` without a repository, an
+    /// archive without names) `untagged@<digest>`: a handle, not a tag, so it is `<none>`.
+    static func isName(_ ref: String) -> Bool { !ref.hasPrefix("untagged@") }
 
     /// Reference Docker passes to `POST /images/create` as `fromImage` + `tag`.
     public static func join(_ image: String, tag: String?) -> String {
@@ -50,7 +55,8 @@ struct LocalImage {
     var record: JSON  // first Apple record; all share the same content
     var refs: [String]  // full references
 
-    var tags: [String] { refs.map(ImageRef.familiar) }
+    /// Its tags; `refs` also holds the store's handle for an untagged image.
+    var tags: [String] { refs.filter(ImageRef.isName).map(ImageRef.familiar) }
     var displayName: String { ImageRef.displayName(refs: refs, id: id) }
     var shortId: String { String(id.dropFirst(7).prefix(12)) }
 }
@@ -117,7 +123,7 @@ public final class ImageService: Sendable {
 
     static func digests(_ img: LocalImage) -> [String] {
         guard let digest = img.record["configuration"]?["descriptor"]?["digest"]?.string else { return [] }
-        let repos = img.refs.map { ref in ref.lastIndex(of: ":").map { String(ref[..<$0]) } ?? ref }
+        let repos = img.refs.filter(ImageRef.isName).map { ref in ref.lastIndex(of: ":").map { String(ref[..<$0]) } ?? ref }
         return Array(Set(repos)).sorted().map { ImageRef.familiar($0) + "@" + digest }
     }
 
@@ -139,8 +145,8 @@ public final class ImageService: Sendable {
                 }
                 if tags.isEmpty { continue }
             }
-            // Every image here has a reference, so none is dangling.
-            if Filters.bool(filters, "dangling") == true { continue }
+            // Dangling: no tag (`docker commit` without a repository, an unnamed archive).
+            if let dangling = Filters.bool(filters, "dangling"), dangling != img.tags.isEmpty { continue }
             let labels = Self.config(img.record)["Labels"]?.object?.compactMapValues(\.string) ?? [:]
             if !Filters.labels(filters["label"], in: labels) { continue }
             let t = created(img)
@@ -182,10 +188,11 @@ public final class ImageService: Sendable {
             "RepoTags": JSON(img.tags),
             "RepoDigests": JSON(digests(img)),
             "Parent": "",
-            "Comment": "",
+            // `docker commit -m` and `-a` land in the config, as Docker reads them back.
+            "Comment": variant(img.record)?["config"]?["history"]?.array?.last?["comment"] ?? "",
             "Created": .string(created(img.record)),
             "DockerVersion": "",
-            "Author": "",
+            "Author": variant(img.record)?["config"]?["author"] ?? "",
             "Config": cfg,
             "Architecture": v?["platform"]?["architecture"] ?? "arm64",
             "Variant": v?["platform"]?["variant"] ?? .null,
@@ -237,8 +244,13 @@ public final class ImageService: Sendable {
         guard let (img, matched) = resolve(source) else { throw APIError(404, "No such image: \(source)") }
         guard !repo.isEmpty else { throw APIError(400, "repository name must be given") }
         let target = ImageRef.normalize(ImageRef.join(repo, tag: tag.flatMap { $0.isEmpty ? nil : $0 } ?? "latest"))
-        do { try backend.tag(matched ?? img.refs[0], target) } catch {
+        let from = matched ?? img.refs[0]
+        do { try backend.tag(from, target) } catch {
             throw APIError(500, "cannot tag image: \(error)")
+        }
+        // Tagged now, no longer `<none>`: drop the handle, or untagging would leave it dangling.
+        if !ImageRef.isName(from) {
+            do { try backend.delete(from) } catch { Pratico.log("pratico-daemon: could not drop \(from) after tagging: \(error)") }
         }
         events.emit("image", "tag", id: img.id, attributes: ["name": ImageRef.familiar(target)])
     }
@@ -271,19 +283,14 @@ public final class ImageService: Sendable {
         return out
     }
 
-    /// `POST /images/prune`. Every Apple image has a reference, so nothing is dangling and
-    /// the default prune removes nothing; `dangling=false` (`prune -a`) removes unused images.
-    /// Either way, blobs no image references are collected too.
+    /// `POST /images/prune`: unused images without a tag, or every unused image with
+    /// `dangling=false` (`prune -a`). Either way, blobs no image references are collected too.
     func prune(filters: [String: [String]]) throws -> JSON {
         let filter = try PruneFilter(filters, allowed: ["dangling", "until", "label", "label!"])
-        guard filters["dangling"]?.contains(where: { $0 == "false" || $0 == "0" }) == true else {
-            let reclaimed = backend.removeUnreferencedBlobs()
-            events.emit("image", "prune", id: "", attributes: ["reclaimed": String(reclaimed)])
-            return ["ImagesDeleted": .null, "SpaceReclaimed": .int(reclaimed)]
-        }
+        let all = filters["dangling"]?.contains(where: { $0 == "false" || $0 == "0" }) == true
         var deleted: [JSON] = []
         var reclaimed: Int64 = 0
-        for img in unused(keeping: inUse()) {
+        for img in unused(keeping: inUse()) where all || img.tags.isEmpty {
             let created = Timestamp.parse(Self.created(img.record)) ?? .distantPast
             let labels = Self.config(img.record)["Labels"]?.object?.compactMapValues(\.string) ?? [:]
             guard filter.matches(created: created, labels: labels), let items = try? remove(img.id, force: true) else { continue }

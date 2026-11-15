@@ -171,6 +171,8 @@ public final class Daemon: @unchecked Sendable {
         case ("GET", "info") where parts.count == 1:
             conn.json(200, info())
             return .keepAlive
+        case ("POST", "commit") where parts.count == 1:
+            return try commit(req, conn)
         case (_, "containers"):
             let rest = Array(parts.dropFirst())
             if let d = try routeContainers(m, rest, req, conn) ?? routeContainerTools(m, rest, req, conn) { return d }
@@ -189,6 +191,19 @@ public final class Daemon: @unchecked Sendable {
             break
         }
         conn.error(501, "pratico: endpoint not implemented: \(m) \(req.path)")  // FR-26
+        return .keepAlive
+    }
+
+    /// `POST /commit` (D-47).
+    private func commit(_ req: Request, _ conn: Connection) throws -> Disposition {
+        guard let container = req.query["container"], !container.isEmpty else { throw APIError(400, "container is required") }
+        let request = ContainerService.CommitRequest(
+            repo: req.query["repo"] ?? "", tag: req.query["tag"] ?? "", comment: req.query["comment"] ?? "",
+            author: req.query["author"] ?? "", pause: req.query["pause"].map { !["0", "false"].contains($0) } ?? true,
+            changes: req.queryAll["changes"] ?? [], config: JSON.parse(req.body) ?? [:])
+        let id = try containers.commit(container, request)
+        scans.enqueue(id)  // a new image is scanned like a pulled one
+        conn.json(201, ["Id": .string(id)])
         return .keepAlive
     }
 

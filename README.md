@@ -88,7 +88,7 @@ Supported:
 
 - Containers: create, start, stop, restart, kill, pause, rm, rename, update, logs
   (`-f`, `--tail`, `-t`, `--since`, `--until`), attach, exec (`-it`, `--privileged`,
-  resize), top, diff, export, cp (running or stopped containers), stats, wait, inspect
+  resize), top, diff, export, commit (`-c` changes too), cp (running or stopped containers), stats, wait, inspect
   and `ps` (`--size` too), healthchecks, events, prune.
 - Images: pull, push, tag, rm, inspect, history, prune, save (one or several), load (OCI archives),
   list filters (`reference`, `dangling`, `label`, `before`, `since`).
@@ -102,7 +102,7 @@ Supported:
 
 Limits:
 
-- `docker build` is not supported.
+- `docker build` is not supported; `docker commit` is.
 - Images without an arm64 variant do not run ([CPU](docs/cpu.md)).
 - IPv4 only; a container sees one interface, `eth0`, for all its networks
   ([networking](docs/network.md#limits)).

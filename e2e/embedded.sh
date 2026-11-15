@@ -713,6 +713,20 @@ docker update --cpus 1 --memory 512m e-ops2 >/dev/null
 docker start e-ops2 >/dev/null
 expect_eq "and applied at the next start" "$(docker exec e-ops2 cat /sys/fs/cgroup/cpu.max /sys/fs/cgroup/memory.max | tr '\n' ' ')" "100000 100000 536870912 "
 docker rm -f e-ops2 >/dev/null
+# docker commit: what the container changed, as a layer on its image.
+docker run -d --name e-cm alpine sh -c 'echo made > /made; ln -s /made /link; rm /etc/motd; sleep 300' >/dev/null
+sleep 1
+check "commit with a message, an author, and changes" docker commit -m first -a e2e -c 'CMD ["cat", "/made"]' -c 'ENV GREETING=hello' e-cm e2e-committed:v1
+expect_eq "the new image runs the changed CMD on the files" "$(docker run --rm e2e-committed:v1)" "made"
+expect_eq "with the link, the deletion, and the ENV" "$(docker run --rm e2e-committed:v1 sh -c 'readlink /link; [ -e /etc/motd ] || echo gone; echo $GREETING' | tr '\n' ' ')" "/made gone hello "
+expect_eq "and the author and message" "$(docker image inspect e2e-committed:v1 --format '{{.Author}} {{.Comment}}')" "e2e first"
+expect_eq "the container keeps running" "$(docker inspect e-cm --format '{{.State.Status}} {{.State.Paused}}')" "running false"
+untagged=$(docker commit e-cm)
+expect_eq "commit without a name makes a dangling image" "$(docker images -q --no-trunc -f dangling=true)" "$untagged"
+check "image prune removes it" docker image prune -f
+expect_eq "and only it" "$(docker images -q --no-trunc -f dangling=true | wc -l | tr -d ' ') $(docker images -q e2e-committed:v1 | wc -l | tr -d ' ')" "0 1"
+docker rm -f e-cm >/dev/null
+docker rmi e2e-committed:v1 >/dev/null
 docker run -d --name e-sig --stop-signal SIGWINCH alpine sh -c 'trap "echo got-winch; exit 0" WINCH; while :; do sleep 0.1; done' >/dev/null
 sleep 0.5
 docker stop e-sig >/dev/null

@@ -749,3 +749,15 @@ private func emptyDir() throws -> URL {
     let c = RootfsTree.changes(from: image, to: mine).map { "\($0.kind) \($0.path)" }
     #expect(c == ["0 /etc", "1 /etc/new", "2 /etc/motd", "2 /old"].sorted { $0.dropFirst(2) < $1.dropFirst(2) })
 }
+
+@Test func commitChangesAreDockerfileInstructions() throws {
+    let c = try Dockerfile.apply(["CMD [\"cat\", \"/f\"]", "ENTRYPOINT /run.sh", "ENV A=1 B=\"two words\"", "ENV OLD value",
+                                  "LABEL team=core", "EXPOSE 8080 53/udp", "VOLUME /data", "USER nobody", "WORKDIR /srv",
+                                  "STOPSIGNAL SIGQUIT", "ONBUILD RUN make"], to: ["Env": ["A=0", "PATH=/bin"]])
+    #expect(c["Cmd"]?.strings == ["cat", "/f"] && c["Entrypoint"]?.strings == ["/bin/sh", "-c", "/run.sh"])
+    #expect(c["Env"]?.strings == ["PATH=/bin", "A=1", "B=two words", "OLD=value"])
+    #expect(c["Labels"]?["team"]?.string == "core" && c["ExposedPorts"]?.object?.keys.sorted() == ["53/udp", "8080/tcp"])
+    #expect(c["Volumes"]?["/data"] != nil && c["User"]?.string == "nobody" && c["WorkingDir"]?.string == "/srv")
+    #expect(c["StopSignal"]?.string == "SIGQUIT" && c["OnBuild"]?.strings == ["RUN make"])
+    #expect(throws: APIError.self) { try Dockerfile.apply(["RUN make"], to: [:]) }
+}

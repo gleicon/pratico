@@ -821,12 +821,17 @@ public final class ContainerService: @unchecked Sendable {
     }
 
     /// Runs `body` with a running container's disk image consistent on the Mac: the guest
-    /// flushes its page cache, then its VM pauses until `body` returns. A paused container
-    /// stays paused; a stopped one cannot start meanwhile.
-    func withQuietRootfs<T>(_ ref: String, _ body: (ContainerRecord, URL) throws -> T) throws -> T {
+    /// flushes its page cache, then its VM pauses until `body` returns (`pause: false`, as
+    /// `docker commit --pause=false`, only flushes). A paused container stays paused; a
+    /// stopped one cannot start meanwhile.
+    func withQuietRootfs<T>(_ ref: String, pause: Bool = true, _ body: (ContainerRecord, URL) throws -> T) throws -> T {
         let rec = try resolve(ref)
         guard rec.state.running else { return try whileStopped(rec.id, body) }
         let files = ShimFiles(dir: dir(rec.id))
+        guard pause else {
+            try embedded.shim.call(files, "POST", "/sync")
+            return try body(rec, files.dir.appending(path: "rootfs.ext4"))
+        }
         let pauseHere: Bool = lock.withLock { pausedVMs.insert(rec.id).inserted }
         defer {
             if pauseHere {
