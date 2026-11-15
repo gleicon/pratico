@@ -35,11 +35,16 @@ final class NetSwitch: @unchecked Sendable {
     private var ports: [String: NetPort] = [:]  // by socket path
     private var segments: [String: NetSegment] = [:]  // by network ID
     private let lookups = DispatchSemaphore(value: 32)  // bounds concurrent host DNS lookups
-    private(set) lazy var uplink = Uplink(switch: self)
+    /// Made in `init`, never later: a `lazy var` is not thread-safe, and the first use can
+    /// come from several threads at once (containers stopping together).
+    private(set) var uplink: Uplink!
     static let maxFrame = 65536
     static let mtu = 1500
 
-    init(socketPath: String) { self.socketPath = socketPath }
+    init(socketPath: String) {
+        self.socketPath = socketPath
+        uplink = Uplink(switch: self)
+    }
 
     func start() throws {
         unlink(socketPath)

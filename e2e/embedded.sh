@@ -597,6 +597,15 @@ docker rm -f e2e-s1 e2e-s2 >/dev/null
 docker network rm e2e-snet >/dev/null
 docker volume rm e2e-svol >/dev/null
 
+# Many containers stopping together on a fresh daemon (the uplink's first use comes from
+# several threads at once; a lazy var there crashed the daemon).
+stop_daemon
+start_daemon
+for i in $(seq 8); do docker run -d --name "e2e-burst$i" alpine sleep 300 >/dev/null; done
+docker rm -f $(docker ps -aq --filter name=e2e-burst) >/dev/null 2>&1
+check "the daemon survives eight containers removed at once" docker version
+expect_eq "and all eight are gone" "$(docker ps -aq --filter name=e2e-burst | wc -l | tr -d ' ')" "0"
+
 check "rmi removes the image" docker rmi alpine
 
 echo "$pass passed, $fail failed"
