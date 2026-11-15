@@ -26,6 +26,7 @@ Pratico is a Docker Remote API daemon plus SwiftUI menubar app for Apple silicon
 | `e2e/` | `run.sh`, `embedded.sh`, `registry.sh`, `pty.py`, `fakes/` (scanners, KEV) |
 | `scripts/` | `fetch-runtime-assets.sh`, `release.sh` |
 | `Support/` | Info.plist, entitlements, launch agent plist, DMG readme |
+| `docs/` | user docs: `network.md`, `storage.md`, `vm.md`, `cpu.md` |
 | `docs/design/` | `runtime.md`, `image-scanning.md` |
 | `README.md`, `START.md` | Overview and build/test; user quick start |
 | `SPEC.md` | Requirements, acceptance criteria, decisions D-1–D-28 (`SPEC.v0.md` superseded) |

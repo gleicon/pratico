@@ -160,6 +160,7 @@
         <li><a href="#network">Networking</a></li>
         <li><a href="#protect">Security</a></li>
         <li><a href="#install">Install</a></li>
+        <li><a href="https://github.com/gleicon/pratico/tree/main/docs">Docs</a></li>
         <li><a href="https://github.com/gleicon/pratico">GitHub</a></li>
       </ul>
     </nav>
@@ -254,7 +255,7 @@
       <div class="head">
         <p class="kicker">Each workload in its own VM</p>
         <h2 id="network-h">Networking that stays outside the workload</h2>
-        <p>Every VM gets one virtual network card, plugged into pratico-net: a switch that runs on your Mac, outside every container. Each network a container joins is another address on that card, with no limit on how many. The switch decides what each address may reach, and the rules live there, where no container can change them.</p>
+        <p>Every VM gets one virtual network card, plugged into pratico-net: a switch that runs on your Mac, outside every container. Each network a container joins is another address on that card, with its own MAC as the network sees it, and no limit on how many. The switch decides what each address may reach, and the rules live there, where no container can change them.</p>
       </div>
       <div class="cols">
         <div><h3>Networks that really separate</h3><p>Containers on different networks cannot exchange a single packet. Compose projects get their own private networks, and an <code>internal</code> network never routes out, whatever runs inside.</p></div>

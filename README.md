@@ -63,46 +63,21 @@ pratico-shim ──── owns one VM (Virtualization.framework, via apple/conta
 vminitd ───────── guest agent: process, exec, cp, stats, healthchecks
 ```
 
-- **One VM per container.** Each container boots its own kernel. Nothing is shared
-  between containers except volumes you share. CPU and memory limits are the VM's size.
-- **Shims outlive the daemon.** A daemon restart reattaches to running containers; their
-  output and exit codes are kept.
-- **Start order.** The shim creates the VM and waits; the daemon attaches networks,
-  publishes ports, and records the container as running, then tells the shim to start
-  the process.
-- **pratico-net.** A user-space switch in the daemon, outside every VM. Each VM has one
-  virtual NIC, `eth0`, with an address per network it joins, so there is no limit on the
-  number of networks. The switch tells a VM's networks apart by source address and drops
-  frames from any address it has not assigned to that VM on that network. Networks are
-  separated at the switch; each gateway answers DNS for
-  its containers and aliases and forwards other names to the Mac's resolver. `--internal`
-  networks have no route out; the default route goes through the first network that is
-  not internal. Published ports bind on the Mac (`0.0.0.0` unless an address is given).
-  `host.docker.internal` reaches the Mac. Disconnect cuts that address at the switch.
-- **Root filesystem.** Each image is unpacked once into an ext4 disk image; every
-  container gets an APFS clone of it, so `create` takes the same few milliseconds for any
-  image size and a container's disk use is only what it writes. Bind mounts and volumes
-  are shared over virtiofs; host Unix sockets (including
-  `/var/run/docker.sock` inside a container) are relayed over vsock.
+- **[VMs](docs/vm.md).** One VM per container, each with its own kernel. A shim owns the
+  VM and outlives the daemon, so restarts keep running containers, output, and exit
+  codes. `docker run --rm alpine true`: P99 316 ms; ≈ 250 MB of memory per running
+  container; no VMs when nothing runs.
+- **[CPU](docs/cpu.md).** `linux/arm64`, native. `--cpus` is the VM's vCPU count
+  (default 4).
+- **[Networking](docs/network.md).** pratico-net, a user-space switch in the daemon,
+  outside every VM. One NIC per VM with an address and a MAC per network, no limit on
+  networks, isolation enforced at the switch, DNS at each gateway, published ports bound
+  on the Mac.
+- **[Storage](docs/storage.md).** Images unpacked once into ext4 and cloned per
+  container (APFS), so `create` takes milliseconds for any image. Volumes and bind
+  mounts over virtiofs; `docker cp` on stopped containers; snapshots of definitions.
 
-Details: [docs/design/runtime.md](docs/design/runtime.md).
-
-## Resource use
-
-Measured on an Apple silicon Mac with idle `alpine` containers (`make bench` covers the
-latency and daemon-memory bounds):
-
-| | |
-|---|---|
-| `docker run --rm alpine true` | P99 316 ms over 50 runs, VM boot included |
-| Memory per running container | ≈ 250 MB (VM process ≈ 215 MB, shim ≈ 33 MB) |
-| No containers running | no VMs |
-| Daemon | ≈ 45 MB; 48 MB with 32 containers running |
-| `/_ping`, `/version`, `ps -a` with 100 containers | P99 ≤ 3 ms |
-
-`--memory` (default 1 GiB, plus 128 MiB for the guest) is a ceiling: the Mac backs only
-pages the guest touches. The VM has no memory balloon, so page cache the guest fills is
-returned when the container stops, not while it runs.
+Design notes: [docs/design/runtime.md](docs/design/runtime.md).
 
 ## Compatibility
 
@@ -124,13 +99,13 @@ Supported:
 Limits:
 
 - `docker build` is not supported.
-- Containers run `linux/arm64`; images without an arm64 variant do not run.
-- IPv4 only on pratico-net.
-- A container has one interface for all its networks, with one MAC, where Docker gives
-  each network its own `ethN` and MAC. Software that binds to `eth1` by name sees only
-  `eth0`.
-- Files on volumes and bind mounts are owned by the Mac user, so images that `chown`
-  their data to another uid see the volume's owner.
+- Images without an arm64 variant do not run ([CPU](docs/cpu.md)).
+- IPv4 only; a container sees one interface, `eth0`, for all its networks
+  ([networking](docs/network.md#limits)).
+- Files on volumes and bind mounts are owned by the Mac user
+  ([storage](docs/storage.md#volumes-and-bind-mounts)).
+- `--cap-add`, `--cap-drop`, and CPU shares, quotas, and sets are accepted and not
+  applied.
 
 ## Image scanning
 
@@ -188,10 +163,8 @@ other output is a failed run and keeps that scanner's earlier findings. Design:
   logs, volumes, and scan data, adding up to the total. Cleanup actions list what they
   remove, ask, then call the matching prune endpoint.
 - **Snapshot**: writes every container, network, and volume definition to
-  `~/.pratico/snapshots/pratico-snapshot-<time>.tar.gz` (JSON files and a
-  `manifest.json`). Restore shows each container's image, command, mounts, ports, and
-  privileges before asking, skips names that exist, and starts containers only if asked.
-  Volume data is not included.
+  `~/.pratico/snapshots/`, and restores them after showing what each container would
+  get ([storage](docs/storage.md#snapshots)). Volume data is not included.
 - **Settings** (⌘,): `config.toml` as a form.
 
 ## Configuration

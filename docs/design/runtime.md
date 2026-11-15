@@ -104,6 +104,11 @@ networks cannot exchange a frame, because the switch never forwards one.
   peer's address on the sender's network (broadcast and multicast: the sender's subnet
   or 224.0.0.0/4). Otherwise a raw frame from n1 to a peer's MAC could reach the peer's
   n2 address.
+  - A MAC per network (D-44): vminitd cannot set a MAC or add links, so the card keeps
+    its first network's MAC and each other endpoint gets its own. The switch rewrites the
+    Ethernet source and ARP sender from the card's MAC to the endpoint's on the way out
+    (`NetSwitch.handle`), and the destination and ARP target back on the way in
+    (`NetSwitch.send`). `NetPort.mac` is the endpoint's, `NetPort.card` the guest's.
   - Connect: the daemon reserves an address and adds an endpoint on the card; the shim's
     agent adds the address; then the switch registers the port. A container's first
     network also gets the default route and the published ports. If the guest step
