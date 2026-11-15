@@ -142,6 +142,15 @@
   .claims { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-6) var(--space-7); margin-bottom: var(--space-7); }
   .claims p { color: var(--muted); margin: 0; }
   .tm { font-size: 0.75rem; color: var(--muted); }
+  .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); }
+  .compare { width: 100%; border-collapse: collapse; font-size: var(--step--1); }
+  .compare th, .compare td { text-align: left; padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--line); vertical-align: top; }
+  .compare tbody tr:last-child th, .compare tbody tr:last-child td { border-bottom: 0; }
+  .compare thead th { font-weight: 600; background: var(--bg-soft); }
+  .compare tbody th { font-weight: 600; width: 28%; }
+  .compare td { color: var(--muted); }
+  .compare td.win { color: var(--text); font-weight: 600; }
+  .compare td.win::before { content: "✓ "; color: var(--accent-text); }
 </style>
 </head>
 <body>
@@ -202,21 +211,25 @@
     <div class="wrap">
       <div class="head">
         <p class="kicker">One VM per workload</p>
-        <h2 id="why-h">Real isolation, at the cost of a container</h2>
-        <p>A shared VM looks lighter on paper, but it runs all day whether you use it or not, and every container in it shares one kernel. Pratico starts a small VM only for what you run, in well under a second, and gives everything back when it stops.</p>
+        <h2 id="why-h">Better isolation, and nothing running when you are not</h2>
+        <p>For most work on a Mac, a few services, an agent, code you do not fully trust, a VM per container is the better trade. A shared VM only comes out ahead when dozens of small containers run at the same time.</p>
       </div>
-      <dl class="stats">
-        <div><dt>Start a container</dt><dd>≈ 400 ms</dd></div>
-        <div><dt>With nothing running</dt><dd>0 VMs</dd></div>
-        <div><dt>Memory per idle container</dt><dd>≈ 200 MB</dd></div>
-        <div><dt>Daemon, 32 containers running</dt><dd>48 MB</dd></div>
-      </dl>
-      <div class="claims spaced">
-        <div><h3>Pay only for what runs</h3><p>No background VM holding gigabytes while you work on something else. Stop a container and its VM ends, with all of its memory back on your Mac.</p></div>
-        <div><h3>One workload cannot reach another</h3><p>No shared kernel, no shared process table, no files in common unless you share a volume. A crash, a runaway process, or a breakout stays in its own VM.</p></div>
-        <div><h3>Limits the hypervisor enforces</h3><p>Memory and CPU limits are the size of each VM, set by macOS, not settings inside a kernel every container shares.</p></div>
-        <div><h3>Fast where you feel it</h3><p>CPU runs natively on Apple silicon, each root file system is its own disk image, and control calls answer in under 2 ms with 100 containers.</p></div>
+      <div class="table-wrap">
+        <table class="compare">
+          <thead><tr><th scope="col"></th><th scope="col">One shared VM</th><th scope="col">Pratico, a VM each</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">Nothing running</th><td>The VM stays up, holding its memory</td><td class="win">No VM, nothing held</td></tr>
+            <tr><th scope="row">Stop a container</th><td>Its memory stays with the VM</td><td class="win">All of it goes back to your Mac</td></tr>
+            <tr><th scope="row">Kernel</th><td>One, shared by every container</td><td class="win">One per container</td></tr>
+            <tr><th scope="row">A crash or a breakout</th><td>Reaches the shared kernel</td><td class="win">Stays in its own VM</td></tr>
+            <tr><th scope="row">CPU and memory limits</th><td>Settings inside the shared kernel</td><td class="win">The VM's size, set by macOS</td></tr>
+            <tr><th scope="row">Network rules</th><td>Inside the VM, next to the containers</td><td class="win">On your Mac, outside every container</td></tr>
+            <tr><th scope="row">Each running container</th><td class="win">A few processes</td><td>About 200 MB</td></tr>
+            <tr><th scope="row">Start a container</th><td>Under a second</td><td>About 400 ms</td></tr>
+          </tbody>
+        </table>
       </div>
+      <p class="fine">Pratico's numbers are measured on an Apple silicon Mac with <code>make bench</code>: daemon 48 MB with 32 containers running, control calls under 2 ms with 100 containers.</p>
     </div>
   </section>
 
@@ -302,7 +315,7 @@
             <li class="warn"><strong>Critical or high findings.</strong> The menubar shield changes, and Scan Results lists each one, which scanner found it, and the versions that fix it.</li>
             <li><strong>Medium and low.</strong> Listed, never in your way. You choose what blocks in Settings.</li>
           </ul>
-          <p class="fine">The Scanners menu gives the one Homebrew command that installs them. grype and trivy match on your Mac; osv-scanner sends package names and versions to the OSV.dev API. Image contents never leave your Mac.</p>
+          <p class="fine">With <a href="https://github.com/anchore/syft">syft</a> (Anchore, Apache 2.0) installed, each image also gets an SBOM, exported from Scan Results as SPDX or CycloneDX. The Scanners menu gives the one Homebrew command that installs them. grype and trivy match on your Mac; osv-scanner sends package names and versions to the OSV.dev API. Image contents never leave your Mac.</p>
         </div>
         <div>
           <h3>Bring your own scanner</h3>

@@ -18,7 +18,7 @@ export DOCKER_CONFIG="$HOME_DIR/docker-config"
 mkdir -p "$DOCKER_CONFIG"
 echo '{"auths":{"pratico.invalid":{}}}' >"$DOCKER_CONFIG/config.json"
 export PRATICO_RUNTIME_ASSETS="$ASSETS"
-export PRATICO_OSV_BIN=/nonexistent PRATICO_GRYPE_BIN=/nonexistent PRATICO_TRIVY_BIN=/nonexistent  # no scanning here
+export PRATICO_SYFT_BIN=/nonexistent PRATICO_OSV_BIN=/nonexistent PRATICO_GRYPE_BIN=/nonexistent PRATICO_TRIVY_BIN=/nonexistent  # no scanning here
 DAEMON_PID=""
 
 pass=0

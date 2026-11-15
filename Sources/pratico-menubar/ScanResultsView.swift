@@ -43,6 +43,8 @@ struct ScanResult: Decodable, Identifiable, Equatable {
     var Blocked: Bool?
     /// In `scan_allow`: runs despite its findings.
     var Allowed: Bool?
+    /// syft wrote SBOMs for it.
+    var SBOM: Bool?
     var Report: Report?
 
     var id: String { Id }
@@ -121,6 +123,14 @@ struct ScanResultsView: View {
             HStack {
                 Text(r.Name).font(.title2)
                 Spacer()
+                if r.SBOM == true {
+                    Menu("Export SBOM") {
+                        Button("SPDX JSON…") { daemon.exportSBOM(r, format: "spdx") }
+                        Button("CycloneDX JSON…") { daemon.exportSBOM(r, format: "cyclonedx") }
+                    }
+                    .fixedSize()
+                    .help("The image's software bill of materials, written by syft")
+                }
                 if r.Blocked == true {
                     Button("Allow This Image…") { daemon.allowImage(r) }
                         .help("Let containers from this image run despite its findings")

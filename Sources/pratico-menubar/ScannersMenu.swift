@@ -1,6 +1,7 @@
 import AppKit
 import PraticoCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// `GET /pratico/scanners`: which image scanners pratico finds, like `flutter doctor`.
 struct ScannerReport: Decodable, Equatable {
@@ -11,7 +12,10 @@ struct ScannerReport: Decodable, Equatable {
         var version: String?
         var brew: String?
         var homepage: String
+        /// "scanner", or "sbom" for syft, which writes SBOMs rather than findings.
+        var kind: String?
         var id: String { name }
+        var label: String { kind == "sbom" ? "\(name) (SBOMs)" : name }
     }
     var enabled: Bool
     var brew: String?
@@ -30,9 +34,9 @@ struct ScannersMenu: View {
                 if !r.enabled { Text("Scanning is off (Settings › Scanning)") }
                 ForEach(r.scanners) { s in
                     if s.path != nil {
-                        Text("✓ \(s.name)  \(s.version ?? "")").help(s.path ?? "")
+                        Text("✓ \(s.label)  \(s.version ?? "")").help(s.path ?? "")
                     } else {
-                        Text("✗ \(s.name): \(s.builtin ? "not installed" : "not found or not executable")")
+                        Text("✗ \(s.label): \(s.builtin ? "not installed" : "not found or not executable")")
                     }
                 }
                 Divider()
@@ -99,6 +103,24 @@ extension DaemonController {
 
     /// Off while a scan runs (another would only queue the same images) or scanning is off.
     var canScanNow: Bool { scanners?.enabled != false && (scanSummary?.Scanning ?? 0) == 0 }
+
+    /// Saves the image's SBOM (SPDX or CycloneDX JSON, written by syft) where the user picks.
+    func exportSBOM(_ r: ScanResult, format: String) {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "\(r.Name.replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: ":", with: "-")).\(format == "spdx" ? "spdx" : "cdx").json"
+        panel.allowedContentTypes = [.json]
+        NSApp.activate()
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        Task {
+            let id = r.Id
+            let response = await Task.detached { DaemonProbe.request("GET", "/pratico/scans/\(id)/sbom?format=\(format)", timeout: 30) }.value
+            guard let response, response.status == 200 else {
+                error = "SBOM for \(r.Name): " + (response.map { String(decoding: $0.body, as: UTF8.self) } ?? "the daemon did not answer")
+                return
+            }
+            do { try response.body.write(to: url, options: .atomic) } catch { self.error = "Cannot save \(url.path): \(error.localizedDescription)" }
+        }
+    }
 
     /// Asks, naming what was found, then adds the image to `scan_allow` through the daemon,
     /// which unblocks it at once and keeps it allowed after restarts.

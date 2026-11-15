@@ -48,6 +48,12 @@ struct ImageScanner: Sendable {
         },
     ]
 
+    /// syft, for SBOMs: not a scanner (no findings), run after them when installed.
+    static let sbom = ImageScanner(
+        name: "syft", source: "syft", envOverride: "PRATICO_SYFT_BIN", brew: "syft",
+        homepage: "https://github.com/anchore/syft", versionArgs: ["version"], builtin: true
+    ) { _, _, _ in .success(([], [])) }
+
     /// `scan_custom`: run as `<path> <docker-archive.tar>` with `PRATICO_IMAGE_ID` and
     /// `PRATICO_IMAGE_REFS` set; exit 0 and print `{"findings": [...]}` (README).
     static func custom(_ path: String) -> ImageScanner {
@@ -97,15 +103,32 @@ extension ScanService {
             + config.scanCustom.map { p in let s = ImageScanner.custom(p); return (s, s.locate(environment: env, customPath: p)) }
     }
 
+    var sbomPath: String? { ImageScanner.sbom.locate(environment: env) }
+
+    /// SPDX and CycloneDX SBOMs of the image, written by syft next to its scan report.
+    func writeSBOM(_ archive: URL, imageId: String) {
+        guard let syft = sbomPath else { return }
+        let r = Self.run(syft, ["scan", "docker-archive:\(archive.path)", "-q",
+                                "-o", "spdx-json=\(sbomFile(imageId, .spdx).path)",
+                                "-o", "cyclonedx-json=\(sbomFile(imageId, .cyclonedx).path)"])
+        if !r.ok { Pratico.log("pratico-daemon: syft failed for \(imageId): \(ScanFailure(r).note)") }
+    }
+
+    enum SBOMFormat: String { case spdx, cyclonedx }
+
+    func sbomFile(_ imageId: String, _ format: SBOMFormat) -> URL {
+        dir.appending(path: "\(imageId.dropFirst(7)).\(format == .spdx ? "spdx" : "cdx").json")
+    }
+
     /// `GET /pratico/scanners`: the menubar's checkup, like `flutter doctor`.
     func doctor() -> JSON {
         let brew = ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"].first { FileManager.default.isExecutableFile(atPath: $0) }
         return [
             "enabled": .bool(config.scan),
             "brew": brew.map(JSON.string) ?? .null,
-            "scanners": .array(scanners.map { s, path in
+            "scanners": .array((scanners.map { ($0.scanner, $0.path, "scanner") } + [(ImageScanner.sbom, sbomPath, "sbom")]).map { s, path, kind in
                 [
-                    "name": .string(s.name), "builtin": .bool(s.builtin),
+                    "name": .string(s.name), "builtin": .bool(s.builtin), "kind": .string(kind),
                     "path": path.map(JSON.string) ?? .null,
                     "version": path.flatMap { Self.version($0, s.versionArgs) }.map(JSON.string) ?? .null,
                     "brew": s.brew.map(JSON.string) ?? .null, "homepage": .string(s.homepage),

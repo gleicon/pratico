@@ -1,0 +1,14 @@
+#!/bin/sh
+# Fake syft for e2e: writes a minimal SBOM for each `-o <format>=<file>`.
+[ "$1" = "version" ] && { echo "Version: 0.0.1-fake"; exit 0; }
+while [ $# -gt 0 ]; do
+    if [ "$1" = "-o" ]; then
+        format="${2%%=*}"; file="${2#*=}"
+        case "$format" in
+        spdx-json) echo '{"spdxVersion":"SPDX-2.3","name":"fake","packages":[{"name":"busybox"}]}' >"$file" ;;
+        cyclonedx-json) echo '{"bomFormat":"CycloneDX","specVersion":"1.6","components":[{"name":"busybox"}]}' >"$file" ;;
+        esac
+        shift
+    fi
+    shift
+done

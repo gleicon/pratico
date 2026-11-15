@@ -28,7 +28,7 @@ echo '{"auths":{"pratico.invalid":{}}}' >"$DOCKER_CONFIG/config.json"
 DAEMON_PID=""
 # Hermetic scanning: fake scanners and a local KEV feed, never the network (D-24).
 FAKES="$(cd "$(dirname "$0")" && pwd)/fakes"
-export PRATICO_OSV_BIN="$FAKES/osv-scanner" PRATICO_GRYPE_BIN="$FAKES/grype" PRATICO_TRIVY_BIN="$FAKES/trivy"
+export PRATICO_SYFT_BIN="$FAKES/syft" PRATICO_OSV_BIN="$FAKES/osv-scanner" PRATICO_GRYPE_BIN="$FAKES/grype" PRATICO_TRIVY_BIN="$FAKES/trivy"
 export PRATICO_EPSS_URL="file://$FAKES/epss.json" PRATICO_KEV_URL="file://$FAKES/kev.json" PRATICO_FAKE_SCAN_GATE="$HOME_DIR/scan-gate"
 export PRATICO_FAKE_SCAN_FAIL="$HOME_DIR/scan-fail"
 
@@ -459,6 +459,8 @@ for _ in $(seq 100); do docker start e2e-custom 2>&1 | grep -q MAL-CUSTOM-1 && b
 expect_has "a custom scanner's finding blocks the image" "$(docker start e2e-custom 2>&1)" "MAL-CUSTOM-1"
 results=$(curl -s --unix-socket "$SOCK" http://d/pratico/scans)
 check "scan results say which scanner found what" python3 -c "import json,sys; r={t: i for i in json.loads(sys.argv[1]) for t in i['Tags']}['busybox:uclibc']; f=[f for f in r['Report']['findings'] if f['id']=='MAL-CUSTOM-1'][0]; assert f['sources']==['my-scanner'] and r['Blocked'] and {s['name'] for s in r['Report']['scanners'] if s['ran']} >= {'osv-scanner','grype','trivy','my-scanner'}" "$results"
+check "syft's SBOMs are served in both formats" sh -c "curl -s --unix-socket '$SOCK' 'http://d/pratico/scans/busybox:uclibc/sbom?format=spdx' | grep -q SPDX-2.3 && curl -s --unix-socket '$SOCK' 'http://d/pratico/scans/busybox:uclibc/sbom?format=cyclonedx' | grep -q CycloneDX"
+check "the checkup lists syft as the SBOM tool" python3 -c "import json,sys; s={x['name']: x for x in json.loads(sys.argv[1])['scanners']}['syft']; assert s['kind']=='sbom' and s['path'] and s['brew']=='syft'" "$(curl -s --unix-socket "$SOCK" http://d/pratico/scanners)"
 check "a CVE finding carries its EPSS score and percentile" python3 -c "import json,sys; r={t: i for i in json.loads(sys.argv[1]) for t in i['Tags']}['busybox:uclibc']; f=[f for f in r['Report']['findings'] if f['id']=='CVE-0000-0002'][0]; assert f['epss']==0.421 and f['epssPercentile']==0.973" "$results"
 summary=$(curl -s --unix-socket "$SOCK" http://d/pratico/scans/summary)
 check "the scan summary counts blocked and critical-or-high images" python3 -c "import json,sys; s=json.loads(sys.argv[1]); assert s['Blocked'] >= 1 and 'CriticalOrHigh' in s and s['Images'] >= 2" "$summary"

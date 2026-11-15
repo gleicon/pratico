@@ -231,6 +231,7 @@ final class ScanService: @unchecked Sendable {
 
     private func forget(_ imageId: String) {
         try? FileManager.default.removeItem(at: path(imageId))
+        for f in [SBOMFormat.spdx, .cyclonedx] { try? FileManager.default.removeItem(at: sbomFile(imageId, f)) }
         lock.lock()
         verdicts[imageId] = nil
         severe.remove(imageId)
@@ -338,6 +339,7 @@ final class ScanService: @unchecked Sendable {
                 out["Reasons"] = JSON(reasons)
                 out["Blocked"] = .bool(blockReason(imageId: img.id) != nil)
                 out["Allowed"] = .bool(isAllowed(img.id))
+                out["SBOM"] = .bool(FileManager.default.fileExists(atPath: sbomFile(img.id, .spdx).path))
             }
             return .object(out)
         })
@@ -407,6 +409,7 @@ final class ScanService: @unchecked Sendable {
         // Deleted while it was scanned: `forget` already ran, so saving would bring it back.
         guard images.resolve(img.id) != nil else { return }
         save(report)
+        writeSBOM(archive, imageId: img.id)
         act(report)
     }
 

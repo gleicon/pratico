@@ -187,6 +187,16 @@ public final class Daemon: @unchecked Sendable {
         case ("POST", "pratico") where parts.count == 2 && parts[1] == "scans":
             conn.json(202, scans.rescanAll())
             return .keepAlive
+        case ("GET", "pratico") where parts.count == 4 && parts[1] == "scans" && parts[3] == "sbom":
+            guard let img = images.resolve(parts[2])?.image else { throw APIError(404, "No such image: \(parts[2])") }
+            guard let format = ScanService.SBOMFormat(rawValue: req.query["format"] ?? "spdx") else {
+                throw APIError(400, "format is spdx or cyclonedx")
+            }
+            guard let data = try? Data(contentsOf: scans.sbomFile(img.id, format)) else {
+                throw APIError(404, "no SBOM for \(img.displayName): install syft (brew install syft) and scan it again")
+            }
+            conn.respond(200, body: data, contentType: "application/json")
+            return .keepAlive
         case ("POST", "pratico") where parts.count == 4 && parts[1] == "scans" && parts[3] == "allow":
             try scans.allow(parts[2])
             conn.respond(204)

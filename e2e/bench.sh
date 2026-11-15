@@ -22,7 +22,7 @@ export DOCKER_HOST="unix://$SOCK"
 export DOCKER_CONFIG="$HOME_DIR/docker-config"
 mkdir -p "$DOCKER_CONFIG"
 echo '{"auths":{"pratico.invalid":{}}}' >"$DOCKER_CONFIG/config.json"
-export PRATICO_OSV_BIN=/nonexistent PRATICO_GRYPE_BIN=/nonexistent PRATICO_TRIVY_BIN=/nonexistent
+export PRATICO_SYFT_BIN=/nonexistent PRATICO_OSV_BIN=/nonexistent PRATICO_GRYPE_BIN=/nonexistent PRATICO_TRIVY_BIN=/nonexistent
 printf 'scan = false\n' >"$HOME_DIR/config.toml"  # scanners would add load unrelated to the bars
 docker() { "$DOCKER" "$@"; }
 DAEMON_PID=""
