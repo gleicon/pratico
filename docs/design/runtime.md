@@ -314,6 +314,16 @@ stops its VM and exits. The process therefore never runs before its ports are bo
 before the daemon reports it running; a container that queries the daemon through a
 mounted socket sees itself.
 
+## Rootfs cache and start latency (2026-11-15)
+
+Profiled with `PRATICO_TRACE=1`: of a `docker run --rm alpine true`, about 130 ms is the
+guest kernel booting (each virtio device costs ≈ 8 ms to probe; every VM has 4 NICs, 3 of
+them spare for hot connect), about 110 ms is vminitd starting and the host agent setting
+up the container, about 40 ms is the process start, and about 80 ms is the docker CLI
+itself. pratico's own share was the per-container image unpack and a 20 ms poll for the
+shim; both are gone: images are unpacked once and cloned (APFS `clonefile`), and the shim
+signals readiness on a pipe.
+
 ## Stopped containers (2026-11-14)
 
 `docker cp` with a stopped container boots nothing. Copies out read the container's ext4

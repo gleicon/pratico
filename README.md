@@ -76,8 +76,10 @@ vminitd ───────── guest agent: process, exec, cp, stats, healt
   networks have no route out; the default route goes through the first network that is
   not internal. Published ports bind on the Mac (`0.0.0.0` unless an address is given).
   `host.docker.internal` reaches the Mac. Disconnect cuts the NIC at the switch.
-- **Root filesystem.** Each container gets an ext4 disk image built from its image.
-  Bind mounts and volumes are shared over virtiofs; host Unix sockets (including
+- **Root filesystem.** Each image is unpacked once into an ext4 disk image; every
+  container gets an APFS clone of it, so `create` takes the same few milliseconds for any
+  image size and a container's disk use is only what it writes. Bind mounts and volumes
+  are shared over virtiofs; host Unix sockets (including
   `/var/run/docker.sock` inside a container) are relayed over vsock.
 
 Details: [docs/design/runtime.md](docs/design/runtime.md).
@@ -89,11 +91,11 @@ latency and daemon-memory bounds):
 
 | | |
 |---|---|
-| `docker run --rm alpine true` | P99 415 ms over 50 runs, VM boot included |
+| `docker run --rm alpine true` | P99 381 ms over 50 runs, VM boot included |
 | Memory per running container | ≈ 250 MB (VM process ≈ 215 MB, shim ≈ 33 MB) |
 | No containers running | no VMs |
-| Daemon | ≈ 45 MB; 51 MB with 32 containers running |
-| `/_ping`, `/version`, `ps -a` with 100 containers | P99 ≤ 2 ms |
+| Daemon | ≈ 45 MB; 43 MB with 32 containers running |
+| `/_ping`, `/version`, `ps -a` with 100 containers | P99 ≤ 3 ms |
 
 `--memory` (default 1 GiB, plus 128 MiB for the guest) is a ceiling: the Mac backs only
 pages the guest touches. The VM has no memory balloon, so page cache the guest fills is
