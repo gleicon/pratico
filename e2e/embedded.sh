@@ -393,6 +393,13 @@ check "disk use slices add up to the total" python3 -c "import json,sys; d=json.
 df=$(docker system df --format '{{.Type}} {{.TotalCount}} {{.Active}}' 2>&1)
 expect_has "docker system df counts images" "$df" "Images $(docker images -q | sort -u | wc -l | tr -d ' ') 1"
 expect_has "docker system df counts containers" "$df" "Containers 2 1"
+docker create --name d-labeled -l keep=1 alpine true >/dev/null
+docker container prune -f --filter 'label!=keep' >/dev/null 2>&1
+check "container prune --filter label! keeps the labeled one" docker inspect d-labeled
+docker container prune -f --filter until=1h >/dev/null 2>&1
+check "container prune --filter until=1h keeps recent ones" docker inspect d-labeled
+expect_has "an unknown prune filter is refused" "$(docker container prune -f --filter status=exited 2>&1)" "invalid filter"
+docker rm d-labeled >/dev/null
 docker container prune -f >/dev/null 2>&1
 check "container prune removes stopped containers" sh -c "! docker inspect d-gone >/dev/null 2>&1"
 check "container prune keeps running ones" docker inspect d-keep
@@ -426,6 +433,44 @@ expect_has "--tmpfs size is enforced" "$(docker run --rm --tmpfs /scratch:size=1
 expect_has "--mount type=tmpfs takes size and mode" "$(docker run --rm --mount type=tmpfs,dst=/t,tmpfs-size=1048576,tmpfs-mode=1777 alpine sh -c 'grep " /t " /proc/mounts; stat -c %a /t')" "1777"
 expect_eq "inspect reports a tmpfs mount" "$(docker run -d --name e2e-tmp --tmpfs /run/x alpine sleep 30 >/dev/null; docker inspect e2e-tmp --format '{{range .Mounts}}{{.Type}} {{.Destination}}{{end}}')" "tmpfs /run/x"
 docker rm -f e2e-tmp >/dev/null
+
+# Compose: a project with a private network, an internal one, and a service on both.
+COMPOSE="${COMPOSE:-/opt/homebrew/bin/docker-compose}"
+if [ -x "$COMPOSE" ]; then
+    PROJ="$HOME_DIR/proj"; mkdir -p "$PROJ"
+    cat >"$PROJ/compose.yaml" <<'YAML'
+services:
+  web: {image: alpine, command: sleep 300, networks: [front, back]}
+  api: {image: alpine, command: sleep 300, networks: [back]}
+networks:
+  front: {}
+  back: {internal: true}
+YAML
+    check "compose up" "$COMPOSE" -f "$PROJ/compose.yaml" -p e2e up -d
+    eventually "compose services reach each other by name on a private network" "$COMPOSE" -f "$PROJ/compose.yaml" -p e2e exec -T api ping -c1 -W2 web
+    eventually "a service on a normal and an internal network reaches out" "$COMPOSE" -f "$PROJ/compose.yaml" -p e2e exec -T web ping -c1 -W3 1.1.1.1
+    if "$COMPOSE" -f "$PROJ/compose.yaml" -p e2e exec -T api ping -c1 -W2 1.1.1.1 >/dev/null 2>&1; then bad "an internal-only service stays in"; else ok "an internal-only service stays in"; fi
+    expect_eq "compose exec lands in the service it names" "$("$COMPOSE" -f "$PROJ/compose.yaml" -p e2e exec -T api hostname)" "$(docker inspect e2e-api-1 --format '{{.Config.Hostname}}')"
+    check "compose down removes the project" "$COMPOSE" -f "$PROJ/compose.yaml" -p e2e down
+    expect_eq "and its networks" "$(docker network ls --format '{{.Name}}' | grep -c '^e2e_')" "0"
+else
+    echo "skip compose checks: no $COMPOSE (brew install docker-compose)"
+fi
+
+# Apple's container tool: OCI archives move both ways (only where it is installed).
+if command -v container >/dev/null && container system status >/dev/null 2>&1; then
+    docker tag alpine pratico-e2e/interop:1
+    docker save pratico-e2e/interop:1 -o "$HOME_DIR/interop.tar"
+    check "container image load reads pratico's docker save" container image load -i "$HOME_DIR/interop.tar"
+    expect_eq "and container runs it" "$(container run --rm pratico-e2e/interop:1 echo apple-ok 2>/dev/null | tail -1)" "apple-ok"
+    container image save pratico-e2e/interop:1 -o "$HOME_DIR/from-apple.tar"
+    docker rmi pratico-e2e/interop:1 >/dev/null
+    check "docker load reads container image save" docker load -i "$HOME_DIR/from-apple.tar"
+    container image delete pratico-e2e/interop:1 >/dev/null 2>&1
+    docker rmi pratico-e2e/interop:1 >/dev/null 2>&1
+else
+    echo "skip Apple container checks: container not installed or not running"
+fi
 
 # AC-28, FR-25: named and anonymous volumes.
 since=$(date +%s)

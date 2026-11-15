@@ -597,3 +597,26 @@ private func emptyDir() throws -> URL {
     #expect(try FileManager.default.destinationOfSymbolicLink(atPath: dir.appending(path: "d/l").path) == "f")
     #expect(try String(contentsOf: dir.appending(path: "g/h"), encoding: .utf8) == "deep")
 }
+
+@Test func pruneFilterUntilAndLabels() throws {
+    #expect(PruneFilter.duration("1h30m") == 5400)
+    #expect(PruneFilter.duration("10s") == 10)
+    #expect(PruneFilter.duration("1x") == nil)
+    let f = try PruneFilter(["until": ["1h"], "label": ["env=dev"], "label!": ["keep"]])
+    let old = Date().addingTimeInterval(-7200)
+    #expect(f.matches(created: old, labels: ["env": "dev"]))
+    #expect(!f.matches(created: Date(), labels: ["env": "dev"]))
+    #expect(!f.matches(created: old, labels: ["env": "prod"]))
+    #expect(!f.matches(created: old, labels: ["env": "dev", "keep": "1"]))
+    #expect(throws: APIError.self) { try PruneFilter(["status": ["exited"]]) }
+    #expect(throws: APIError.self) { try PruneFilter(["until": ["yesterday"]]) }
+}
+
+@Test func labelFiltersMustAllMatch() {
+    let web = ["project": "t", "service": "web"], api = ["project": "t", "service": "api"]
+    let f = ["label": ["project=t", "service=web"]]
+    #expect(Filters.pass(f, labels: web) { _, _ in true })
+    #expect(!Filters.pass(f, labels: api) { _, _ in true })
+    #expect(Filters.pass(["name": ["a", "b"]], labels: [:]) { _, v in v == "b" })  // OR within a key
+    #expect(Filters.isTrue("TRUE") && Filters.isTrue("1") && !Filters.isTrue("0"))
+}

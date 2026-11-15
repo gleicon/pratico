@@ -1,0 +1,15 @@
+#!/bin/sh
+# A custom scanner: pratico runs it as `my-scanner <image.tar>` (a Docker archive) with
+# PRATICO_IMAGE_ID and PRATICO_IMAGE_REFS set. It exits 0 and prints findings as JSON.
+# Register it in ~/.pratico/config.toml:  scan_custom = ["/path/to/my-scanner"]
+# (or Settings › Scanners › +), then restart the daemon.
+archive="$1"
+# A real scanner inspects $archive; this one flags a package by name as an illustration.
+if tar -tf "$archive" >/dev/null 2>&1; then
+    case "$PRATICO_IMAGE_REFS" in
+    *example-bad*) echo '{"findings":[{"id":"MAL-EXAMPLE-1","package":"backdoor","version":"1.0","severity":"critical","malicious":true}]}' ;;
+    *) echo '{"findings":[]}' ;;
+    esac
+else
+    echo "not an image archive: $archive" >&2; exit 1
+fi

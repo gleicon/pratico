@@ -1,0 +1,14 @@
+# web is on both networks; api only on the internal one, which never routes out.
+services:
+  web:
+    image: alpine
+    command: sleep 3600
+    networks: [front, back]
+  api:
+    image: alpine
+    command: sleep 3600
+    networks: [back]
+networks:
+  front: {}
+  back:
+    internal: true

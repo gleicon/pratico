@@ -219,6 +219,9 @@ check "Clear Alerts empties the list" sh -c "curl -s -o /dev/null -w '%{http_cod
 docker run -d --name e2e-web -l a=1 -v "$MNT:/x:ro" alpine sleep 300 >/dev/null
 docker run -d --name e2e-other -l a=2 alpine sleep 300 >/dev/null
 expect_eq "AC-14 docker ps filters by label" "$(docker ps --filter label=a=1 --format '{{.Names}}')" "e2e-web"
+docker run -d --name e2e-lab -l a=1 -l b=2 alpine sleep 300 >/dev/null
+expect_eq "every label filter must match, as Compose relies on" "$(docker ps --filter label=a=1 --filter label=b=2 --format '{{.Names}}')" "e2e-lab"
+docker rm -f e2e-lab >/dev/null
 
 before=$(docker inspect e2e-web --format '{{.Name}} {{json .Config.Labels}} {{json .HostConfig.PortBindings}} {{json .Mounts}}')
 stop_daemon
@@ -390,6 +393,12 @@ docker rm "$big" >/dev/null
 # --- Networks (D-25) ----------------------------------------------------------
 t0=$(date +%s)
 expect_eq "AC-26 bridge and none are listed" "$(docker network ls --format '{{.Name}}' | tr '\n' ' ')" "bridge none "
+pids=(); for i in 1 2 3 4; do docker network create "e2e-par$i" >/dev/null & pids+=($!); done; wait "${pids[@]}"
+expect_eq "networks created at once get distinct subnets" "$(for i in 1 2 3 4; do docker network inspect "e2e-par$i" --format '{{(index .IPAM.Config 0).Subnet}}'; done | sort -u | wc -l | tr -d ' ')" "4"
+docker network rm e2e-par1 e2e-par2 e2e-par3 e2e-par4 >/dev/null
+pids=(); for i in 1 2 3; do (docker create --name e2e-same busybox true >/dev/null 2>&1 && echo made >>"$HOME_DIR/made") & pids+=($!); done; wait "${pids[@]}"
+expect_eq "one of three concurrent creates with one name wins" "$(grep -c made "$HOME_DIR/made")" "1"
+docker rm -f e2e-same >/dev/null 2>&1
 check "network create" docker network create e2e-n
 expect_has "duplicate network name is refused" "$(docker network create e2e-n 2>&1)" "already exists"
 docker run -d --name e2e-na --network e2e-n busybox sleep 300 >/dev/null
