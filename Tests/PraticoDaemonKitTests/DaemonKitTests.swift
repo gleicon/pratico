@@ -383,24 +383,6 @@ private let grypeSample = Data(#"""
     #expect(held.claim(0, "172.18.0.3/24"))
 }
 
-@Test func networksShareOneCard() {
-    let first = ShimNIC(networkId: "a", mac: "02:42:00:00:00:01", address: "172.17.0.2/16", gateway: "172.17.0.1", socket: "/s.0")
-    var nics = NICSlots([first], primary: 0)
-    for n in 1...5 {
-        _ = nics.add(networkId: "n\(n)", mac: MAC.derive("n\(n)").description, address: "172.\(18 + n).0.2/24", gateway: "172.\(18 + n).0.1")
-    }
-    #expect(nics.cards == ["/s.0"] && nics.slots.count == 6)
-    #expect(Set(nics.slots.map(\.mac)).count == 6 && nics.card(of: 5) == 0)
-    #expect((0..<6).allSatisfy { nics.cardMAC(of: $0) == first.mac })
-    #expect(nics.cardShared(0))
-    // Losing the primary hands the default route to the next network on the same card.
-    let gone = nics.unbind("a")
-    #expect(gone?.wasPrimary == true && gone?.successor == 1 && nics.bootEntry(card: 0) == 1)
-    let b = nics.add(networkId: "x", mac: MAC.derive("x").description, address: "10.9.0.2/24", gateway: "10.9.0.1")!
-    nics.revert(b)
-    #expect(nics.slots.count == 6 && nics.primary == 1)
-}
-
 @Test func registryPolicyReadsConfigAndCAs() throws {
     let dir = FileManager.default.temporaryDirectory.appending(path: "pratico-ca-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -668,4 +650,69 @@ private func emptyDir() throws -> URL {
     #expect(nics.slots == [a, b] && nics.primary == 1)
     _ = nics.unbind("n2")
     #expect(nics.primary == 0 && !nics.cardShared(0))
+    // No limit of 4: every network is another address on the card.
+    for n in 4...9 { _ = nics.add(networkId: "n\(n)", mac: MAC.derive("n\(n)").description, address: "172.\(18 + n).0.2/24", gateway: "172.\(18 + n).0.1") }
+    #expect(nics.cards == ["/s.0"] && nics.slots.count == 8 && nics.extraEntries(card: 0).count == 6)
+    #expect(nics.addresses(card: 0).first == "172.18.0.2/24")
+}
+
+@Test func runOptionsApplyWhatTheyAccept() throws {
+    func parse(_ host: JSON, _ config: JSON = [:]) throws -> RunOptions {
+        try RunOptions.parse(host: host, config: config, defaultCPUs: 4, defaultMemoryMiB: 1024)
+    }
+    let half = try parse(["NanoCpus": 500_000_000])
+    #expect(half.cpus == 1 && half.cgroup["cpu.max"] == "50000 100000")
+    let quota = try parse(["CpuQuota": 150_000, "CpuPeriod": 100_000, "CpuShares": 512, "CpusetCpus": "0-1", "PidsLimit": 64])
+    #expect(quota.cpus == 2 && quota.cgroup["cpu.max"] == "150000 100000" && quota.cgroup["cpuset.cpus"] == "0-1")
+    #expect(quota.cgroup["cpu.weight"] == "20" && quota.cgroup["pids.max"] == "64")
+    #expect(throws: APIError.self) { try parse(["CpusetCpus": "0-7"]) }  // 4 vCPUs
+    #expect(throws: APIError.self) { try parse(["NanoCpus": 1_000_000_000, "CpuQuota": 50_000]) }
+    let mem = try parse(["Memory": 268_435_456, "MemorySwap": 536_870_912, "MemoryReservation": 134_217_728])
+    #expect(mem.memoryMiB == 256 && mem.cgroup["memory.swap.max"] == "268435456" && mem.cgroup["memory.low"] == "134217728")
+    let caps = try parse(["CapAdd": ["NET_ADMIN"], "CapDrop": ["chown"]])
+    #expect(caps.capabilities?.contains("CAP_NET_ADMIN") == true && caps.capabilities?.contains("CAP_CHOWN") == false)
+    #expect(try parse(["CapDrop": ["ALL"], "CapAdd": ["CAP_KILL"]]).capabilities == ["CAP_KILL"])
+    #expect(try parse([:]).capabilities == nil)
+    let priv = try parse(["Privileged": true])
+    #expect(priv.unmaskedPaths && (priv.capabilities?.count ?? 0) > 30)
+    let sec = try parse(["SecurityOpt": ["no-new-privileges", "seccomp=unconfined"]])
+    #expect(sec.noNewPrivileges)
+    #expect(throws: APIError.self) { try parse(["SecurityOpt": ["seccomp=/tmp/profile.json"]]) }
+    let proc = try parse(["Ulimits": [["Name": "nofile", "Soft": 1024, "Hard": 2048]], "Sysctls": ["net.ipv4.ip_forward": "1"],
+                          "ExtraHosts": ["db:10.0.0.5", "mac=host-gateway"], "Dns": ["9.9.9.9"], "Init": true, "ShmSize": 134_217_728],
+                         ["Domainname": "example.com", "StopSignal": "SIGWINCH", "StopTimeout": 3])
+    #expect(proc.ulimits == [.init(kind: "RLIMIT_NOFILE", soft: 1024, hard: 2048)] && proc.useInit && proc.shmBytes == 134_217_728)
+    #expect(proc.sysctls == ["net.ipv4.ip_forward": "1", "kernel.domainname": "example.com"])
+    #expect(proc.extraHosts == [.init(name: "db", address: "10.0.0.5"), .init(name: "mac", address: "host-gateway")])
+    #expect(proc.dns?.servers == ["9.9.9.9"] && proc.stopSignal == "SIGWINCH" && proc.stopTimeout == 3)
+    let restart = try parse(["RestartPolicy": ["Name": "on-failure", "MaximumRetryCount": 3], "LogConfig": ["Type": "json-file", "Config": ["max-size": "10m", "max-file": "3"]]])
+    #expect(restart.restart == .init(name: "on-failure", maxRetries: 3) && restart.logBytes == 30 * 1_048_576)
+    #expect(throws: APIError.self) { try parse(["RestartPolicy": ["Name": "always"], "AutoRemove": true]) }
+    // Refused when set, accepted at the CLI's defaults.
+    for refused: JSON in [["Devices": [["PathOnHost": "/dev/null"]]], ["PidMode": "host"], ["VolumesFrom": ["a"]], ["OomKillDisable": true],
+                          ["LogConfig": ["Type": "syslog"]], ["MemorySwappiness": 10], ["BlkioWeight": 300]] {
+        #expect(throws: APIError.self) { try parse(refused) }
+    }
+    _ = try parse(["Devices": [], "PidMode": "", "OomKillDisable": false, "MemorySwappiness": -1, "BlkioWeight": 0, "IpcMode": "private"])
+}
+
+@Test func signalsCoverLinuxNames() {
+    #expect(Signals.number("SIGWINCH") == 28 && Signals.number("quit") == 3 && Signals.number("9") == 9)
+    #expect(Signals.number("SIGRTMIN+3") == 37 && Signals.number("NOPE") == nil && Signals.number("65") == nil)
+}
+
+@Test func restartPolicyDecides() {
+    typealias P = RunOptions.RestartPolicy
+    #expect(RestartSupervisor.shouldRestart(P(name: "always"), code: 0, restarts: 9, byHand: false))
+    #expect(!RestartSupervisor.shouldRestart(P(name: "always"), code: 1, restarts: 0, byHand: true))
+    #expect(RestartSupervisor.shouldRestart(P(name: "on-failure", maxRetries: 2), code: 1, restarts: 1, byHand: false))
+    #expect(!RestartSupervisor.shouldRestart(P(name: "on-failure", maxRetries: 2), code: 1, restarts: 2, byHand: false))
+    #expect(!RestartSupervisor.shouldRestart(P(name: "on-failure"), code: 0, restarts: 0, byHand: false))
+    #expect(RestartSupervisor.atDaemonStart(P(name: "always"), byHand: true) && !RestartSupervisor.atDaemonStart(P(name: "unless-stopped"), byHand: true))
+    #expect(RestartSupervisor.delay(0) == 0.1 && RestartSupervisor.delay(20) == 60)
+}
+
+@Test func sizesAndCPUListsParse() throws {
+    #expect(try RunOptions.bytes("10m") == 10_485_760 && RunOptions.bytes("1g") == 1 << 30 && RunOptions.bytes("512") == 512 && RunOptions.bytes("64kb") == 65_536)
+    #expect(RunOptions.cpuList("0-2,4") == [0, 1, 2, 4] && RunOptions.cpuList("2-1") == nil && RunOptions.cpuList("a") == nil)
 }

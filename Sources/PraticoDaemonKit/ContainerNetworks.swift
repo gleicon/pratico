@@ -4,7 +4,7 @@ import Foundation
 extension ContainerService {
     /// `POST /networks/{id}/connect`. A running container gets the network on a spare NIC
     /// slot at once; a stopped one gets it planned for its next start.
-    func connect(_ ref: String, to net: NetworkRecord, aliases: [String]) throws {
+    func connect(_ ref: String, to net: NetworkRecord, endpoint: Endpoint) throws {
         membership.lock()
         defer { membership.unlock() }
         let rec = try resolve(ref)
@@ -15,8 +15,9 @@ extension ContainerService {
         if net.name == "none" || networks.active(rec).keys.contains(where: { (try? networks.resolve($0))?.name == "none" }) {
             throw APIError(400, "container cannot be connected to network none and other networks")
         }
-        if rec.state.running { try hotConnect(rec, net) }
-        eps[net.id] = Endpoint(aliases: aliases)
+        try networks.checkStaticAddress(endpoint, on: net)
+        if rec.state.running { try hotConnect(rec, net, endpoint) }
+        eps[net.id] = endpoint
         update(rec.id) { $0.endpoints = eps }
         networks.emit(net, "connect", container: rec.id)
     }
@@ -35,10 +36,10 @@ extension ContainerService {
     }
 
     /// Brings a spare NIC slot of the running VM up on `net`; see `NetworkService.hotConnect`.
-    private func hotConnect(_ rec: ContainerRecord, _ net: NetworkRecord) throws {
+    private func hotConnect(_ rec: ContainerRecord, _ net: NetworkRecord, _ ep: Endpoint) throws {
         guard !isPaused(rec.id) else { throw APIError(409, "Container \(rec.id) is paused, unpause the container before connecting it") }
         let files = shimFiles(rec.id)
-        try networks.hotConnect(rec, net) { [embedded] change in
+        try networks.hotConnect(rec, net, ep) { [embedded] change in
             _ = try embedded.shim.request(files, "POST", "/nic", body: JSONEncoder().encode(change))
         }
         saveNICs(rec, files)

@@ -241,6 +241,16 @@ stop_daemon
 start_daemon
 eventually "hot-connected NICs survive a daemon restart" docker exec e-b1 ping -c1 -W2 e-c2
 
+# Off every network, then on a new one: the default route and DNS follow (the guest's
+# old address stays on the card, and the switch drops what it sends from it).
+docker network create e-solo >/dev/null
+docker run -d --name e-alone --network e-solo alpine sleep 300 >/dev/null
+docker network disconnect e-solo e-alone
+docker network connect e-n1 e-alone
+eventually "DNS works after reconnecting from no network" docker exec e-alone nslookup e-c2
+docker rm -f e-alone >/dev/null
+docker network rm e-solo >/dev/null
+
 # One card, an address per network (D-43): no limit of 4, and no spare cards to boot.
 for i in 1 2 3 4 5; do docker network create "e-many$i" >/dev/null; done
 docker run -d --name e-many --network e-many1 alpine sleep 300 >/dev/null
@@ -643,6 +653,73 @@ expect_has "and sees the volume create makes for a bare -v" "$risks" "at /data (
 docker rm -f e2e-s1 e2e-s2 >/dev/null
 docker network rm e2e-snet >/dev/null
 docker volume rm e2e-svol >/dev/null
+
+# D-45: every option accepted is applied in the guest; the rest are refused.
+run() { docker run --rm "$@" 2>&1; }
+expect_eq "--cpus 0.5 is a CFS quota of half a CPU" "$(run --cpus 0.5 alpine cat /sys/fs/cgroup/cpu.max)" "50000 100000"
+expect_eq "--cpus 2 sizes the VM" "$(run --cpus 2 alpine nproc)" "2"
+expect_eq "--cpuset-cpus pins" "$(run --cpuset-cpus 1 alpine cat /sys/fs/cgroup/cpuset.cpus.effective)" "1"
+expect_eq "--cpu-shares is a cgroup weight" "$(run --cpu-shares 512 alpine cat /sys/fs/cgroup/cpu.weight)" "20"
+expect_eq "--pids-limit" "$(run --pids-limit 32 alpine cat /sys/fs/cgroup/pids.max)" "32"
+expect_eq "--memory, --memory-reservation, --memory-swap" "$(run -m 256m --memory-reservation 128m --memory-swap 512m alpine cat /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory.low /sys/fs/cgroup/memory.swap.max | tr '\n' ' ')" "268435456 134217728 268435456 "
+expect_eq "Docker's default capabilities" "$(run alpine awk '/CapEff/ {print $2}' /proc/self/status)" "00000000a80425fb"
+check "--cap-add NET_ADMIN" docker run --rm --cap-add NET_ADMIN alpine ip route add 10.9.9.9/32 dev eth0
+expect_eq "--cap-drop ALL" "$(run --cap-drop ALL alpine awk '/CapEff/ {print $2}' /proc/self/status)" "0000000000000000"
+expect_eq "--privileged" "$(run --privileged alpine awk '/CapEff/ {print $2}' /proc/self/status)" "000001ffffffffff"
+expect_has "--read-only" "$(run --read-only alpine touch /x)" "Read-only file system"
+expect_eq "--sysctl" "$(run --sysctl net.ipv4.ip_forward=1 alpine cat /proc/sys/net/ipv4/ip_forward)" "1"
+expect_eq "--ulimit" "$(run --ulimit nofile=1024:2048 alpine sh -c 'ulimit -n; ulimit -Hn' | tr '\n' ' ')" "1024 2048 "
+expect_has "--shm-size" "$(run --shm-size 128m alpine grep /dev/shm /proc/mounts)" "size=131072k"
+expect_has "--group-add by name and number" "$(run --group-add 123 --group-add wheel alpine id)" "groups=0(root),10(wheel),123"
+expect_eq "--user name:group" "$(run --user nobody:nobody alpine id -u -n)" "nobody"
+expect_eq "--hostname and --domainname" "$(run --hostname myhost --domainname example.com alpine sh -c 'hostname; cat /proc/sys/kernel/domainname' | tr '\n' ' ')" "myhost example.com "
+expect_has "--dns, --dns-search, --dns-option" "$(run --dns 1.1.1.1 --dns-search corp --dns-option ndots:2 alpine cat /etc/resolv.conf | tr '\n' ' ')" "nameserver 1.1.1.1 search corp options ndots:2"
+expect_has "--add-host, with host-gateway" "$(run --add-host foo:10.1.2.3 --add-host bar:host-gateway alpine cat /etc/hosts | tr '\n' ' ')" "10.1.2.3 foo 172.17.0.1 bar"
+expect_eq "--init runs an init as PID 1" "$(run --init alpine cat /proc/1/comm | grep -c '^cat$')" "0"
+expect_has "--security-opt no-new-privileges" "$(run --security-opt no-new-privileges alpine grep NoNewPrivs /proc/self/status)" "1"
+expect_has "--device is refused" "$(run --device /dev/null alpine true)" "pratico: --device is not supported"
+expect_has "--pid host is refused" "$(run --pid host alpine true)" "pratico: --pid=host is not supported"
+docker run -d --name e-sig --stop-signal SIGWINCH alpine sh -c 'trap "echo got-winch; exit 0" WINCH; while :; do sleep 0.1; done' >/dev/null
+sleep 0.5
+docker stop e-sig >/dev/null
+expect_eq "--stop-signal" "$(docker logs e-sig) $(docker inspect e-sig --format '{{.State.ExitCode}}')" "got-winch 0"
+docker rm e-sig >/dev/null
+docker run -d --name e-pall -P --expose 80 busybox httpd -f -p 80 >/dev/null
+expect_has "-P publishes exposed ports" "$(docker port e-pall)" "80/tcp -> 0.0.0.0:"
+docker rm -f e-pall >/dev/null
+docker network create --subnet 172.30.5.0/24 e-ipnet >/dev/null
+docker run -d --name e-ip --network e-ipnet --ip 172.30.5.50 --mac-address 02:42:ac:1e:05:32 alpine sleep 300 >/dev/null
+expect_eq "--ip and --mac-address" "$(docker exec e-ip sh -c 'ip -4 -o addr show eth0 | awk "{print \$4}"; cat /sys/class/net/eth0/address' | tr '\n' ' ')" "172.30.5.50/24 02:42:ac:1e:05:32 "
+expect_has "a taken --ip is refused" "$(run --network e-ipnet --ip 172.30.5.50 alpine true)" "Address already in use"
+expect_has "--ip on bridge is refused, as on Docker" "$(run --ip 172.17.0.99 alpine true)" "user defined networks only"
+expect_has "--link resolves the alias" "$(run --network e-ipnet --link e-ip:dbalias alpine getent hosts dbalias)" "172.30.5.50"
+docker rm -f e-ip >/dev/null
+docker network rm e-ipnet >/dev/null
+# Restart policies: on-failure counts, a stop by hand holds always off.
+docker run -d --name e-rf --restart on-failure:2 alpine sh -c 'exit 3' >/dev/null
+eventually "on-failure:2 restarts twice" sh -c '[ "$(docker inspect e-rf --format "{{.RestartCount}} {{.State.Status}}")" = "2 exited" ]'
+docker run -d --name e-ra --restart always alpine sh -c 'sleep 0.3; exit 1' >/dev/null
+eventually "always restarts" sh -c '[ "$(docker inspect e-ra --format "{{.RestartCount}}")" -ge 1 ]'
+docker stop -t 1 e-ra >/dev/null
+held=$(docker inspect e-ra --format '{{.RestartCount}}')
+sleep 2
+expect_eq "docker stop holds always off" "$(docker inspect e-ra --format '{{.RestartCount}} {{.State.Status}}')" "$held exited"
+# A Mac restart, or a crash: the daemon goes, and the VMs with it.
+docker run -d --name e-rus --restart unless-stopped alpine sleep 300 >/dev/null
+docker run -d --name e-crash alpine sh -c 'echo kept > /data; sleep 300' >/dev/null
+sleep 1
+stop_daemon
+for f in "$HOME_DIR"/containers/*/state.json; do
+    pid=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("pid", ""))' "$f" 2>/dev/null)
+    [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null
+done
+sleep 1
+start_daemon
+eventually "unless-stopped comes back when the daemon starts" sh -c '[ "$(docker inspect e-rus --format "{{.State.Status}}")" = running ]'
+eventually "always stopped by hand comes back too, as on Docker" sh -c '[ "$(docker inspect e-ra --format "{{.State.Status}}")" = running ]'
+check "a container whose VM was killed starts again" docker start e-crash
+expect_eq "and keeps its files (its rootfs is repaired)" "$(docker exec e-crash sh -c 'cat /data; echo w > /new; cat /new' | tr '\n' ' ')" "kept w "
+docker rm -f e-rf e-ra e-rus e-crash >/dev/null
 
 # Many containers stopping together on a fresh daemon (the uplink's first use comes from
 # several threads at once; a lazy var there crashed the daemon).

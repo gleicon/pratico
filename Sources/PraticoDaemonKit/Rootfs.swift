@@ -67,6 +67,15 @@ enum CopyUp {
         try entry(reader, FilePath(path), root, name, depth: 0, Budget(maxBytes: Tar.unpackLimit(at: dest)))
     }
 
+    /// A small file of the rootfs (`/etc/group`), at most `max` bytes; nil when missing.
+    static func read(rootfs: URL, path: String, max: Int = 1 << 20) -> Data? {
+        guard let reader = try? EXT4.EXT4Reader(blockDevice: FilePath(rootfs.path)),
+            let (_, inode) = try? reader.stat(FilePath(path)), inode.mode & typeMask == fileType
+        else { return nil }
+        let size = Int(inode.sizeLow) | (Int(inode.sizeHigh) << 32)
+        return try? reader.readFile(at: FilePath(path), count: min(size, max))
+    }
+
     /// `lstat` of a path in the rootfs: size, mode bits, mtime, link target.
     static func stat(rootfs: URL, path: String) throws -> (size: Int64, mode: UInt32, mtime: Int, link: String) {
         let reader = try EXT4.EXT4Reader(blockDevice: FilePath(rootfs.path))
@@ -134,7 +143,25 @@ enum CopyUp {
 /// replaces the old one atomically. Costs a rewrite of the rootfs, so in time it is
 /// proportional to the container's files.
 enum RootfsEdit {
-    static func add(_ files: URL, to rootfs: URL) throws {
+    /// Whether the filesystem was unmounted cleanly: the ext4 superblock's `s_state` has
+    /// EXT4_VALID_FS, which the guest kernel clears while it is mounted and sets again at a
+    /// clean unmount. A VM killed mid-run (crash, power loss, `kill -9`) leaves it clear.
+    static func isClean(_ rootfs: URL) -> Bool {
+        guard let h = try? FileHandle(forReadingFrom: rootfs) else { return true }
+        defer { try? h.close() }
+        guard (try? h.seek(toOffset: 1024 + 58)) != nil, let b = try? h.read(upToCount: 2), b.count == 2 else { return true }
+        return b[b.startIndex] & 1 == 1
+    }
+
+    /// Rewrites the rootfs from its own tree, as `fsck` would leave it consistent: the
+    /// image has no journal, so a VM killed mid-write can leave its bitmaps wrong, and the
+    /// guest then fails writes with EIO ("doubly allocated" inodes). Files survive; blocks
+    /// shared with the image's cached copy do not (it is a full copy afterwards).
+    static func repair(_ rootfs: URL) throws { try rebuild(rootfs, adding: nil) }
+
+    static func add(_ files: URL, to rootfs: URL) throws { try rebuild(rootfs, adding: files) }
+
+    private static func rebuild(_ rootfs: URL, adding files: URL?) throws {
         let fm = FileManager.default
         let dir = rootfs.deletingLastPathComponent()
         let export = dir.appending(path: "rootfs-export.tar")
@@ -148,7 +175,7 @@ enum RootfsEdit {
         try blocking {
             let formatter = try EXT4.Formatter(FilePath(fresh.path), minDiskSize: capacity)
             try await formatter.unpack(reader: try ArchiveReader(file: export))
-            try await formatter.unpack(reader: try ArchiveReader(file: files))
+            if let files { try await formatter.unpack(reader: try ArchiveReader(file: files)) }
             try formatter.close()
         }
         _ = try fm.replaceItemAt(rootfs, withItemAt: fresh)

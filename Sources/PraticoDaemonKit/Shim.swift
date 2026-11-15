@@ -25,6 +25,9 @@ struct ShimSpec: Codable, Sendable {
     /// pratico-net NIC slots; empty for `--network none`.
     var nics = NICSlots()
     var switchSocket: String = ""
+    /// Everything else the container asked for (D-45), resolved by the daemon. Absent in
+    /// specs of shims from before it.
+    var options: RunOptions?
 }
 
 /// A change to a running VM's NIC slot: the body of the shim's `POST /nic`. Traffic is
@@ -110,7 +113,7 @@ public enum ShimHost {
         writeJSON(["pid": .int(Int64(getpid())), "status": "starting"], to: files.state)
         var trace = Trace("shim \(spec.id)")
 
-        let log = LogStore(path: files.log)
+        let log = LogStore(path: files.log, maxBytes: spec.options?.logBytes ?? LogStore.defaultCap)
         let stdin = spec.openStdin ? StdinStream() : nil
         let vmm = VZVirtualMachineManager(
             kernel: Kernel(path: URL(filePath: spec.kernel), platform: .linuxArm),
@@ -131,12 +134,14 @@ public enum ShimHost {
         do {
             trace.mark("nic relays")
             container = try LinuxContainer(
-                spec.id, rootfs: .block(format: "ext4", source: spec.rootfs, destination: "/"), vmm: vmm,
+                spec.id, rootfs: .block(format: "ext4", source: spec.rootfs, destination: "/", options: spec.options?.readonlyRootfs == true ? ["ro"] : []), vmm: vmm,
                 vm: VMResources(cpus: spec.cpus, memoryInBytes: UInt64(spec.memoryMiB).mib() + VMResources.guestMemoryOverhead)
             ) { config in
                 config.cpus = spec.cpus
                 config.memoryInBytes = UInt64(spec.memoryMiB).mib()
                 config.hostname = spec.hostname
+                // With PRATICO_TRACE, the guest kernel's console goes to boot.log beside shim.log.
+                if Trace.on { config.bootLog = .file(path: files.dir.appending(path: "boot.log"), append: false) }
                 config.process.arguments = spec.arguments
                 config.process.environmentVariables = spec.environment
                 config.process.workingDirectory = spec.workingDirectory.isEmpty ? "/" : spec.workingDirectory
@@ -147,13 +152,14 @@ public enum ShimHost {
                 config.process.stderr = spec.tty ? nil : LogWriter(log: log, stream: 2)
                 config.process.stdin = stdin
                 config.interfaces = interfaces
-                if let primary = spec.nics.primaryNIC {
-                    // pratico-net answers DNS at every gateway: container names, then the Mac's resolver.
-                    config.dns = DNS(nameservers: [primary.gateway])
-                    var hosts = Hosts.default
-                    hosts.entries.append(Hosts.Entry(ipAddress: primary.ip, hostnames: [spec.hostname]))
-                    config.hosts = hosts
-                }
+                let primary = spec.nics.primaryNIC
+                // pratico-net answers DNS at every gateway: container names, then the Mac's resolver.
+                if let dns = Self.dns(spec, gateway: primary?.gateway) { config.dns = dns }
+                var hosts = Hosts.default
+                if let primary { hosts.entries.append(Hosts.Entry(ipAddress: primary.ip, hostnames: [spec.hostname])) }
+                for e in spec.options?.extraHosts ?? [] { hosts.entries.append(Hosts.Entry(ipAddress: e.address, hostnames: [e.name])) }
+                if primary != nil || !(spec.options?.extraHosts ?? []).isEmpty { config.hosts = hosts }
+                if let o = spec.options { try Self.apply(o, to: &config) }
                 for m in spec.mounts where m.socket {
                     config.sockets.append(UnixSocketConfiguration(
                         source: URL(filePath: m.source), destination: URL(filePath: m.destination), direction: .into))
@@ -172,14 +178,14 @@ public enum ShimHost {
             // A card's other networks are more addresses on it; spare cards (VMs from before
             // D-43) stay link-down until the daemon connects them (`POST /nic`).
             let nics = spec.nics
-            let boot = Set(nics.cards.indices.map { nics.bootEntry(card: $0) })
-            let extra = nics.slots.indices.filter { !boot.contains($0) && !nics.slots[$0].isSpare }
             let spares = nics.cards.indices.filter { nics.slots[nics.bootEntry(card: $0)].isSpare }
-            if !extra.isEmpty || !spares.isEmpty {
+            if nics.slots.count > nics.cards.count || !spares.isEmpty {
                 try await container.withVirtualMachineInstance { vm in
                     let agent = try await vm.dialAgent()
-                    for i in extra {
-                        try await agent.addressAdd(name: "eth\(nics.card(of: i))", address: InterfaceAddress(ipv4Address: try CIDRv4(nics.slots[i].address)))
+                    for n in nics.cards.indices {
+                        for i in nics.extraEntries(card: n) {
+                            try await agent.addressAdd(name: "eth\(n)", address: InterfaceAddress(ipv4Address: try CIDRv4(nics.slots[i].address)))
+                        }
                     }
                     for n in spares { try await agent.down(name: "eth\(n)") }
                     try await agent.close()
@@ -199,9 +205,11 @@ public enum ShimHost {
         // normal exit path still records its code.
         signal(SIGTERM, SIG_IGN)
         let term = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global())
+        let stopSignal = Int32(Signals.number(spec.options?.stopSignal ?? "TERM") ?? 15)
+        let stopTimeout = Double(spec.options?.stopTimeout ?? 10)
         term.setEventHandler {
-            Task { try? await container.kill(Signal(rawValue: 15)) }
-            DispatchQueue.global().asyncAfter(deadline: .now() + 10) {
+            Task { try? await container.kill(Signal(rawValue: stopSignal)) }
+            DispatchQueue.global().asyncAfter(deadline: .now() + stopTimeout) {
                 Task { try? await container.kill(Signal(rawValue: 9)) }
             }
         }
@@ -237,13 +245,41 @@ public enum ShimHost {
     }
 
     /// Docker `User`: `name`, `uid`, or `uid:gid`; names resolve inside the guest.
+    /// `--user` as given (`name`, `uid`, `name:group`, `uid:gid`): vminitd resolves it
+    /// against the image's `/etc/passwd` and `/etc/group`.
     static func user(_ s: String) -> ContainerizationOCI.User {
         var u = ContainerizationOCI.User()
-        guard !s.isEmpty else { return u }
-        let (name, group) = s.splitOnce(":")
-        if let uid = UInt32(name) { u.uid = uid } else { u.username = name }
-        if let group, let gid = UInt32(group) { u.gid = gid }
+        u.username = s
         return u
+    }
+
+    /// The resolver: `--dns` and friends, else the primary network's gateway. nil with no
+    /// network and no `--dns`.
+    static func dns(_ spec: ShimSpec, gateway: String?) -> DNS? {
+        let r = spec.options?.dns
+        let servers = r.map(\.servers).flatMap { $0.isEmpty ? nil : $0 } ?? gateway.map { [$0] }
+        guard let servers else { return nil }
+        return DNS(nameservers: servers, searchDomains: r?.search ?? [], options: r?.options ?? [])
+    }
+
+    /// The process and cgroup side of the run options (D-45).
+    static func apply(_ o: RunOptions, to config: inout LinuxContainer.Configuration) throws {
+        config.unified = o.cgroup
+        config.sysctl = o.sysctls
+        config.useInit = o.useInit
+        if let caps = o.capabilities {
+            config.process.capabilities = LinuxCapabilities(capabilities: try caps.map { try CapabilityName(rawValue: $0) })
+        }
+        if o.unmaskedPaths {
+            config.maskedPaths = []
+            config.readonlyPaths = []
+        }
+        config.process.noNewPrivileges = o.noNewPrivileges
+        config.process.rlimits = try o.ulimits.map { LinuxRLimit(kind: try LinuxRLimit.Kind($0.kind), hard: $0.hard, soft: $0.soft) }
+        config.process.user.additionalGids = o.groups.compactMap(UInt32.init)
+        if let shm = o.shmBytes, let i = config.mounts.firstIndex(where: { $0.destination == "/dev/shm" }) {
+            config.mounts[i].options = config.mounts[i].options.filter { !$0.hasPrefix("size=") } + ["size=\(shm / 1024)k"]
+        }
     }
 
     static func writeExit(_ files: ShimFiles, code: Int32, error: String) {
@@ -271,10 +307,7 @@ final class ShimControl: Sendable {
         self.spec = spec
         self.stdin = stdin
         // What each card holds: its boot address and the extra ones added after create.
-        addresses = GuestAddresses(spec.nics.cards.indices.map { n in
-            spec.nics.slots.indices.filter { spec.nics.card(of: $0) == n && !spec.nics.slots[$0].isSpare }.map { spec.nics.slots[$0].address }
-                + [spec.nics.slots[spec.nics.bootEntry(card: n)].address]
-        })
+        addresses = GuestAddresses(spec.nics.cards.indices.map(spec.nics.addresses(card:)))
     }
 
     /// Whether a host path stays inside `dir` once `.`/`..` and symlinks are resolved (the
@@ -320,9 +353,10 @@ final class ShimControl: Sendable {
                 let sig = Int32(req.query["signal"] ?? "") ?? 9
                 try blocking { try await c.kill(Signal(rawValue: sig)) }
             case ("POST", "stop"):
-                // SIGTERM, then SIGKILL after the grace period, as `docker stop`.
+                // The stop signal, then SIGKILL after the grace period, as `docker stop`.
                 let grace = Double(req.query["t"] ?? "") ?? 10
-                try blocking { try await c.kill(Signal(rawValue: 15)) }
+                let signal = Int32(req.query["signal"] ?? "") ?? 15
+                try blocking { try await c.kill(Signal(rawValue: signal)) }
                 DispatchQueue.global().asyncAfter(deadline: .now() + grace) {
                     Task { try? await c.kill(Signal(rawValue: 9)) }
                 }
@@ -428,10 +462,22 @@ extension ShimControl {
         let name = "eth\(slot)"
         let addresses = addresses
         let rootfs = "/run/container/\(spec.id)/rootfs"
+        let spec = spec
         try blocking { [container] in
             try await container.withVirtualMachineInstance { vm in
                 let agent = try await vm.dialAgent()
                 defer { Task { try? await agent.close() } }
+                // `gateway` becomes the default route and the DNS server. Bouncing the link
+                // drops the old default route (vminitd has no route delete) and keeps the
+                // addresses and their subnet routes; the new default takes its source from
+                // the gateway's subnet. resolv.conf must follow (unless `--dns` set it): the
+                // container's old address stays on the card, and the switch drops what it sends.
+                func primary(_ gateway: String) async throws {
+                    try await agent.down(name: name)
+                    try await agent.up(name: name, mtu: 1500)
+                    try await agent.routeAddDefault(name: name, route: DefaultRoute(ipv4Gateway: try IPv4Address(gateway)))
+                    if let dns = ShimHost.dns(spec, gateway: gateway) { try await agent.configureDNS(config: dns, location: rootfs) }
+                }
                 switch change {
                 case .up(_, let address, let gateway):
                     let cidr = try CIDRv4(address)
@@ -441,20 +487,11 @@ extension ShimControl {
                             throw error
                         }
                     }
-                    try await agent.up(name: name, mtu: 1500)
-                    if let gateway { try await agent.routeAddDefault(name: name, route: DefaultRoute(ipv4Gateway: try IPv4Address(gateway))) }
+                    if let gateway { try await primary(gateway) } else { try await agent.up(name: name, mtu: 1500) }
                 case .down:
                     try await agent.down(name: name)
                 case .route(_, let gateway):
-                    // The primary network changed. Bouncing the link drops its old default
-                    // route (vminitd has no route delete) and keeps its addresses and their
-                    // subnet routes; the new default then takes its source from the
-                    // gateway's subnet. resolv.conf follows: the old gateway's address
-                    // stays on the card, and the switch drops what it sends.
-                    try await agent.down(name: name)
-                    try await agent.up(name: name, mtu: 1500)
-                    try await agent.routeAddDefault(name: name, route: DefaultRoute(ipv4Gateway: try IPv4Address(gateway)))
-                    try await agent.configureDNS(config: DNS(nameservers: [gateway]), location: rootfs)
+                    try await primary(gateway)
                 }
             }
         }

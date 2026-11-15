@@ -116,7 +116,7 @@ final class StatsService: @unchecked Sendable {
 
     func stats(_ ref: String, stream: Bool, oneShot: Bool, conn: Connection) throws {
         let rec = try containers.resolve(ref)
-        let cpus = Self.cpus(rec)
+        let cpus = cpus(rec)
         guard rec.state.running else {
             conn.json(200, Self.encode(rec, cpus: cpus, now: nil, pre: nil))
             return
@@ -156,9 +156,9 @@ final class StatsService: @unchecked Sendable {
         conn.endChunked()
     }
 
-    static func cpus(_ rec: ContainerRecord) -> Int64 {
-        rec.hostConfig["NanoCpus"]?.int.flatMap { $0 > 0 ? max(($0 + 999_999_999) / 1_000_000_000, 1) : nil }
-            ?? Int64(ProcessInfo.processInfo.activeProcessorCount)
+    /// The VM's vCPUs, as `launch` sized it.
+    private func cpus(_ rec: ContainerRecord) -> Int64 {
+        Int64((try? containers.runOptions(rec))?.cpus ?? containers.config.defaultCPUs)
     }
 
     static func encode(_ rec: ContainerRecord, cpus: Int64, now: Sample?, pre: Sample?) -> JSON {

@@ -93,6 +93,9 @@ public final class Daemon: @unchecked Sendable {
         server = s
         scans.startBackground()
         containers.embedded.sweepRootfsCache(keeping: Set(images.localImages().map(\.id)))
+        // Restart policies: what `always` and `unless-stopped` keep up comes back, VMs
+        // booting in the background while the API already answers.
+        Thread.detachNewThread { [containers] in containers.restarts.daemonStarted() }
     }
 
     public func stop() { server?.stop() }
@@ -293,7 +296,7 @@ public final class Daemon: @unchecked Sendable {
                 throw APIError(400, "container is required")
             }
             if p[1] == "connect" {
-                try containers.connect(ref, to: net, aliases: body["EndpointConfig"]?["Aliases"]?.strings ?? [])
+                try containers.connect(ref, to: net, endpoint: Endpoint.parse(body["EndpointConfig"]))
             } else {
                 try containers.disconnect(ref, from: net)
             }

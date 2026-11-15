@@ -27,10 +27,36 @@ struct Endpoint: Codable, Sendable, Equatable {
     /// Set by the CLI backend's disconnect, which could not remove an interface; records
     /// it left still decode, and such an endpoint counts as disconnected.
     var detached: Bool
+    /// `--ip`: the address asked for on this network.
+    var ipv4: String?
+    /// `--mac-address`: the MAC this network sees the container under.
+    var mac: String?
+    /// `--link` on this network: `target:alias`.
+    var links: [String]?
 
-    init(aliases: [String] = [], detached: Bool = false) {
+    init(aliases: [String] = [], detached: Bool = false, ipv4: String? = nil, mac: String? = nil, links: [String]? = nil) {
         self.aliases = aliases
         self.detached = detached
+        self.ipv4 = ipv4
+        self.mac = mac
+        self.links = links
+    }
+
+    /// A create or connect request's `EndpointSettings`. Settings pratico cannot apply are
+    /// refused when set (D-45).
+    static func parse(_ cfg: JSON?) throws -> Endpoint {
+        let ipam = cfg?["IPAMConfig"]
+        if let v6 = ipam?["IPv6Address"]?.string, !v6.isEmpty { throw APIError(400, "pratico: --ip6 is not supported: pratico-net is IPv4 only") }
+        if let ll = ipam?["LinkLocalIPs"]?.strings, !ll.isEmpty { throw APIError(400, "pratico: --link-local-ip is not supported") }
+        if let opts = cfg?["DriverOpts"]?.object, !opts.isEmpty { throw APIError(400, "pratico: network driver options are not supported") }
+        let ip = ipam?["IPv4Address"]?.string.flatMap { $0.isEmpty ? nil : $0 }
+        if let ip, IPv4.parse(ip) == nil { throw APIError(400, "invalid IPv4 address: \(ip)") }
+        let mac = cfg?["MacAddress"]?.string.flatMap { $0.isEmpty ? nil : $0 }
+        if let mac {
+            guard let m = MAC(mac), !m.isMulticast else { throw APIError(400, "invalid MAC address: \(mac)") }
+        }
+        let links = cfg?["Links"]?.strings.flatMap { $0.isEmpty ? nil : $0 }
+        return Endpoint(aliases: cfg?["Aliases"]?.strings ?? [], ipv4: ip, mac: mac?.lowercased(), links: links)
     }
 }
 
@@ -286,27 +312,28 @@ final class NetworkService: @unchecked Sendable {
     /// The networks a new container joins, primary (`NetworkMode`) first.
     func attachments(host: JSON, networking: JSON?) throws -> [(NetworkRecord, Endpoint)] {
         let configs = networking?["EndpointsConfig"]?.object ?? [:]
-        func endpoint(_ key: String) -> Endpoint { Endpoint(aliases: configs[key]?["Aliases"]?.strings ?? []) }
+        func endpoint(_ key: String) throws -> Endpoint { try Endpoint.parse(configs[key]) }
         let mode = host["NetworkMode"]?.string ?? ""
         var out: [(NetworkRecord, Endpoint)] = []
         switch mode {
         case "", "default", "bridge":
-            out.append((bridge, endpoint(configs["default"] == nil ? "bridge" : "default")))
+            out.append((bridge, try endpoint(configs["default"] == nil ? "bridge" : "default")))
         case "host":
             throw APIError(400, "pratico: network mode host is not supported; each container is its own VM")
         case let m where m.hasPrefix("container:"):
             throw APIError(400, "pratico: sharing another container's network namespace is not supported")
         default:
-            out.append((try resolve(mode), endpoint(mode)))
+            out.append((try resolve(mode), try endpoint(mode)))
         }
         for (key, cfg) in configs.sorted(by: { $0.key < $1.key }) {
             let net = key == "default" ? bridge : try resolve(key)
             if out.contains(where: { $0.0.id == net.id }) { continue }
-            out.append((net, Endpoint(aliases: cfg["Aliases"]?.strings ?? [])))
+            out.append((net, try Endpoint.parse(cfg)))
         }
         if out.count > 1, out.contains(where: { $0.0.name == "none" }) {
             throw APIError(400, "conflicting options: container cannot be connected to network none and other networks")
         }
+        for (net, ep) in out where ep.ipv4 != nil { try checkStaticAddress(ep, on: net) }
         return out
     }
 
@@ -351,14 +378,20 @@ final class NetworkService: @unchecked Sendable {
             }
         guard !nets.isEmpty else { return NICSlots() }
         let socket = runDir.appending(path: "\(rec.appleId).0").path
-        let card = MAC.derive(rec.id + "eth0").description
+        let endpoints = active(rec)
         lock.lock()
         defer { lock.unlock() }
         var nics: [ShimNIC] = []
         for net in nets {
-            guard let ip = freeAddress(net) else { continue }
+            let ep = endpoints[net.id]
+            guard let ip = freeAddress(net, wanted: ep?.ipv4) else {
+                addresses[rec.id] = nil
+                throw ep?.ipv4 == nil
+                    ? APIError(403, "no available IPv4 addresses on network \(net.name)")
+                    : APIError(409, "Address already in use: \(ep!.ipv4!) on network \(net.name)")
+            }
             // The first network shows the card's own MAC, the others their own (D-44).
-            let mac = nics.isEmpty ? card : Self.mac(rec, on: net)
+            let mac = Self.mac(rec, on: net, ep, card: nics.isEmpty)
             nics.append(ShimNIC(networkId: net.id, mac: mac, address: ip, gateway: net.gateway, socket: socket))
             record(rec.id, nics[nics.count - 1], on: net)
         }
@@ -366,13 +399,31 @@ final class NetworkService: @unchecked Sendable {
         return slots[rec.id]!
     }
 
+    /// `--ip` must be a host address of a user-defined network, as on Docker.
+    func checkStaticAddress(_ ep: Endpoint, on net: NetworkRecord) throws {
+        guard let wanted = ep.ipv4 else { return }
+        guard !net.builtin else { throw APIError(400, "user specified IP address is supported on user defined networks only") }
+        guard let c = IPv4.cidr(net.subnet), let ip = IPv4.parse(wanted), IPv4.contains(c, wanted) else {
+            throw APIError(400, "invalid endpoint settings: no configured subnet contains IP address \(wanted)")
+        }
+        let size = UInt32(1) << UInt32(32 - c.prefix)
+        guard ip != c.base, ip != c.base + size - 1, wanted != net.gateway else {
+            throw APIError(400, "invalid endpoint settings: \(wanted) is not a host address of \(net.subnet)")
+        }
+    }
+
     /// A free address on `net` as CIDR. Spare slots keep theirs reserved: the guest still
     /// holds it on a link-down interface. Callers hold `lock`.
-    private func freeAddress(_ net: NetworkRecord) -> String? {
+    /// With `wanted` (`--ip`), that address or nil when taken.
+    private func freeAddress(_ net: NetworkRecord, wanted: String? = nil) -> String? {
         guard let c = IPv4.cidr(net.subnet), let gw = IPv4.parse(net.gateway) else { return nil }
         var used = Set(addresses.values.compactMap { $0[net.appleName].flatMap { IPv4.parse($0.ip) } } + [gw])
         for nic in slots.values.flatMap(\.slots) where !nic.hasPlaceholder && IPv4.contains(c, nic.ip) {
             if let ip = IPv4.parse(nic.ip) { used.insert(ip) }
+        }
+        if let wanted {
+            guard let ip = IPv4.parse(wanted), !used.contains(ip) else { return nil }
+            return "\(wanted)/\(c.prefix)"
         }
         let size = UInt32(1) << UInt32(32 - c.prefix)
         guard let ip = (UInt32(1)..<(size - 1)).lazy.map({ c.base + $0 }).first(where: { !used.contains($0) }) else { return nil }
@@ -390,24 +441,24 @@ final class NetworkService: @unchecked Sendable {
         lock.lock()
         slots[rec.id] = nics
         for (i, nic) in nics.slots.enumerated() where !nic.isSpare {
-            guard let net = records[nic.networkId], let port = Self.port(rec.id, nics, i) else { continue }
+            guard let net = records[nic.networkId], let port = nics.port(i, container: rec.id) else { continue }
             record(rec.id, nic, on: net)
             netSwitch.register(port)
         }
         lock.unlock()
     }
 
-    private static func port(_ id: String, _ nics: NICSlots, _ entry: Int?) -> NetPort? {
-        guard let entry else { return nil }
-        let nic = nics.slots[entry]
-        guard let mac = MAC(nic.mac), let card = MAC(nics.cardMAC(of: entry)), let ip = IPv4.parse(nic.ip) else { return nil }
-        return NetPort(path: nic.socket, containerId: id, networkId: nic.networkId, mac: mac, ip: ip, card: card)
+    /// A container's MAC on `net`: `--mac-address`, else stable per container and network.
+    /// The card's own (`card`, its first network's) is derived apart, so a later network
+    /// never gets the same.
+    private static func mac(_ rec: ContainerRecord, on net: NetworkRecord, _ ep: Endpoint?, card: Bool) -> String {
+        ep?.mac ?? MAC.derive(rec.id + (card ? "eth0" : net.id)).description
     }
 
-    /// An endpoint's MAC on a network other than the card's first: stable per container
-    /// and network.
-    private static func mac(_ rec: ContainerRecord, on net: NetworkRecord) -> String {
-        MAC.derive(rec.id + net.id).description
+    /// The primary endpoint as a switch port, and its gateway: where published ports lead.
+    private static func primaryRoute(_ id: String, _ nics: NICSlots) -> (port: NetPort, gateway: UInt32)? {
+        guard let p = nics.primary, let port = nics.port(p, container: id), let gw = IPv4.parse(nics.slots[p].gateway) else { return nil }
+        return (port, gw)
     }
 
     func nics(_ id: String) -> NICSlots {
@@ -419,23 +470,27 @@ final class NetworkService: @unchecked Sendable {
     /// has `guest` add it, then plugs it into the switch. If the guest side fails, only this
     /// endpoint is undone. A container with no network yet makes `net` its primary one, and
     /// its published ports follow. Callers serialize changes to one container's networks.
-    func hotConnect(_ rec: ContainerRecord, _ net: NetworkRecord, guest: (NICChange) throws -> Void) throws {
+    func hotConnect(_ rec: ContainerRecord, _ net: NetworkRecord, _ ep: Endpoint, guest: (NICChange) throws -> Void) throws {
         let (binding, change) = try lock.withLock { () throws -> (NICSlots.Binding, NICChange) in
             guard var nics = slots[rec.id], !nics.slots.isEmpty else {
                 throw APIError(409, "pratico: container \(rec.name) started without network slots; restart it to connect networks")
             }
             guard let c = IPv4.cidr(net.subnet) else { throw APIError(500, "network \(net.name) has no subnet") }
             let binding: NICSlots.Binding
-            if let (slot, reused) = nics.free(in: c) {
+            if let wanted = ep.ipv4, let held = nics.slots.firstIndex(where: { $0.isSpare && $0.ip == wanted }) {
+                binding = nics.bind(held, networkId: net.id, address: nics.slots[held].address, gateway: net.gateway)
+            } else if ep.ipv4 == nil, let (slot, reused) = nics.free(in: c) {
                 // A never-used spare's placeholder holds nothing on `net`.
                 guard let address = reused ? nics.slots[slot].address : freeAddress(net) else {
                     throw APIError(403, "no available IPv4 addresses on network \(net.name)")
                 }
                 binding = nics.bind(slot, networkId: net.id, address: address, gateway: net.gateway)
-            } else if nics.cards.count == 1, let address = freeAddress(net),
-                let added = nics.add(networkId: net.id, mac: Self.mac(rec, on: net), address: address, gateway: net.gateway)
-            {
-                binding = added
+            } else if nics.cards.count == 1 {
+                guard let address = freeAddress(net, wanted: ep.ipv4) else {
+                    throw ep.ipv4.map { APIError(409, "Address already in use: \($0) on network \(net.name)") }
+                        ?? APIError(403, "no available IPv4 addresses on network \(net.name)")
+                }
+                binding = nics.add(networkId: net.id, mac: Self.mac(rec, on: net, ep, card: false), address: address, gateway: net.gateway)!
             } else {
                 throw APIError(409, "pratico: container \(rec.name) was started by an older pratico with a NIC per network and has none free; restart it to connect more networks")
             }
@@ -456,7 +511,7 @@ final class NetworkService: @unchecked Sendable {
         }
         let nics = nics(rec.id)
         guard nics.slots.indices.contains(binding.slot) else { return }  // stopped meanwhile
-        if let port = Self.port(rec.id, nics, binding.slot) { netSwitch.register(port) }
+        if let port = nics.port(binding.slot, container: rec.id) { netSwitch.register(port) }
         if nics.primary == binding.slot { retarget(rec) }
     }
 
@@ -487,8 +542,7 @@ final class NetworkService: @unchecked Sendable {
     /// interfaces unless a host IP is given, D-8). Returns the bound host ports per
     /// container port, or throws Docker's "port is already allocated" and unbinds all.
     func publish(_ rec: ContainerRecord, _ nics: NICSlots) throws -> [String: [(ip: String, port: String)]] {
-        guard let nic = nics.primaryNIC, let port = Self.port(rec.id, nics, nics.primary), let gw = IPv4.parse(nic.gateway)
-        else { return [:] }
+        guard let (port, gw) = Self.primaryRoute(rec.id, nics) else { return [:] }
         var out: [String: [(ip: String, port: String)]] = [:]
         for (key, list) in (rec.hostConfig["PortBindings"]?.object ?? [:]).sorted(by: { $0.key < $1.key }) {
             let (num, proto) = key.splitOnce("/")
@@ -513,10 +567,7 @@ final class NetworkService: @unchecked Sendable {
     /// Points the container's published ports at its primary NIC. With none, they stay
     /// bound (no other process can take them) and lead nowhere until the next one.
     private func retarget(_ rec: ContainerRecord) {
-        let nics = nics(rec.id)
-        guard let nic = nics.primaryNIC, let port = Self.port(rec.id, nics, nics.primary),
-            let gw = IPv4.parse(nic.gateway)
-        else { return }
+        guard let (port, gw) = Self.primaryRoute(rec.id, nics(rec.id)) else { return }
         netSwitch.uplink.retarget(container: rec.id, nic: port, gateway: gw)
     }
 

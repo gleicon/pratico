@@ -56,7 +56,7 @@ struct NICSlots: Codable, Sendable, Equatable {
     }
 
     /// The card endpoint `entry` lives on.
-    func card(of entry: Int) -> Int { cards.firstIndex(of: slots[entry].socket) ?? 0 }
+    func card(of entry: Int) -> Int { cards.firstIndex(of: slots[entry].socket)! }
 
     /// The MAC the guest's card has: its first endpoint's. Other endpoints on the card have
     /// their own, which the switch shows their networks instead (D-44).
@@ -68,6 +68,24 @@ struct NICSlots: Codable, Sendable, Equatable {
         let socket = cards[n]
         if let p = primary, slots[p].socket == socket { return p }
         return slots.firstIndex { $0.socket == socket }!
+    }
+
+    /// Endpoints on card `n` besides its boot one: addresses added once the guest is up.
+    func extraEntries(card n: Int) -> [Int] {
+        let boot = bootEntry(card: n)
+        return slots.indices.filter { $0 != boot && card(of: $0) == n && !slots[$0].isSpare }
+    }
+
+    /// Every address card `n` holds once the guest is up.
+    func addresses(card n: Int) -> [String] {
+        ([bootEntry(card: n)] + extraEntries(card: n)).map { slots[$0].address }
+    }
+
+    /// Entry `entry` as a switch port of `container`'s.
+    func port(_ entry: Int, container: String) -> NetPort? {
+        let nic = slots[entry]
+        guard let mac = MAC(nic.mac), let card = MAC(cardMAC(of: entry)), let ip = IPv4.parse(nic.ip) else { return nil }
+        return NetPort(path: nic.socket, containerId: container, networkId: nic.networkId, mac: mac, ip: ip, card: card)
     }
 
     /// Whether another bound endpoint shares `entry`'s card (its link must stay up).

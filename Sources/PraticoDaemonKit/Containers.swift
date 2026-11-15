@@ -36,6 +36,11 @@ struct ContainerState: Codable, Sendable {
     var startedAt: Date?
     var finishedAt: Date?
     var error = ""
+    /// Restarts by the restart policy since the last start by hand.
+    var restartCount: Int?
+    /// `docker stop` or `docker kill`: the restart policy holds off (Docker's
+    /// HasBeenManuallyStopped).
+    var stoppedByHand: Bool?
 
     var running: Bool { status == "running" }
 }
@@ -64,6 +69,7 @@ public final class ContainerService: @unchecked Sendable {
     /// The daemon's own API socket: what `-v /var/run/docker.sock:...` gives a container.
     let dockerSocket: String
     let health = HealthMonitor()
+    let restarts = RestartSupervisor()
     /// Returns why a container may not start (pratico's image scan, D-24), if it may not.
     var startGate: (@Sendable (ContainerRecord) -> String?)?
 
@@ -78,6 +84,8 @@ public final class ContainerService: @unchecked Sendable {
     private var busy: Set<String> = []
     /// Names of containers being created, held until their records exist.
     private var reservedNames: Set<String> = []
+    /// Containers between `start` and running: a second start waits its turn, not a second VM.
+    private var starting: Set<String> = []
     private var published: [String: [String: [(ip: String, port: String)]]] = [:]  // bound host ports
     /// Serializes network connect and disconnect, which read, check, and write a
     /// container's endpoints and NIC slots.
@@ -95,6 +103,7 @@ public final class ContainerService: @unchecked Sendable {
         self.root = root
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         health.service = self
+        restarts.containers = self
         networks.containers = self
         load()
     }
@@ -206,11 +215,6 @@ public final class ContainerService: @unchecked Sendable {
         let attach = try networks.attachments(host: body["HostConfig"] ?? [:], networking: body["NetworkingConfig"])
         var hostFields = body["HostConfig"]?.object ?? [:]
         if ["", "default"].contains(hostFields["NetworkMode"]?.string ?? "") { hostFields["NetworkMode"] = "bridge" }
-        // Paths that want an anonymous volume: the image's `VOLUME`s and a bare `-v /path`,
-        // which the Docker CLI sends as `Volumes`, not in `Binds`.
-        let wanted = [imageConfig["Volumes"], body["Volumes"]].flatMap { $0?.object.map { Array($0.keys) } ?? [] }
-        let host = try namingVolumes(.object(hostFields), imageVolumes: Array(Set(wanted)))
-
         // Docker merges image defaults into the container config; an explicit
         // Entrypoint resets the image Cmd.
         let userEntry = body["Entrypoint"]?.strings.flatMap { $0.isEmpty ? nil : $0 }
@@ -227,14 +231,28 @@ public final class ContainerService: @unchecked Sendable {
         var config = body.object ?? [:]
         config["HostConfig"] = nil
         config["NetworkingConfig"] = nil
-        config["Hostname"] = .string(appleId)
+        if (body["Hostname"]?.string ?? "").isEmpty { config["Hostname"] = .string(appleId) }
+        // Image defaults the request leaves empty, as Docker merges them.
+        for key in ["User", "StopSignal"] where (body[key]?.string ?? "").isEmpty {
+            config[key] = imageConfig[key] ?? .string("")
+        }
+        config["ExposedPorts"] = .object((imageConfig["ExposedPorts"]?.object ?? [:]).merging(body["ExposedPorts"]?.object ?? [:]) { _, b in b })
         config["Env"] = JSON(env)
         config["Cmd"] = JSON(cmd)
         config["Entrypoint"] = entry.isEmpty ? .null : JSON(entry)
         config["WorkingDir"] = .string(workdir)
         config["Image"] = .string(imageRef)
-        config["Labels"] = body["Labels"] ?? [:]
+        config["Labels"] = .object((imageConfig["Labels"]?.object ?? [:]).merging(body["Labels"]?.object ?? [:]) { _, b in b })
         config["Healthcheck"] = body["Healthcheck"] ?? imageConfig["Healthcheck"]
+
+        // Every option is checked before anything is made (D-45).
+        let asked = try Self.publishingAll(.object(hostFields), exposed: config["ExposedPorts"])
+        _ = try RunOptions.parse(host: asked, config: .object(config), defaultCPUs: self.config.defaultCPUs, defaultMemoryMiB: self.config.defaultMemoryMiB)
+        for link in try Self.links(asked, attach.map(\.1)) { _ = try resolve(link.target) }
+        // Paths that want an anonymous volume: the image's `VOLUME`s and a bare `-v /path`,
+        // which the Docker CLI sends as `Volumes`, not in `Binds`.
+        let wanted = [imageConfig["Volumes"], body["Volumes"]].flatMap { $0?.object.map { Array($0.keys) } ?? [] }
+        let host = try namingVolumes(asked, imageVolumes: Array(Set(wanted)))
 
         // `-v` creates a missing host directory, as Docker does.
         for m in try mounts(host) where m.createSource {
@@ -292,15 +310,46 @@ public final class ContainerService: @unchecked Sendable {
 
     // MARK: Lifecycle
 
+    /// `docker start`: by hand, so the restart policy's count and hold are reset.
     func start(_ ref: String) throws -> Bool {
         let rec = try resolve(ref)
-        if rec.state.running { return false }
+        restarts.cancel(rec.id)
+        return try startOnce(rec.id) {
+            $0.restartCount = 0
+            $0.stoppedByHand = false
+        }
+    }
+
+    /// A start by the restart policy; see `RestartSupervisor`.
+    func restartByPolicy(_ id: String, atDaemonStart: Bool = false) throws {
+        guard try startOnce(id, mark: {
+            if atDaemonStart { $0.stoppedByHand = false } else { $0.restartCount = ($0.restartCount ?? 0) + 1 }
+        }) else { return }
+        // A `docker stop` that came while it was starting wins.
+        if (try? resolve(id))?.state.stoppedByHand == true && !atDaemonStart { _ = try? stop(id, timeout: nil) }
+    }
+
+    /// Starts the container unless it runs or is starting; `mark` updates its state first.
+    private func startOnce(_ id: String, mark: (inout ContainerState) -> Void) throws -> Bool {
         lock.lock()
-        let isBusy = busy.contains(rec.id)
+        guard let rec = records[id], !rec.state.running, !starting.contains(id) else {
+            lock.unlock()
+            return false
+        }
+        if busy.contains(id) {
+            lock.unlock()
+            throw APIError(409, "container \(rec.name) is busy: a copy into it is in progress")
+        }
+        starting.insert(id)
         lock.unlock()
-        if isBusy { throw APIError(409, "container \(rec.name) is busy: a copy into it is in progress") }
+        defer { lock.withLock { _ = starting.remove(id) } }
         if let reason = startGate?(rec) { throw APIError(409, reason) }
-        try launch(rec)
+        update(id) { mark(&$0.state) }
+        do { try launch(try resolve(id)) } catch {
+            // `--rm` takes a container that could not start, as Docker does; `run` waits on it.
+            if rec.autoRemove, (try? resolve(id))?.state.running == false { removeNow(id, code: 125) }
+            throw error
+        }
         return true
     }
 
@@ -309,9 +358,12 @@ public final class ContainerService: @unchecked Sendable {
     private func launch(_ rec: ContainerRecord) throws {
         let files = ShimFiles(dir: dir(rec.id))
         let mounts = try mounts(rec.hostConfig).map { Self.shimMount($0, dockerSocket: dockerSocket) }
-        let mem = rec.hostConfig["Memory"]?.int.flatMap { $0 > 0 ? Int($0 / 1_048_576) : nil } ?? config.defaultMemoryMiB
-        let cpus = rec.hostConfig["NanoCpus"]?.int.flatMap { $0 > 0 ? Int(($0 + 999_999_999) / 1_000_000_000) : nil } ?? config.defaultCPUs
+        let options = try runOptions(rec)
         let rootfs: String = files.dir.appending(path: "rootfs.ext4").path
+        if !RootfsEdit.isClean(URL(filePath: rootfs)) {
+            Pratico.log("pratico-daemon: \(rec.name)'s root filesystem was not unmounted cleanly; rebuilding it from its files")
+            do { try RootfsEdit.repair(URL(filePath: rootfs)) } catch { throw APIError(500, "cannot repair the root filesystem of \(rec.name): \(error)") }
+        }
         let env: [String] = rec.config["Env"]?.strings ?? []
         let workdir: String = rec.config["WorkingDir"]?.string ?? ""
         let user: String = rec.config["User"]?.string ?? ""
@@ -321,14 +373,18 @@ public final class ContainerService: @unchecked Sendable {
         var spec = ShimSpec(
             id: rec.appleId, kernel: embedded.kernel, initfs: embedded.initfs, rootfs: rootfs,
             arguments: [rec.path] + rec.args, environment: env, workingDirectory: workdir, user: user,
-            tty: rec.tty, openStdin: openStdin, hostname: hostname, cpus: max(cpus, 1), memoryMiB: max(mem, 64),
+            tty: rec.tty, openStdin: openStdin, hostname: hostname, cpus: options.cpus, memoryMiB: options.memoryMiB,
             mounts: mounts)
         spec.nics = nics
+        do { spec.options = try resolved(options, rec, nics: nics, rootfs: files.dir.appending(path: "rootfs.ext4")) } catch {
+            networks.stopped(rec.id)
+            throw error
+        }
         spec.switchSocket = networks.netSwitch.socketPath ?? ""
         try JSONEncoder().encode(spec).write(to: files.spec, options: .atomic)
 
         lock.lock()
-        let log = logs[rec.id] ?? LogStore(path: files.log)
+        let log = LogStore(path: files.log, maxBytes: options.logBytes)
         logs[rec.id] = log
         lock.unlock()
         log.tailExternalWriter()
@@ -353,7 +409,9 @@ public final class ContainerService: @unchecked Sendable {
             networks.stopped(rec.id)
             throw error
         }
-        update(rec.id) { $0.state = ContainerState(status: "running", startedAt: Date()) }
+        update(rec.id) {
+            $0.state = ContainerState(status: "running", startedAt: Date(), restartCount: $0.state.restartCount, stoppedByHand: $0.state.stoppedByHand)
+        }
         track(rec.id, pid: pid, log: log, shim: embedded.shim)
         // Networks, ports, and state are in place: now the process runs (Docker's order).
         // One that cannot (bad image config, missing executable) fails the start, as Docker
@@ -418,12 +476,6 @@ public final class ContainerService: @unchecked Sendable {
         events.emit("container", action, id: rec.id, attributes: attrs)
     }
 
-    static func signalNumber(_ name: String) -> String {
-        let n = name.uppercased().replacingOccurrences(of: "SIG", with: "")
-        let table = ["HUP": 1, "INT": 2, "QUIT": 3, "KILL": 9, "USR1": 10, "USR2": 12, "TERM": 15, "STOP": 19, "CONT": 18]
-        return table[n].map(String.init) ?? name
-    }
-
     private func broadcast(_ id: String, _ data: Data) {
         lock.lock()
         let conns = attached[id] ?? []
@@ -459,6 +511,7 @@ public final class ContainerService: @unchecked Sendable {
             removeAnonymousVolumes(rec)  // `--rm` takes its anonymous volumes, as in Docker
         }
         for w in waiters { w(code) }
+        if !auto, let rec = try? resolve(id) { restarts.exited(rec, code: code) }
     }
 
     /// Waits (bounded) for the shim's exit to be recorded.
@@ -513,11 +566,16 @@ public final class ContainerService: @unchecked Sendable {
 
     func stop(_ ref: String, timeout: Int?) throws -> Bool {
         let rec = try resolve(ref)
+        // Also between two runs of a restart policy: the next one is called off.
+        restarts.cancel(rec.id)
+        update(rec.id) { $0.state.stoppedByHand = true }
         guard rec.state.running else { return false }
         thawIfPaused(rec.id)
-        let t = timeout ?? 10
-        emit(rec, "kill", ["signal": "15"])
-        try embedded.shim.call(ShimFiles(dir: dir(rec.id)), "POST", "/stop?t=\(t)")
+        let options = try? runOptions(rec)
+        let t = timeout ?? options?.stopTimeout ?? 10
+        let signal = Signals.number(options?.stopSignal ?? "TERM") ?? 15
+        emit(rec, "kill", ["signal": "\(signal)"])
+        try embedded.shim.call(ShimFiles(dir: dir(rec.id)), "POST", "/stop?t=\(t)&signal=\(signal)")
         awaitExit(rec.id, seconds: Double(t) + 10)
         emit(rec, "stop")
         return true
@@ -530,8 +588,13 @@ public final class ContainerService: @unchecked Sendable {
         }
         let sig = (signal.flatMap { $0.isEmpty ? nil : $0 } ?? "KILL").uppercased()
         thawIfPaused(rec.id)
-        emit(rec, "kill", ["signal": Self.signalNumber(sig)])
-        guard let n = Int(Self.signalNumber(sig)) else { throw APIError(400, "invalid signal: \(sig)") }
+        guard let n = Signals.number(sig) else { throw APIError(400, "invalid signal: \(sig)") }
+        // A signal that ends the process counts as a stop by hand; a reload (HUP, USR1) does not.
+        if [9, 15, Signals.number((try? runOptions(rec))?.stopSignal ?? "TERM")].contains(n) {
+            restarts.cancel(rec.id)
+            update(rec.id) { $0.state.stoppedByHand = true }
+        }
+        emit(rec, "kill", ["signal": "\(n)"])
         try embedded.shim.call(ShimFiles(dir: dir(rec.id)), "POST", "/kill?signal=\(n)")
         if ["KILL", "SIGKILL", "9"].contains(sig) { awaitExit(rec.id, seconds: 10) }
     }
@@ -540,7 +603,7 @@ public final class ContainerService: @unchecked Sendable {
         let rec = try resolve(ref)
         if let reason = startGate?(rec) { throw APIError(409, reason) }
         _ = try stop(rec.id, timeout: timeout)
-        try launch(try resolve(rec.id))
+        _ = try start(rec.id)
         emit(rec, "restart")
     }
 
@@ -562,6 +625,7 @@ public final class ContainerService: @unchecked Sendable {
     private func removeNow(_ id: String, code: Int) {
         lock.lock()
         guard let rec = records.removeValue(forKey: id) else { lock.unlock(); return }
+        restarts.forget(id)
         logs[id] = nil
         let waiters = removeWaiters.removeValue(forKey: id) ?? []
         lock.unlock()
@@ -793,7 +857,7 @@ public final class ContainerService: @unchecked Sendable {
                 "Status": .string(dockerState(rec)),
                 "Running": .bool(s.running),
                 "Paused": .bool(s.running && isPaused(rec.id)),
-                "Restarting": false,
+                "Restarting": .bool(restarts.isPending(rec.id)),
                 "OOMKilled": false,
                 "Dead": false,
                 "Pid": 0,
@@ -805,7 +869,7 @@ public final class ContainerService: @unchecked Sendable {
             ],
             "Image": .string(rec.imageId),
             "Name": .string("/\(rec.name)"),
-            "RestartCount": 0,
+            "RestartCount": .int(Int64(rec.state.restartCount ?? 0)),
             "Driver": "pratico",
             "Platform": "linux",
             "HostConfig": rec.hostConfig,
