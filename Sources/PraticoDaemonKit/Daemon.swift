@@ -394,7 +394,7 @@ public final class Daemon: @unchecked Sendable {
         let name = p.dropLast().joined(separator: "/")
         switch m {
         case "GET" where p == ["json"]:
-            conn.json(200, .array(images.localImages().map(ImageService.summary)))
+            conn.json(200, .array(images.list(filters: ContainerService.parseFilters(req.query["filters"]))))
         case "POST" where p == ["create"]:
             guard let from = req.query["fromImage"], !from.isEmpty else {
                 throw APIError(400, "image import is not supported; use fromImage")

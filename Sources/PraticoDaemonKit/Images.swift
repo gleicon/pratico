@@ -91,6 +91,44 @@ public final class ImageService: Sendable {
         return Array(Set(repos)).sorted().map { ImageRef.familiar($0) + "@" + digest }
     }
 
+    /// `GET /images/json`: newest first, with Docker's `reference` (a glob on `name:tag` or
+    /// the repository; only matching tags are reported), `dangling`, `label`, `before`, and
+    /// `since` filters.
+    func list(filters: [String: [String]]) -> [JSON] {
+        let all = localImages()
+        let created = { (img: LocalImage) in Timestamp.parse(Self.created(img.record))?.timeIntervalSince1970 ?? 0 }
+        let bound = { (refs: [String]?) in refs?.compactMap { self.resolve($0).map { created($0.image) } } ?? [] }
+        let before = bound(filters["before"]).min(), since = bound(filters["since"]).max()
+        var out: [(Double, JSON)] = []
+        for img in all {
+            var tags = img.tags
+            if let patterns = filters["reference"], !patterns.isEmpty {
+                tags = tags.filter { tag in
+                    let repo = String(tag.split(separator: ":").first ?? "")
+                    return patterns.contains { fnmatch($0, tag, 0) == 0 || fnmatch($0, repo, 0) == 0 }
+                }
+                if tags.isEmpty { continue }
+            }
+            // Every image here has a reference, so none is dangling.
+            if filters["dangling"]?.contains(where: { $0 == "true" || $0 == "1" }) == true { continue }
+            let labels = Self.config(img.record)["Labels"]?.object?.compactMapValues(\.string) ?? [:]
+            if !(filters["label"] ?? []).allSatisfy({ f in
+                let (k, v) = f.splitOnce("=")
+                return labels[k] != nil && (v == nil || labels[k] == v)
+            }) { continue }
+            let t = created(img)
+            if let before, t >= before { continue }
+            if let since, t <= since { continue }
+            var summary = Self.summary(img)
+            summary["RepoTags"] = JSON(tags)
+            // Digests too, or the CLI shows a `<none>` row for every other repository.
+            let repos = Set(tags.map { String($0.split(separator: ":").first ?? "") })
+            summary["RepoDigests"] = JSON(Self.digests(img).filter { repos.contains(String($0.split(separator: "@").first ?? "")) })
+            out.append((t, summary))
+        }
+        return out.sorted { $0.0 > $1.0 }.map(\.1)
+    }
+
     /// `GET /images/json` entry.
     static func summary(_ img: LocalImage) -> JSON {
         let size = variant(img.record)?["size"]?.int ?? 0

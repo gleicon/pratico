@@ -126,7 +126,10 @@ since=$(date +%s)
 check "AC-24 docker tag" docker tag busybox pratico-e2e/a:1
 check "a tag moves the change counter the menubar refreshes on" test "$(changes)" -gt "$before"
 expect_has "AC-24 image inspect lists both tags" "$(docker image inspect pratico-e2e/a:1 --format '{{json .RepoTags}}')" '"busybox:latest".*"pratico-e2e/a:1"\|"pratico-e2e/a:1".*"busybox:latest"'
-expect_eq "docker images shows one ID for both tags" "$(docker images --format '{{.ID}}' busybox) $(docker images --format '{{.ID}}' pratico-e2e/a)" "$(docker images --format '{{.ID}}' busybox) $(docker images --format '{{.ID}}' busybox)"
+expect_eq "docker images shows one ID for both tags" "$(docker images --format '{{.ID}}' pratico-e2e/a)" "$(docker images --format '{{.ID}}' busybox:latest)"
+expect_eq "docker images NAME lists only that repository" "$(docker images --format '{{.Repository}}:{{.Tag}}' busybox)" "busybox:latest"
+expect_eq "a reference glob matches across repositories" "$(docker images --format '{{.Repository}}' --filter 'reference=*/a' | sort -u)" "pratico-e2e/a"
+expect_eq "no image is dangling" "$(docker images -q --filter dangling=true | wc -l | tr -d ' ')" "0"
 bb_id=$(docker image inspect busybox --format '{{.Id}}')
 expect_has "rmi by ID with two tags needs force" "$(docker rmi "${bb_id#sha256:}" 2>&1)" "referenced in multiple repositories"
 expect_eq "AC-24 docker rmi untags only" "$(docker rmi pratico-e2e/a:1 2>&1)" "Untagged: pratico-e2e/a:1"
