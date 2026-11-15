@@ -254,6 +254,20 @@ if docker exec e-peer5 ping -c1 -W2 "$(docker inspect e-many --format '{{(index 
 else
     ok "a peer on one network cannot reach the container's address on another"
 fi
+# A crafted frame, not routing: a raw frame to e-many's MAC at its e-many1 address, sent
+# from e-many5. The switch must not deliver it (e-many's echo counter stays put); the
+# same frame at its e-many5 address is the control.
+docker pull -q python:3.13-slim >/dev/null
+docker run -d --name e-raw --network e-many5 -v "$(cd "$(dirname "$0")" && pwd):/e2e:ro" python:3.13-slim sleep 300 >/dev/null
+net() { docker inspect "$1" --format "{{(index .NetworkSettings.Networks \"$2\").$3}}"; }
+echoes() { docker exec e-many awk '/^Icmp:/ && $3 ~ /^[0-9]+$/ {print $10}' /proc/net/snmp; }
+raw() { docker exec e-raw python3 -I /e2e/frame.py "$(net e-many e-many5 MacAddress)" "$1" "$(net e-raw e-many5 IPAddress)"; sleep 0.5; }
+before=$(echoes)
+raw "$(net e-many e-many1 IPAddress)"
+expect_eq "a raw frame to the container's MAC at another network's address is dropped" "$(echoes)" "$before"
+raw "$(net e-many e-many5 IPAddress)"
+expect_eq "and at its address on the shared network is delivered" "$(echoes)" "$((before + 3))"
+docker rm -f e-raw >/dev/null
 docker rm -f e-many e-peer5 >/dev/null
 for i in 1 2 3 4 5; do docker network rm "e-many$i" >/dev/null; done
 

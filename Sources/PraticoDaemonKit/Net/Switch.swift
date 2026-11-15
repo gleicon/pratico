@@ -154,13 +154,18 @@ final class NetSwitch: @unchecked Sendable {
                 send(Ethernet(dst: port.mac, src: .gateway, type: EtherType.arp.rawValue, payload: reply.bytes).bytes, to: port)
                 return
             }
-            forward(eth, frame, from: port)
+            forward(eth, frame, from: port) { $0.ip == arp.targetIP }
         case EtherType.ipv4.rawValue:
             guard let ip = IPv4Packet(eth.payload), ip.src == port.ip else { return }  // spoofed IP
             if eth.dst == .gateway {
                 toGateway(ip, from: port, segment: segment)
+            } else if eth.dst.isMulticast {
+                // Broadcast and multicast for this network only: a directed broadcast to
+                // another subnet would reach a peer's address on a network the sender is not on.
+                guard segment.contains(ip.dst) || ip.dst >= 0xE000_0000 else { return }
+                forward(eth, frame, from: port) { _ in true }
             } else {
-                forward(eth, frame, from: port)
+                forward(eth, frame, from: port) { $0.ip == ip.dst }
             }
         default:
             return  // IPv6 and others are not routed yet
@@ -168,13 +173,15 @@ final class NetSwitch: @unchecked Sendable {
     }
 
     /// Same-network delivery by destination MAC; broadcast and multicast flood the network.
-    private func forward(_ eth: Ethernet, _ frame: [UInt8], from port: NetPort) {
+    /// A VM's card carries an address per network (D-43), so the MAC alone does not say
+    /// which network a frame is for: a peer gets it only when `addressedTo` holds for its
+    /// endpoint on the sender's network, or a peer on n1 could reach its n2 address.
+    private func forward(_ eth: Ethernet, _ frame: [UInt8], from port: NetPort,
+                         addressedTo: (NetPort) -> Bool) {
         lock.lock()
         let peers = ports.values.joined().filter { $0.networkId == port.networkId && $0.path != port.path }
         lock.unlock()
-        if eth.dst.isMulticast {
-            for p in peers { send(frame, to: p) }
-        } else if let p = peers.first(where: { $0.mac == eth.dst }) {
+        for p in peers where (eth.dst.isMulticast || p.mac == eth.dst) && addressedTo(p) {
             send(frame, to: p)
         }
     }
