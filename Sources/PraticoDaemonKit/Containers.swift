@@ -526,7 +526,8 @@ public final class ContainerService: @unchecked Sendable {
 
     /// Waits, at most `seconds`, for the shim's exit to be recorded.
     private func awaitExit(_ id: String, seconds: Double) {
-        precondition(seconds > 0 && seconds <= 3600, "exit wait out of bounds: \(seconds) s")
+        // `docker stop -t` comes from the client: bounded here, not asserted.
+        let seconds = min(max(seconds, 0), 3600)
         let exited = DispatchSemaphore(value: 0)
         lock.lock()
         guard records[id]?.state.running == true else { lock.unlock(); return }

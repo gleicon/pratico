@@ -101,6 +101,10 @@ extension RunOptions {
         } else if period > 0 {
             throw APIError(400, "pratico: --cpu-period needs --cpu-quota")
         }
+        let cores = ProcessInfo.processInfo.activeProcessorCount
+        if cpus > cores {
+            throw APIError(400, "range of CPUs is from 0.01 to \(cores).00, as there are only \(cores) CPUs available")
+        }
         if let shares = host["CpuShares"]?.int, shares > 0 {
             // runc's conversion of cgroup v1 shares to v2 weight.
             let s = min(max(shares, 2), 262_144)

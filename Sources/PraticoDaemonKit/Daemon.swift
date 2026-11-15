@@ -172,7 +172,8 @@ public final class Daemon: @unchecked Sendable {
             conn.json(200, info())
             return .keepAlive
         case (_, "containers"):
-            if let d = try routeContainers(m, Array(parts.dropFirst()), req, conn) { return d }
+            let rest = Array(parts.dropFirst())
+            if let d = try routeContainers(m, rest, req, conn) ?? routeContainerTools(m, rest, req, conn) { return d }
         case (_, "exec") where parts.count == 3:
             if let d = try routeExec(m, parts[1], parts[2], req, conn) { return d }
         case (_, "images"):
@@ -191,6 +192,28 @@ public final class Daemon: @unchecked Sendable {
         return .keepAlive
     }
 
+    /// rename, top, export, diff, update (D-46).
+    private func routeContainerTools(_ m: String, _ p: [String], _ req: Request, _ conn: Connection) throws -> Disposition? {
+        guard p.count == 2 else { return nil }
+        switch (m, p[1]) {
+        case ("POST", "rename"):
+            try containers.rename(p[0], to: req.query["name"] ?? "")
+            conn.respond(204)
+        case ("GET", "top"):
+            conn.json(200, try containers.top(p[0], psArgs: req.query["ps_args"]))
+        case ("GET", "export"):
+            try containers.export(p[0], conn: conn)
+        case ("GET", "changes"):
+            conn.json(200, .array(try containers.changes(p[0])))
+        case ("POST", "update"):
+            guard let body = JSON.parse(req.body) else { throw APIError(400, "invalid JSON body") }
+            conn.json(200, try containers.update(p[0], body))
+        default:
+            return nil
+        }
+        return .keepAlive
+    }
+
     private func routeContainers(_ m: String, _ p: [String], _ req: Request, _ conn: Connection) throws -> Disposition? {
         switch (m, p.count, p.last) {
         case ("GET", 1, "json"):
@@ -203,18 +226,6 @@ public final class Daemon: @unchecked Sendable {
         case ("DELETE", 1, _):
             try containers.remove(p[0], force: req.flag("force"), volumes: req.flag("v"))
             conn.respond(204)
-        case ("POST", 2, "rename"):
-            try containers.rename(p[0], to: req.query["name"] ?? "")
-            conn.respond(204)
-        case ("GET", 2, "top"):
-            conn.json(200, try containers.top(p[0], psArgs: req.query["ps_args"]))
-        case ("GET", 2, "export"):
-            try containers.export(p[0], conn: conn)
-        case ("GET", 2, "changes"):
-            conn.json(200, .array(try containers.changes(p[0])))
-        case ("POST", 2, "update"):
-            guard let body = JSON.parse(req.body) else { throw APIError(400, "invalid JSON body") }
-            conn.json(200, try containers.update(p[0], body))
         case ("GET", 2, "json"):
             let view = containers.inspect(try containers.resolve(p[0]))
             conn.json(200, req.flag("size") ? disk.sized([view])[0] : view)

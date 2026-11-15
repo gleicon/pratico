@@ -30,15 +30,16 @@ extension ContainerService {
                 : "ps \(args.joined(separator: " ")) failed: \(output)")
         }
         // Docker lists processes from the host; the `ps` that answered here is not one of them.
-        return Self.psTable(output, hiding: (["ps"] + args).joined(separator: " "))
+        return try Self.psTable(output, hiding: (["ps"] + args).joined(separator: " "))
     }
 
     /// `ps` output as Docker's `{"Titles", "Processes"}`: the last column keeps its spaces.
-    static func psTable(_ output: String, hiding command: String) -> JSON {
+    /// The output comes from the image, so it is checked, never asserted.
+    static func psTable(_ output: String, hiding command: String) throws -> JSON {
         var lines = output.split(separator: "\n").map(String.init)
-        guard !lines.isEmpty else { return ["Titles": [], "Processes": []] }
-        let titles = lines.removeFirst().split(separator: " ").map(String.init)
-        precondition(lines.count <= 1 << 20, "more ps lines than its output holds")
+        guard !lines.isEmpty else { throw APIError(500, "ps printed nothing") }
+        let titles = lines.removeFirst().split(whereSeparator: \.isWhitespace).map(String.init)
+        guard !titles.isEmpty else { throw APIError(500, "ps printed no column titles") }
         // Filtered as strings: `JSON` takes a `nil` literal as `.null`, which would keep the row.
         let rows = lines.map { columns($0, count: titles.count) }.filter { $0.last != command }.map(JSON.init)
         return ["Titles": JSON(titles), "Processes": .array(rows)]
@@ -46,7 +47,6 @@ extension ContainerService {
 
     /// The first `count - 1` whitespace-separated fields, then the rest of the line as one.
     static func columns(_ line: String, count: Int) -> [String] {
-        precondition(count >= 1, "a table has a column")
         var fields: [String] = []
         var rest = Substring(line)
         while fields.count < count - 1 {

@@ -727,7 +727,8 @@ private func emptyDir() throws -> URL {
 }
 
 @Test func psOutputBecomesDockerTop() {
-    let t = ContainerService.psTable("PID   USER  TIME  COMMAND\n    1 root  0:00  sleep 300\n    7 root  0:00  ps -ef\n", hiding: "ps -ef")
+    #expect(throws: APIError.self) { try ContainerService.psTable("   \n1 x\n", hiding: "ps") }
+    let t = try! ContainerService.psTable("PID   USER  TIME  COMMAND\n    1 root  0:00  sleep 300\n    7 root  0:00  ps -ef\n", hiding: "ps -ef")
     #expect(t["Titles"]?.strings == ["PID", "USER", "TIME", "COMMAND"])
     #expect(t["Processes"]?.array?.count == 1 && t["Processes"]?.array?[0].strings == ["1", "root", "0:00", "sleep 300"])
 }
