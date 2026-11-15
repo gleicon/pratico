@@ -1,5 +1,7 @@
 # Pratico Roadmap
 
+> Historical (2026-11-07): the original version plan. Current state: `README.md` and `SPEC.md`.
+
 Version-level plan. The task checklist being worked is
 [`.project/roadmap.md`](.project/roadmap.md); requirements and acceptance criteria are in
 [`SPEC.md`](SPEC.md).

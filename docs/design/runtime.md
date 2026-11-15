@@ -285,7 +285,7 @@ Learned while building:
     falls back to HTTP.
   - Awareness: `docker info` warnings and `RegistryConfig`, a note in pull and push
     output, the daemon log, `registries.json` and the menubar.
-- Interim limits: IPv6 port binds (not planned until there is IPv6 routing).
+- Limits: IPv4 only (IPv6 port binds are ignored); at most 4 NICs per VM, verified: Virtualization.framework refuses a fifth ("The number of network devices is greater than the maximum number supported").
 
 ## Risks and costs
 
@@ -303,3 +303,23 @@ Learned while building:
 2. Kernel and `vminit` are bundled; no pratico download infrastructure.
 3. The uplink is pure Swift; no extra binaries. sandwich-proxy parts are embedded for
    egress intercept.
+
+## Start order (2026-11-14)
+
+The shim boots the VM and creates the container (rootfs mounted, init not started), writes
+`state.json` as `created`, and serves its control socket. The daemon then attaches the
+NICs to pratico-net, publishes ports, records the container as running, and calls the
+shim's `POST /start`, which starts the process. A shim that gets no `/start` within 120 s
+stops its VM and exits. The process therefore never runs before its ports are bound or
+before the daemon reports it running; a container that queries the daemon through a
+mounted socket sees itself.
+
+## Stopped containers (2026-11-14)
+
+`docker cp` with a stopped container boots nothing. Copies out read the container's ext4
+rootfs on the Mac with ContainerizationEXT4's reader, writing every entry relative to
+its parent's descriptor with `O_NOFOLLOW` and `O_EXCL`, under byte and entry caps. Copies
+in unpack the tar on the Mac, then rewrite the rootfs: export it, format a new image,
+unpack the export and then the new files (owned by root), and swap the image in. A
+container whose rootfs is in use cannot start until the copy ends. The same reader does
+volume copy-up when a new container mounts an empty volume.

@@ -59,15 +59,19 @@ Containers that mount the Docker socket (`-v /var/run/docker.sock:/var/run/docke
 reach pratico, with or without the link.
 
 Everyday commands work as usual: `run`, `ps`, `logs -f`, `exec -it`, `cp`, `stats`,
-`pause`, `stop`, `rm`, `pull`, `push`, `login`, `images`, `rmi`, `save`, `tag`,
-`network create/connect/disconnect`, `events`, healthchecks. `docker build` and volumes
-are not there yet; see [.project/roadmap.md](.project/roadmap.md).
+`pause`, `stop`, `rm`, `pull`, `push`, `login`, `images`, `rmi`, `save`, `load`, `tag`,
+`volume`, `network`, `events`, healthchecks, and `docker compose`. `docker build` is not
+supported; the README lists the other limits.
 
 ## Apple's `container` alongside
 
-pratico labels the containers it creates and never lists, changes, or deletes the ones
-you start with Apple's `container` CLI through the Docker API. Showing both in the
-menubar is planned.
+Both run on the same Mac with separate image stores. Move images between them as OCI
+archives:
+
+```sh
+container image save myapp:dev -o myapp.tar && docker load -i myapp.tar
+docker save myapp:dev -o myapp.tar && container image load -i myapp.tar
+```
 
 ## Image scanning
 
@@ -78,8 +82,9 @@ Homebrew, how to get it and each scanner's page). **Scan Results…** shows whic
 what, **Scan All Images Now** rescans, and **Add or Remove Scanners…** opens Settings ›
 Scanners to plug in your own (see the README's "Your own scanner"). An image with a known-malicious package or
 a CVE in CISA's exploited list is stopped and blocked: starting it fails with the
-finding named, and the menubar shows an alert. To run it anyway, add its ID to
-`scan_allow` in **Settings…** (⌘,), or in `~/.pratico/config.toml`:
+finding named, and the menubar shows an alert. To run it anyway, use **Allow This
+Image…** in Scan Results, which adds its ID to `scan_allow` in
+`~/.pratico/config.toml`:
 
 ```toml
 scan_allow = ["sha256:…"]
@@ -108,6 +113,8 @@ Design: [docs/design/runtime.md](docs/design/runtime.md).
 |---|---|
 | "Pratico can't be opened" | Gatekeeper; approve it as in step 1 |
 | `Cannot connect to the Docker daemon` | daemon stopped: start it from the menubar; the reason it stopped is in `~/.pratico/daemon.err` and **Status › View Daemon Log** |
+| `client version 1.41 is too old` | the client predates Docker CLI 25 (API 1.44); install a current one, e.g. `brew install docker docker-compose` |
+| an image pulls but does not run | it has no `linux/arm64` variant |
 | menubar says the runtime is unavailable | the kernel or `pratico-shim` is missing from the app; reinstall it. Status › View Daemon Log has the details |
 | daemon refuses to start, naming a key and line | `~/.pratico/config.toml` has an unknown key or bad value |
 | `docker start` fails naming `MAL-…` or a CVE | the image scan blocked it; see Image scanning |

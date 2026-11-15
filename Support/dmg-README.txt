@@ -1,5 +1,5 @@
-Pratico — Docker on your Mac, one small VM per container
-=======================================================
+Pratico: local containers, one small VM per container
+====================================================
 
 Install
   Drag Pratico.app onto the Applications folder in this window. Nothing else
@@ -20,9 +20,11 @@ First launch (Gatekeeper)
   which keeps containers running when the menu bar app quits.
 
 Use
-  Pratico lives in the menu bar. Point the docker CLI at it:
-    export DOCKER_HOST=unix://$HOME/.pratico/docker.sock
+  Pratico lives in the menu bar. Point your client at its socket:
+    docker context create pratico --docker host=unix://$HOME/.pratico/docker.sock
+    docker context use pratico
     docker run --rm alpine echo hello
+  or set DOCKER_HOST=unix://$HOME/.pratico/docker.sock.
 
 Licenses
   Acknowledgements.txt lists Pratico's license and those of what it ships.

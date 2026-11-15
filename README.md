@@ -1,211 +1,161 @@
 # pratico
 
-A Docker daemon for Apple silicon Macs, with a menubar app. Every container runs in its
-own lightweight VM: no shared Linux VM, no Docker Desktop. Existing tools keep working:
-`docker`, `docker compose`, and anything that talks to a Docker socket.
+A local container manager for Apple silicon Macs. It serves the Docker Engine API on a
+Unix socket, runs every container in its own lightweight VM on Virtualization.framework,
+and scans every image it pulls. A menubar app controls the daemon and shows what runs,
+what it uses, and what the scans found. There is no `pratico` CLI: use `docker`,
+`docker compose`, or any client of the Docker API.
 
-*Prático* (Portuguese): the harbour pilot who guides ships through narrow channels.
+Website: <https://gleicon.github.io/pratico/> · License: MIT
 
-Status: early (0.x). Each container runs in its own small VM on Apple's
-Virtualization.framework; nothing else needs installing (see [How it runs](#how-it-runs)
-and [What it costs](#what-it-costs)). Website: <https://gleicon.github.io/pratico/>.
+## Requirements
 
-## Use it
+- Apple silicon Mac, macOS 26
+- Nothing else. The app carries the Linux kernel (Kata Containers 3.28.0) and init
+  (`vminitd`) its VMs boot.
+
+## Install
 
 1. Download `Pratico-<version>.dmg` from
-   [Releases](https://github.com/gleicon/pratico/releases), drag `Pratico.app` to
-   Applications, and approve it once in Gatekeeper ("Open Anyway" in System Settings →
-   Privacy & Security, or `xattr -dr com.apple.quarantine /Applications/Pratico.app`).
-   The build is ad-hoc signed; `READ ME FIRST.txt` in the DMG walks through it.
-2. Start the daemon from the menubar item. **Status › View Daemon Log** shows what it is
-   doing (`~/.pratico/daemon.log`).
-3. Point `docker` at it once, so you never type `-H`. Either a Docker context, which the
-   CLI and Compose remember:
+   [Releases](https://github.com/gleicon/pratico/releases) and drag `Pratico.app` to
+   Applications.
+2. The app is ad-hoc signed, not notarized. Approve the first launch with **Open Anyway**
+   in System Settings › Privacy & Security, or:
 
    ```sh
-   docker context create pratico --docker host=unix://$HOME/.pratico/docker.sock
-   docker context use pratico
-   docker run --rm alpine echo hello
+   xattr -dr com.apple.quarantine /Applications/Pratico.app
    ```
 
-   or `DOCKER_HOST`, which every Docker client reads (add it to `~/.zshrc` to keep it):
+3. Open Pratico. The menubar item starts the daemon, which then starts at login
+   (`start_at_login`). Status › View Daemon Log opens `~/.pratico/daemon.log`.
 
-   ```sh
-   echo 'export DOCKER_HOST=unix://$HOME/.pratico/docker.sock' >> ~/.zshrc
-   ```
+## Use
 
-   The menubar's **Use with docker…** shows both with a Copy button. The socket is
-   `~/.pratico/docker.sock`, the default, and needs no password. For tools that only know
-   `/var/run/docker.sock`, the menubar's **Use /var/run/docker.sock…** explains why that
-   path needs an administrator and gives the `sudo` commands to copy into Terminal (link
-   now, optionally at every startup, undo). Pratico itself never asks for root.
+The socket is `~/.pratico/docker.sock`. Point clients at it with a context:
 
-The menubar's **Disk** menu shows what pratico uses, sized by blocks actually allocated
-and with shared layers counted once: images (and how much is unused), leftover image
-data, running and stopped containers, logs, volumes, the guest init, scan data, the
-largest items, and the Mac's free space. Its cleanup actions list what they remove and ask
-first; running containers and the images they use are kept, and Remove Unused Volumes
-says the data cannot be recovered. `docker system df` and `docker system prune` work too.
+```sh
+docker context create pratico --docker host=unix://$HOME/.pratico/docker.sock
+docker context use pratico
+docker run --rm alpine echo hello
+```
 
-The icon shows how many containers run. **Containers** lists each with its image, CPU,
-memory, health, and published ports (⚠︎ marks one other machines can reach), and can open
-a port in the browser, stop, or restart it. **Alerts** lists what pratico raised: a blocked
-image, a port published beyond loopback (`-p 8080:80` binds `0.0.0.0`, as in Docker; use
-`-p 127.0.0.1:8080:80` to keep it on the Mac), a container turning unhealthy. Each also
-becomes a notification once.
+or with `DOCKER_HOST=unix://$HOME/.pratico/docker.sock`. Tools hard-wired to
+`/var/run/docker.sock` need a root-owned link there; the menubar's
+**Use /var/run/docker.sock…** shows the `sudo` commands. Pratico itself never asks for
+root.
 
-**Snapshot** writes every container, network, and volume definition to a `.tar.gz` of
-plain JSON in `~/.pratico/snapshots` (read it with `tar -xzf` and any editor). **Restore
-from Snapshot…** shows what it would create and skip, and for each container its image,
-command, and anything reaching beyond it (Mac folders, published ports, privileges), then
-asks whether to restore only or restore and start the ones that were running. Images come back from their registries;
-volume data is not part of a snapshot.
+Images move to and from Apple's `container` tool as OCI archives:
 
-Volumes work as in Docker: `docker volume create`, `-v name:/path`, `--mount
-type=volume`, anonymous volumes for `-v /path` and an image's `VOLUME`, `docker rm -v`.
-They live in `~/.pratico/volumes/<name>/_data`, plain folders you can open in Finder.
+```sh
+container image save myapp:dev -o myapp.tar && docker load -i myapp.tar
+docker save myapp:dev -o myapp.tar && container image load -i myapp.tar
+```
 
-Pratico has no CLI of its own: `docker` is the CLI, the menubar is the control panel.
+## How it works
 
-## How it runs
+```
+docker / compose / any API client
+        │  Docker Engine API 1.55 (min 1.44) on ~/.pratico/docker.sock
+pratico-daemon ── images (OCI store), networks, volumes, scans, snapshots
+        │  one per container
+pratico-shim ──── owns one VM (Virtualization.framework, via apple/containerization)
+        │  vsock
+vminitd ───────── guest agent: process, exec, cp, stats, healthchecks
+```
 
-Pratico runs each container in its own small VM on Apple's Virtualization.framework,
-through [apple/containerization](https://github.com/apple/containerization). The app
-carries the Linux kernel and init, so nothing else needs installing.
+- **One VM per container.** Each container boots its own kernel. Nothing is shared
+  between containers except volumes you share. CPU and memory limits are the VM's size.
+- **Shims outlive the daemon.** A daemon restart reattaches to running containers; their
+  output and exit codes are kept.
+- **Start order.** The shim creates the VM and waits; the daemon attaches networks,
+  publishes ports, and records the container as running, then tells the shim to start
+  the process.
+- **pratico-net.** A user-space switch in the daemon, outside every VM. Each VM gets up
+  to 4 virtual NICs. Networks are separated at the switch; each gateway answers DNS for
+  its containers and aliases and forwards other names to the Mac's resolver. `--internal`
+  networks have no route out; the default route goes through the first network that is
+  not internal. Published ports bind on the Mac (`0.0.0.0` unless an address is given).
+  `host.docker.internal` reaches the Mac. Disconnect cuts the NIC at the switch.
+- **Root filesystem.** Each container gets an ext4 disk image built from its image.
+  Bind mounts and volumes are shared over virtiofs; host Unix sockets (including
+  `/var/run/docker.sock` inside a container) are relayed over vsock.
 
-- Each VM has its own `pratico-shim`, so containers and their exit codes survive a daemon
-  restart.
-- A guest agent runs exec, cp, stats and healthchecks, so images need no tools of their
-  own; pause freezes the whole VM.
-- pratico-net, a user-space switch in pure Swift, gives isolated networks, DNS by name,
-  internet and Mac access (`host.docker.internal`), published ports, and connect or
-  disconnect of running containers (disconnect cuts traffic at the switch).
-- `-v /var/run/docker.sock:...` and other host Unix sockets are relayed into the VM.
+Details: [docs/design/runtime.md](docs/design/runtime.md).
 
-Design: [docs/design/runtime.md](docs/design/runtime.md); checklist:
-[.project/roadmap.md](.project/roadmap.md).
+## Resource use
 
-### One VM per container, not one VM for all
+Measured on an Apple silicon Mac with idle `alpine` containers (`make bench` covers the
+latency and daemon-memory bounds):
 
-Docker Desktop, Colima, and OrbStack run one Linux VM and every container as processes
-inside it. Pratico, like Apple's own `container` tool, gives each container its own VM:
-`pratico-shim` builds a `LinuxContainer` from apple/containerization, whose `create()`
-asks `VZVirtualMachineManager` for a new `VZVirtualMachine` every time. (apple/container
-does the same: one launchd service per container, each with its own `LinuxContainer`.)
-Containers share nothing but the Mac: a kernel panic, a fork bomb, or a breakout stays in
-its VM. The library also has an experimental `LinuxPod` (several containers in one VM);
-pratico does not use it.
-
-## What it costs
-
-Measured on an M-series Mac, idle `alpine sleep` containers:
-
-| | Each container |
+| | |
 |---|---|
-| `docker run -d` to running | about 400 ms (boot included); `run --rm alpine true` P99 436 ms over 50 runs |
-| Mac memory, VM process (`phys_footprint`) | about 190–210 MB: guest kernel, init, page cache touched while booting |
-| Mac memory, its `pratico-shim` | about 20 MB |
-| Daemon | about 45 MB in all, 48 MB with 32 containers running |
-| Control calls (`ps`, `inspect`, `/version`) | ≤ 2 ms P99 with 100 containers |
+| `docker run --rm alpine true` | P99 436 ms over 50 runs, VM boot included |
+| Memory per running container | ≈ 200 MB (VM process ≈ 190–210 MB, shim ≈ 20 MB) |
+| No containers running | no VMs |
+| Daemon | ≈ 45 MB; 48 MB with 32 containers running |
+| `/_ping`, `/version`, `ps -a` with 100 containers | P99 ≤ 2 ms |
 
-- Memory is a ceiling, not a reservation: a container gets `--memory` (default 1 GiB, plus
-  128 MiB for the guest) and the Mac backs only the pages the guest touches. Pages the guest
-  uses for its file cache are not handed back while it runs (the VM has no balloon), so a
-  container that reads a lot of files stays near its limit until it stops. Set `--memory`
-  (or `default_memory`) for busy ones.
-- CPU runs natively (arm64 under Apple's hypervisor); `--cpus` caps the VM's vCPUs
-  (default 4).
-- The image's root filesystem is an ext4 disk image per container: fast, and sparse on disk.
-  Bind mounts and volumes go over virtiofs, slower than the Mac's own disk for many
-  small files.
-- Networking goes through pratico-net, a user-space switch: correct and isolated, not
-  yet tuned for throughput.
-- Ten idle containers cost about 2 GB of Mac memory; one shared VM would cost less for
-  many tiny containers, and gives up the isolation. `make bench` re-measures the numbers above.
+`--memory` (default 1 GiB, plus 128 MiB for the guest) is a ceiling: the Mac backs only
+pages the guest touches. The VM has no memory balloon, so page cache the guest fills is
+returned when the container stops, not while it runs.
 
-## Not yet
+## Compatibility
 
-`docker build` and egress interception (next, after parity and scanning), more than 4
-networks per container, IPv6, Developer ID signing.
-The checklist, with what is done: [.project/roadmap.md](.project/roadmap.md).
+Supported:
 
-## Build from source
+- Containers: create, start, stop, restart, kill, pause, rm, logs (`-f`, `--tail`,
+  `-t`), attach, exec (`-it`, resize), cp (running or stopped containers), stats, wait,
+  inspect, healthchecks, events, prune.
+- Images: pull, push, tag, rm, inspect, prune, save (one or several), load (OCI archives),
+  list filters (`reference`, `dangling`, `label`, `before`, `since`).
+- Networks: create (bridge, `--internal`), connect and disconnect running containers,
+  aliases, DNS by name, prune.
+- Volumes: named and anonymous (`-v /path`, image `VOLUME`), copy-up of image files into
+  new volumes, `nocopy`, `rm -v`, prune (`-a`), `tmpfs` mounts, bind mounts.
+- `docker login`, private registries, plain-HTTP and custom-CA registries (config).
+- `docker system df`, `docker system prune`, Compose projects with private networks.
+- Docker CLI 25.0 and later. Older clients get Docker Engine's "client version is too old".
 
-Requires an Apple silicon Mac with macOS 26 and Xcode 26 (Swift 6.2+).
+Limits:
 
-```sh
-make assets        # kernel + vminit, pinned and verified (once; cached)
-make build         # swift build, then signs pratico-shim with the virtualization entitlement
-make app           # dist/Pratico.app
-make dmg           # dist/Pratico-<version>.dmg (ad-hoc signed)
-make install       # copies Pratico.app to /Applications
-```
+- `docker build` is not supported.
+- Containers run `linux/arm64`; images without an arm64 variant do not run.
+- At most 4 networks per container (Virtualization.framework refuses a fifth NIC).
+- IPv4 only on pratico-net.
+- Files on volumes and bind mounts are owned by the Mac user, so images that `chown`
+  their data to another uid see the volume's owner.
 
-`make assets` downloads the Kata Containers 3.28.0 release once (about 600 MB, checked
-against the digest GitHub publishes) to extract its 16 MB kernel, and the
-`vminit:0.54.0` image from ghcr.io. Both land in `.cache/assets/`; later builds are offline.
+## Image scanning
 
-## Test
+Each pulled or loaded image is scanned in the background, and again daily, with every
+scanner found in Homebrew or Go paths:
 
-```sh
-make test           # unit tests (Swift Testing)
-make e2e            # the real docker CLI against a throwaway daemon: the Docker API
-make e2e-embedded   # the runtime underneath: shims, guest agent, pratico-net, registries
-make e2e-registry   # test harness only: a throwaway private registry for login/pull/push
-make probe ARGS="docker.io/library/alpine:latest uname -a"   # boot one VM directly
-```
-
-The e2e suites use `/opt/homebrew/bin/docker` (override with `DOCKER=`), an isolated
-`DOCKER_CONFIG`, and fake image scanners, so they never touch your Docker login or the
-network beyond image pulls.
-
-## Configure
-
-**Settings…** (⌘, from the menubar) is a standard settings window over
-`~/.pratico/config.toml`, with General, Scanning and Registries tabs. A change is written
-at once and only to its own key, keeping your comments; a key set in the file says so,
-with **Use Default** to remove it. The daemon reads the file when it
-starts; Settings offers the restart. The file holds overrides only; unknown keys stop
-the daemon with the key and line named.
-
-| Key | Default | Meaning |
+| Tool | Source | Matching |
 |---|---|---|
-| `start_at_login` | `true` | start the daemon at login |
-| `default_cpus` | `4` | CPUs for a container with no `--cpus` |
-| `default_memory` | `1024` | MiB for a container with no `--memory` |
-| `scan` | `true` | scan pulled images in the background |
-| `scan_block` | `"kev"` | `off`, `malware`, `kev`, or `critical`: what stops and blocks an image |
-| `scan_allow` | `[]` | image IDs allowed despite findings |
-| `scan_custom` | `[]` | your own scanners: executables run as `<path> <image.tar>` that print pratico's findings JSON |
-| `registry_http_loopback` | `true` | plain HTTP, credentials included, to localhost registries, as Docker |
-| `registry_http` | `[]` | other registries (`host`, `host:port`, or an IPv4 CIDR such as `10.0.0.0/8`) allowed plain HTTP, Docker's insecure-registries |
-| `registry_ca` | `[]` | PEM files of extra CAs, added to the system's trusted roots |
-| `registry_system_roots` | `true` | `false` trusts only `registry_ca` |
-| `registry_keep_logins` | `true` | keep `docker login` credentials in pratico's Keychain items for clients that send none; `false` only checks them, as `dockerd` does, and never reads the Keychain |
+| osv-scanner | Google | package names and versions sent to the OSV.dev API |
+| grype | Anchore | local vulnerability database |
+| trivy | Aqua Security | local vulnerability database |
+| syft | Anchore | writes SPDX and CycloneDX SBOMs, no findings |
+| CISA KEV | U.S. CISA | catalog of exploited CVEs, cached daily |
+| EPSS | FIRST | exploitation probability per CVE, cached daily (only CVE IDs sent) |
 
-## Image scanners
+Image contents do not leave the Mac. Findings from all scanners are merged; each lists
+the scanners that reported it.
 
-Every pulled image is scanned in the background, and again daily, with each scanner
-pratico finds, plus CISA's list of exploited vulnerabilities. An image with malware or an
-exploited CVE (`scan_block`) is stopped and blocked, and the menubar says why.
+- `scan_block` sets what blocks an image: `off`, `malware`, `kev` (default), or
+  `critical`. A blocked image's containers are stopped and cannot start; a notification
+  says why.
+- Scan Results (menubar) lists findings per image with severity, CVSS, EPSS, KEV and
+  malware flags, fixed versions, and the reporting scanners. It exports SBOMs and offers
+  **Allow This Image…**, which adds the image ID to `scan_allow` and unblocks it.
+- The menubar icon changes for blocked images and for images with critical or high
+  findings, malware, or KEV entries. Medium and low findings are listed, not flagged.
+- The Scanners menu shows what is installed and gives the Homebrew command for the rest.
 
-- **Menubar**: the icon becomes a filled shield when an image is blocked and an outline
-  shield when images have critical or high vulnerabilities (or malware, or a CVE CISA lists
-  as exploited); medium and low findings never change it. One **Scan Results…** line says
-  how many, however many images there are; a block also raises a notification, once per image.
-- **Scanners menu**: which scanners are found, with versions; **Install Missing
-  Scanners…** gives the Homebrew command (or how to get Homebrew); **Scan All Images Now**.
-- **Scan Results** window: per image, which scanners ran (or why not), and every finding
-  with the scanners that reported it, severity, KEV and malware flags, and fixed versions.
-- **Settings › Scanners**: the built-in ones (osv-scanner, grype, trivy) and your own. **+**
-  adds any executable, **−** removes one (after asking), **Format…** shows the contract
-  below. Your scanners are `scan_custom` in `config.toml`; the daemon picks up changes when
-  it restarts.
+### Custom scanners
 
-### Your own scanner
-
-pratico runs it as `<path> <image.tar>`, where the archive is a Docker archive of the
-image, with `PRATICO_IMAGE_ID` and `PRATICO_IMAGE_REFS` set. It must exit 0 and print:
+Any executable listed in `scan_custom` runs as `<path> <image.tar>` (a Docker archive),
+with `PRATICO_IMAGE_ID` and `PRATICO_IMAGE_REFS` set. It exits 0 and prints:
 
 ```json
 {"findings": [
@@ -216,46 +166,82 @@ image, with `PRATICO_IMAGE_ID` and `PRATICO_IMAGE_REFS` set. It must exit 0 and 
 ]}
 ```
 
-`id` and `package` are required. `severity` is `critical`, `high`, `medium`, `low` or
-`unknown`; `aliases`, `fixed`, `cvss` and `malicious` are optional. A non-zero exit, or
-output that is not this JSON, counts as a failed run: earlier findings from that scanner
-are kept, so an outage never lifts a block. Its findings merge with the other scanners'
-and follow `scan_block`. Design: [docs/design/image-scanning.md](docs/design/image-scanning.md).
+`id` and `package` are required; `severity` is `critical`, `high`, `medium`, `low`, or
+`unknown`; `aliases`, `fixed`, `cvss`, and `malicious` are optional. A non-zero exit or
+other output is a failed run and keeps that scanner's earlier findings. Design:
+[docs/design/image-scanning.md](docs/design/image-scanning.md).
 
-## Layout
+## Menubar
 
-| Path | Holds |
-|---|---|
-| `Sources/PraticoDaemonKit` | Docker API server and services (containers, images, networks, exec, logs, events, health, stats, scanning, runtime, shim) |
-| `Sources/pratico-daemon` | daemon executable (`--home <dir>` relocates state) |
-| `Sources/pratico-shim` | one per running container; owns its VM |
-| `Sources/pratico-menubar` | SwiftUI menubar app |
-| `Sources/PraticoCore` | config, paths, version |
-| `e2e/` | end-to-end suites and fakes |
-| `scripts/` | `fetch-runtime-assets.sh`, `release.sh` |
-| `Support/` | Info.plist, entitlements, launch agent, DMG readme |
-| `SPEC.md` | requirements, acceptance criteria, decisions (D-n) |
-| `docs/design/` | design documents |
+- **Containers**: running containers with image, CPU, memory, health, and ports; open a
+  published port, stop, restart. The icon shows the count.
+- **Alerts**: blocked images, ports published beyond loopback, containers turning
+  unhealthy. Each becomes one notification.
+- **Disk**: allocated size of images, leftover layers, running and stopped containers,
+  logs, volumes, and scan data, adding up to the total. Cleanup actions list what they
+  remove, ask, then call the matching prune endpoint.
+- **Snapshot**: writes every container, network, and volume definition to
+  `~/.pratico/snapshots/pratico-snapshot-<time>.tar.gz` (JSON files and a
+  `manifest.json`). Restore shows each container's image, command, mounts, ports, and
+  privileges before asking, skips names that exist, and starts containers only if asked.
+  Volume data is not included.
+- **Settings** (⌘,): `config.toml` as a form.
 
-State lives in `~/.pratico/`: `docker.sock`, `config.toml`, `containers/`, `store/`
-(images), `networks/`, `scans/`, `alerts.json`, `run/` (shim sockets).
+## Configuration
 
-## Release
+`~/.pratico/config.toml` holds overrides only; Settings writes one key at a time and
+keeps comments. Unknown keys stop the daemon with the key and line named.
 
-`make release VERSION=x.y.z` (see `scripts/release.sh`) checks the version, runs the
-tests and e2e, builds and verifies the DMG, tags `vX.Y.Z`, and publishes a GitHub
-release with the DMG and its SHA-256.
+| Key | Default | |
+|---|---|---|
+| `start_at_login` | `true` | start the daemon at login |
+| `default_cpus` | `4` | vCPUs when `--cpus` is not given |
+| `default_memory` | `1024` | MiB when `--memory` is not given |
+| `scan` | `true` | scan images in the background |
+| `scan_block` | `"kev"` | `off`, `malware`, `kev`, or `critical` |
+| `scan_allow` | `[]` | image IDs allowed despite findings |
+| `scan_custom` | `[]` | executables used as scanners |
+| `registry_http_loopback` | `true` | plain HTTP to localhost registries |
+| `registry_http` | `[]` | other registries allowed plain HTTP (`host`, `host:port`, IPv4 CIDR) |
+| `registry_ca` | `[]` | PEM files added to the trusted roots |
+| `registry_system_roots` | `true` | `false` trusts only `registry_ca` |
+| `registry_keep_logins` | `true` | keep `docker login` credentials in the Keychain for clients that send none |
 
-## License
+## Files
 
-MIT, see [LICENSE](LICENSE).
+`~/.pratico/`: `docker.sock`, `config.toml`, `daemon.log`, `store/` (images),
+`containers/` (rootfs, logs, shim state), `volumes/<name>/_data`, `networks/`, `scans/`
+(reports, SBOMs), `scan-db/` (KEV, EPSS caches), `snapshots/`, `alerts.json`, `run/`.
+
+## Build and test
+
+Requires Xcode 26 (Swift 6.2).
+
+```sh
+make assets          # kernel and vminitd, pinned and verified, cached in .cache/assets
+make build           # swift build; signs pratico-shim with the virtualization entitlement
+make app             # dist/Pratico.app
+make dmg             # dist/Pratico-<version>.dmg
+make install         # copy to /Applications
+
+make test            # unit tests
+make e2e             # Docker API against a throwaway daemon, real docker CLI
+make e2e-embedded    # runtime: shims, guest agent, pratico-net, volumes, snapshots
+make bench           # AC-44..49: latency, memory, connection limits, CLI versions
+```
+
+The e2e suites use `/opt/homebrew/bin/docker` (`DOCKER=` to override), an isolated
+`DOCKER_CONFIG`, and fake scanners. `make release VERSION=x.y.z` runs the tests, builds
+and verifies the DMG, tags `vX.Y.Z`, and publishes the release; with `SIGN_IDENTITY` and
+`NOTARY_PROFILE` set it signs with a Developer ID and notarizes.
+
+Requirements, acceptance criteria, and design decisions: [SPEC.md](SPEC.md).
 
 ## Acknowledgements
 
 pratico embeds [apple/containerization](https://github.com/apple/containerization)
-(Apache-2.0) and its Apache-2.0 dependencies, ships the Kata Containers kernel
-(GPL-2.0; source and config at the
+(Apache-2.0) and its Apache-2.0 dependencies, ships the Kata Containers kernel (GPL-2.0;
+source and config at the
 [3.28.0 release](https://github.com/kata-containers/kata-containers/releases/tag/3.28.0))
-and `vminitd` (Apache-2.0). Planned: parts of
-[sandwich-proxy](https://github.com/gleicon/sandwich-proxy) (MIT). The app and DMG carry
-`Acknowledgements.txt` with every license notice.
+and `vminitd` (Apache-2.0). `Acknowledgements.txt` in the app and DMG has every license
+notice.
