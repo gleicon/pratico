@@ -93,27 +93,32 @@ networks cannot exchange a frame, because the switch never forwards one.
   - `host.docker.internal` / `host.pratico.internal` reach the Mac, and
     `gateway.docker.internal` the network gateway, as Docker Desktop provides.
   - `docker inspect`, events, and the menubar show each container's DNS names.
-- **Hot connect/disconnect on running containers**: Virtualization.framework cannot
-  hot-add NICs, and allows 4 per VM. So each VM boots with 4 NIC slots (`eth0`–`eth3`): its networks, then
-  spares that are link-down with no switch port.
-  - Connect: the daemon binds a spare slot to the network and reserves an address; the
-    shim's agent adds it and brings `ethN` up; then the switch registers the port. A
-    container's first network also gets the default route and the published ports. If
-    the guest step fails, only that slot's binding is undone. Connects and disconnects
-    are serialized, so concurrent ones cannot take two slots for one network or undo
-    each other.
-  - Disconnect: the switch drops the port first, so no frame reaches or leaves it from
-    then on, even if the guest brings the link back up; its uplink flows end. Then the
-    agent takes `ethN` down. Losing the primary network moves the default route and the
-    published ports to the next network.
-  - vminitd cannot delete an address, so a disconnected slot keeps its address on a
-    down link, reserved for that container until it restarts. Reconnecting to the same
-    network reuses that slot and address. Spares boot with a `169.254.255.N/32`
-    placeholder, which adds no route.
-  - Every pratico gateway answers DNS as the asker's own networks, so `resolv.conf`
-    (the first network's gateway) keeps working after that network is disconnected.
-  - Slots reset at each start. A fifth distinct network on one run answers 409, and a
-    container created on more than 4 networks fails to start with a clear error.
+- **One NIC, an address per network (D-43)**: Virtualization.framework cannot hot-add
+  NICs and refuses a fifth, so a card per network capped containers at 4 networks. Each
+  VM boots with one card, `eth0`, holding an address on each of its networks; the
+  primary network's address is the boot address, the others are added once the guest
+  is up. The switch keys the VM's ports by network and classifies each frame by source
+  address (ARP sender or IPv4 source); frames from an address it has not registered for
+  that VM are dropped. A MAC no longer names one network, so delivery also checks the
+  destination: a peer gets a frame only when its ARP target or IPv4 destination is that
+  peer's address on the sender's network (broadcast and multicast: the sender's subnet
+  or 224.0.0.0/4). Otherwise a raw frame from n1 to a peer's MAC could reach the peer's
+  n2 address.
+  - Connect: the daemon reserves an address and adds an endpoint on the card; the shim's
+    agent adds the address; then the switch registers the port. A container's first
+    network also gets the default route and the published ports. If the guest step
+    fails, only that endpoint is undone. Connects and disconnects are serialized, so
+    concurrent ones cannot take two addresses for one network or undo each other.
+  - Disconnect: the switch drops the port first, so no frame from or to that address
+    passes from then on; its uplink flows end. The link stays up for the other networks.
+  - vminitd cannot delete an address or a route. A disconnected address stays on the
+    card, reserved for that container until it restarts, and reconnecting to the same
+    network gets it back. When the primary network goes, the shim takes `eth0` down and
+    up (which clears the old default route and keeps the addresses), adds the default
+    via the next network's gateway, and points `resolv.conf` at it.
+  - Every pratico gateway answers DNS as the asker's own networks.
+  - VMs started by an older pratico keep a card per network (with spare cards) until
+    restarted; connecting one beyond its cards answers 409.
 - **Internet (uplink)**, in Swift, no extra binaries (decided 2026-11-09): the switch
   routes off-network traffic to pratico's own user-space stack, in the style of slirp.
   - It answers ARP, ICMP echo, and DNS.
@@ -136,7 +141,7 @@ networks cannot exchange a frame, because the switch never forwards one.
 - **Port publishing**: the daemon listens on the host address and port, and relays
   each connection through the uplink to the container's address. Loopback-only
   publishing becomes the safe default per config.
-- **`none`**: no NIC slots bound. **`host`**: still unsupported (a VM has its own kernel).
+- **`none`**: no NIC. **`host`**: still unsupported (a VM has its own kernel).
 
 ## Docker operations on the new runtime
 
@@ -198,7 +203,7 @@ slice can switch over per operation group.
 | Runtime bootstrap (store, `vminit` load, `initfs.ext4`) | `EmbeddedRuntime` in `Sources/PraticoDaemonKit/Embedded.swift` |
 | Images on the store | `EmbeddedImageBackend` in `ImageBackend.swift`; `ImageService` is backend-agnostic |
 | Registry client, trust, logins | `RegistrySession`, `RegistryPolicy` in `RegistrySession.swift`; `Registries` (policy, Keychain logins, `registries.json`) in `Registries.swift` |
-| NIC slots | `ShimNIC`, `NICSlots` (slots plus the primary one; bind, revert, unbind) in `Net/NIC.swift`; hot connect and disconnect in `NetworkService` and `ContainerNetworks.swift` |
+| NIC endpoints | `ShimNIC`, `NICSlots` (endpoints, cards by socket, the primary one; add, bind, revert, unbind) in `Net/NIC.swift`; hot connect and disconnect in `NetworkService` and `ContainerNetworks.swift` |
 | Socket mounts | `ContainerService.shimMount` (maps `/var/run/docker.sock` to the daemon's socket, marks Unix sockets) in `Containers.swift`; the shim relays them with `UnixSocketConfiguration(direction: .into)` |
 | `/var/run/docker.sock` link | `DefaultSocket` in `Sources/PraticoCore/DefaultSocket.swift` (the `/bin/ln` launchd job and the install and remove scripts the menubar runs through an admin prompt) |
 | Shim (VM owner) | `ShimHost`, `ShimControl` in `Shim.swift`; executable `Sources/pratico-shim` |
@@ -218,8 +223,8 @@ healthchecks and stat), `POST /exec-stream` (hijacked; Docker's raw or multiplex
 framing), `GET /exec-status?id=`, `POST /exec-resize?id=&h=&w=`, `POST /copy-out?src=&dst=`
 and `POST /copy-in?src=&dst=&mode=` (host paths must be inside the container directory),
 `GET /stats` (agent counters under the CLI backend's keys), `POST /nic` (a `NICChange`:
-`up` with slot, address and an optional gateway, `down`, or `route`; the shim remembers
-which addresses each slot holds, since it outlives daemon restarts and the agent cannot
+`up` with card, address and an optional gateway, `down`, or `route`; the shim remembers
+which addresses each card holds, since it outlives daemon restarts and the agent cannot
 delete one). SIGTERM to a shim stops its
 container like `docker stop` (SIGKILL after 10 s).
 
@@ -285,7 +290,7 @@ Learned while building:
     falls back to HTTP.
   - Awareness: `docker info` warnings and `RegistryConfig`, a note in pull and push
     output, the daemon log, `registries.json` and the menubar.
-- Limits: IPv4 only (IPv6 port binds are ignored); at most 4 NICs per VM, verified: Virtualization.framework refuses a fifth ("The number of network devices is greater than the maximum number supported").
+- Limits: IPv4 only (IPv6 port binds are ignored); one NIC per VM, so no network count limit (Virtualization.framework refuses a fifth network device, which capped the earlier card-per-network design at 4).
 
 ## Risks and costs
 
@@ -317,8 +322,8 @@ mounted socket sees itself.
 ## Rootfs cache and start latency (2026-11-15)
 
 Profiled with `PRATICO_TRACE=1`: of a `docker run --rm alpine true`, about 130 ms is the
-guest kernel booting (each virtio device costs ≈ 8 ms to probe; every VM has 4 NICs, 3 of
-them spare for hot connect), about 110 ms is vminitd starting and the host agent setting
+guest kernel booting (each virtio device costs ≈ 8 ms to probe; VMs had 4 NICs, 3 of
+them spare for hot connect, until D-43 cut that to one), about 110 ms is vminitd starting and the host agent setting
 up the container, about 40 ms is the process start, and about 80 ms is the docker CLI
 itself. pratico's own share was the per-container image unpack and a 20 ms poll for the
 shim; both are gone: images are unpacked once and cloned (APFS `clonefile`), and the shim

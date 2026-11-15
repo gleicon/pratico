@@ -206,7 +206,7 @@
         <p>A shared VM looks lighter on paper, but it runs all day whether you use it or not, and every container in it shares one kernel. Pratico starts a small VM only for what you run, in well under a second, and gives everything back when it stops.</p>
       </div>
       <dl class="stats">
-        <div><dt>Start a container</dt><dd>≈ 350 ms</dd></div>
+        <div><dt>Start a container</dt><dd>≈ 300 ms</dd></div>
         <div><dt>With nothing running</dt><dd>0 VMs</dd></div>
         <div><dt>Memory per idle container</dt><dd>≈ 250 MB</dd></div>
         <div><dt>Daemon, 32 containers running</dt><dd>43 MB</dd></div>
@@ -254,13 +254,13 @@
       <div class="head">
         <p class="kicker">Each workload in its own VM</p>
         <h2 id="network-h">Networking that stays outside the workload</h2>
-        <p>Every VM gets its own virtual network card, plugged into pratico-net: a switch that runs on your Mac, outside every container. The rules live there, where no container can change them.</p>
+        <p>Every VM gets one virtual network card, plugged into pratico-net: a switch that runs on your Mac, outside every container. Each network a container joins is another address on that card, with no limit on how many. The switch decides what each address may reach, and the rules live there, where no container can change them.</p>
       </div>
       <div class="cols">
         <div><h3>Networks that really separate</h3><p>Containers on different networks cannot exchange a single packet. Compose projects get their own private networks, and an <code>internal</code> network never routes out, whatever runs inside.</p></div>
         <div><h3>Names, not addresses</h3><p>Each network answers DNS for its containers and aliases, and passes other names to your Mac's resolver.</p></div>
         <div><h3>Ports you can see</h3><p>Published ports are opened on your Mac by pratico. The menubar warns when one is reachable from your network, not only from this Mac.</p></div>
-        <div><h3>Disconnect means disconnected</h3><p>Taking a running container off a network cuts it at the switch. Nothing inside the VM can bring the link back.</p></div>
+        <div><h3>Disconnect means disconnected</h3><p>Taking a running container off a network cuts that address at the switch. Nothing inside the VM can bring it back.</p></div>
       </div>
     </div>
   </section>

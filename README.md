@@ -70,12 +70,15 @@ vminitd ───────── guest agent: process, exec, cp, stats, healt
 - **Start order.** The shim creates the VM and waits; the daemon attaches networks,
   publishes ports, and records the container as running, then tells the shim to start
   the process.
-- **pratico-net.** A user-space switch in the daemon, outside every VM. Each VM gets up
-  to 4 virtual NICs. Networks are separated at the switch; each gateway answers DNS for
+- **pratico-net.** A user-space switch in the daemon, outside every VM. Each VM has one
+  virtual NIC, `eth0`, with an address per network it joins, so there is no limit on the
+  number of networks. The switch tells a VM's networks apart by source address and drops
+  frames from any address it has not assigned to that VM on that network. Networks are
+  separated at the switch; each gateway answers DNS for
   its containers and aliases and forwards other names to the Mac's resolver. `--internal`
   networks have no route out; the default route goes through the first network that is
   not internal. Published ports bind on the Mac (`0.0.0.0` unless an address is given).
-  `host.docker.internal` reaches the Mac. Disconnect cuts the NIC at the switch.
+  `host.docker.internal` reaches the Mac. Disconnect cuts that address at the switch.
 - **Root filesystem.** Each image is unpacked once into an ext4 disk image; every
   container gets an APFS clone of it, so `create` takes the same few milliseconds for any
   image size and a container's disk use is only what it writes. Bind mounts and volumes
@@ -91,10 +94,10 @@ latency and daemon-memory bounds):
 
 | | |
 |---|---|
-| `docker run --rm alpine true` | P99 381 ms over 50 runs, VM boot included |
+| `docker run --rm alpine true` | P99 316 ms over 50 runs, VM boot included |
 | Memory per running container | ≈ 250 MB (VM process ≈ 215 MB, shim ≈ 33 MB) |
 | No containers running | no VMs |
-| Daemon | ≈ 45 MB; 43 MB with 32 containers running |
+| Daemon | ≈ 45 MB; 48 MB with 32 containers running |
 | `/_ping`, `/version`, `ps -a` with 100 containers | P99 ≤ 3 ms |
 
 `--memory` (default 1 GiB, plus 128 MiB for the guest) is a ceiling: the Mac backs only
@@ -122,8 +125,10 @@ Limits:
 
 - `docker build` is not supported.
 - Containers run `linux/arm64`; images without an arm64 variant do not run.
-- At most 4 networks per container (Virtualization.framework refuses a fifth NIC).
 - IPv4 only on pratico-net.
+- A container has one interface for all its networks, with one MAC, where Docker gives
+  each network its own `ethN` and MAC. Software that binds to `eth1` by name sees only
+  `eth0`.
 - Files on volumes and bind mounts are owned by the Mac user, so images that `chown`
   their data to another uid see the volume's owner.
 

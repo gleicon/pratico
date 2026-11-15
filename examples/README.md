@@ -12,6 +12,7 @@ names starting with `pratico-example`, and removes what it creates.
 | `05-scanning.sh` | installed scanners, scan summary, findings with EPSS, SBOMs |
 | `06-snapshot.sh` | taking a snapshot and a dry-run restore |
 | `07-cleanup.sh` | disk use, cleanup plans, prune filters (`--prune` to act) |
+| `08-networks.sh` | one NIC with an address per network, five networks on one container, moving the default route |
 | `compose-private-networks/` | a Compose project with a private and an internal network |
 | `custom-scanner/my-scanner` | the custom scanner contract (`scan_custom`) |
 
