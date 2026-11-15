@@ -64,12 +64,12 @@ struct SnapshotMenu: View {
 extension DaemonController {
     func takeSnapshot() {
         Task {
-            let r = await Task.detached { DaemonProbe.request("POST", "/pratico/snapshots", timeout: 60) }.value
-            let body = r.flatMap { try? JSONSerialization.jsonObject(with: $0.body) as? [String: Any] } ?? [:]
-            guard let r, r.status == 201, let path = body["Path"] as? String else {
-                report("Snapshot failed", body["message"] as? String ?? "The daemon did not answer.")
-                return
+            let body: [String: Any]
+            switch await DaemonProbe.send("POST", "/pratico/snapshots", timeout: 60) {
+            case .failure(let f): return Dialogs.report("Snapshot failed", f.description)
+            case .success(let data): body = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
             }
+            guard let path = body["Path"] as? String else { return Dialogs.report("Snapshot failed", "The daemon gave no snapshot path.") }
             let counts = ["Containers", "Networks", "Volumes"].map { "\(body[$0] as? Int ?? 0) \($0.lowercased())" }
             let alert = NSAlert()
             alert.messageText = "Snapshot taken"
@@ -92,12 +92,12 @@ extension DaemonController {
         Task {
             guard let plan = await restore(file, dryRun: true) else { return }
             guard !plan.Created.Containers.isEmpty || !plan.Created.Networks.isEmpty || !plan.Created.Volumes.isEmpty else {
-                report("Nothing to restore", (["Everything in this snapshot is already here."] + plan.lines).joined(separator: "\n"))
+                Dialogs.report("Nothing to restore", (["Everything in this snapshot is already here."] + plan.lines).joined(separator: "\n"))
                 return
             }
             guard let start = confirmRestore(file, plan) else { return }
             guard let done = await restore(file, dryRun: false, start: start) else { return }
-            report(done.Failed.isEmpty ? "Restored" : "Restored, with problems", Self.listed(done.lines))
+            Dialogs.report(done.Failed.isEmpty ? "Restored" : "Restored, with problems", Self.listed(done.lines))
             await refreshContainers()
         }
     }
@@ -142,15 +142,17 @@ extension DaemonController {
     private func restore(_ file: URL, dryRun: Bool, start: Bool = false) async -> RestoreReport? {
         let query = file.path.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? ""
         let flags = (dryRun ? "&dry_run=1" : "") + (start ? "&start=1" : "")
-        let r = await Task.detached {
-            DaemonProbe.request("POST", "/pratico/snapshots/restore?path=\(query)\(flags)", timeout: 300)
-        }.value
-        guard let r, r.status == 200, let report = try? JSONDecoder().decode(RestoreReport.self, from: r.body) else {
-            let message = r.flatMap { try? JSONSerialization.jsonObject(with: $0.body) as? [String: Any] }?["message"] as? String
-            self.report("Cannot restore \(file.lastPathComponent)", message ?? "The daemon did not answer.")
+        switch await DaemonProbe.send("POST", "/pratico/snapshots/restore?path=\(query)\(flags)", timeout: 300) {
+        case .failure(let f):
+            Dialogs.report("Cannot restore \(file.lastPathComponent)", f.description)
             return nil
+        case .success(let body):
+            guard let report = try? JSONDecoder().decode(RestoreReport.self, from: body) else {
+                Dialogs.report("Cannot restore \(file.lastPathComponent)", "The daemon's answer was not a restore report.")
+                return nil
+            }
+            return report
         }
-        return report
     }
 
     static let maxReviewed = 8
@@ -168,11 +170,4 @@ extension DaemonController {
         lines.prefix(20).joined(separator: "\n") + (lines.count > 20 ? "\n… and \(lines.count - 20) more" : "")
     }
 
-    private func report(_ title: String, _ text: String) {
-        let alert = NSAlert()
-        alert.messageText = title
-        alert.informativeText = text
-        NSApp.activate()
-        alert.runModal()
-    }
 }

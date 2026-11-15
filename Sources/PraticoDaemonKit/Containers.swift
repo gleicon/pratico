@@ -104,13 +104,9 @@ public final class ContainerService: @unchecked Sendable {
     private func dir(_ id: String) -> URL { root.appending(path: id, directoryHint: .isDirectory) }
 
     private func load() {
-        let dec = JSONDecoder()
-        dec.dateDecodingStrategy = .iso8601
         let ids = (try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? []
         for id in ids {
-            guard let data = try? Data(contentsOf: dir(id).appending(path: "config.json")),
-                var rec = try? dec.decode(ContainerRecord.self, from: data)
-            else { continue }
+            guard var rec = Records.read(ContainerRecord.self, from: dir(id).appending(path: "config.json")) else { continue }
             let files = ShimFiles(dir: dir(id))
             let pid = rec.state.running ? ShimClient.livePid(files) : nil
             if rec.state.running && pid == nil {
@@ -140,11 +136,8 @@ public final class ContainerService: @unchecked Sendable {
     }
 
     private func save(_ rec: ContainerRecord) {
-        let enc = JSONEncoder()
-        enc.dateEncodingStrategy = .iso8601
-        enc.outputFormatting = [.prettyPrinted, .sortedKeys]
         try? FileManager.default.createDirectory(at: dir(rec.id), withIntermediateDirectories: true)
-        try? enc.encode(rec).write(to: dir(rec.id).appending(path: "config.json"), options: .atomic)
+        try? Records.write(rec, to: dir(rec.id).appending(path: "config.json"))
     }
 
     func update(_ id: String, _ change: (inout ContainerRecord) -> Void) {

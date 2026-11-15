@@ -112,13 +112,11 @@ extension DaemonController {
         NSApp.activate()
         guard panel.runModal() == .OK, let url = panel.url else { return }
         Task {
-            let id = r.Id
-            let response = await Task.detached { DaemonProbe.request("GET", "/pratico/scans/\(id)/sbom?format=\(format)", timeout: 30) }.value
-            guard let response, response.status == 200 else {
-                error = "SBOM for \(r.Name): " + (response.map { String(decoding: $0.body, as: UTF8.self) } ?? "the daemon did not answer")
-                return
+            switch await DaemonProbe.send("GET", "/pratico/scans/\(r.Id)/sbom?format=\(format)") {
+            case .failure(let f): error = "SBOM for \(r.Name): \(f)"
+            case .success(let body):
+                do { try body.write(to: url, options: .atomic) } catch { self.error = "Cannot save \(url.path): \(error.localizedDescription)" }
             }
-            do { try response.body.write(to: url, options: .atomic) } catch { self.error = "Cannot save \(url.path): \(error.localizedDescription)" }
         }
     }
 
@@ -126,14 +124,12 @@ extension DaemonController {
     /// which unblocks it at once and keeps it allowed after restarts.
     func allowImage(_ r: ScanResult) {
         let reasons = (r.Reasons ?? []).prefix(5).map { "• " + $0 }.joined(separator: "\n")
-        guard confirm("Allow \(r.Name) to run?",
+        guard Dialogs.confirm("Allow \(r.Name) to run?",
                       "Pratico blocked it for:\n\(reasons)\n\nContainers from this image will start despite these findings. Only allow images you trust. You can remove it from Settings › Scanning (scan_allow).",
                       button: "Allow")
         else { return }
         Task {
-            let id = r.Id
-            let response = await Task.detached { DaemonProbe.request("POST", "/pratico/scans/\(id)/allow", timeout: 10) }.value
-            if let response, response.status >= 400 { error = "Allow \(r.Name): " + String(decoding: response.body, as: UTF8.self) }
+            if case .failure(let f) = await DaemonProbe.send("POST", "/pratico/scans/\(r.Id)/allow") { error = "Allow \(r.Name): \(f)" }
             await refreshScanSummary()
         }
     }

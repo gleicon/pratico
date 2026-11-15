@@ -116,14 +116,13 @@ extension DaemonController {
     /// `POST /containers/{id}/stop|restart`, then a refresh so the list follows at once.
     func containerAction(_ c: RunningContainer, _ action: String) {
         Task {
-            let r = await Task.detached { DaemonProbe.request("POST", "/containers/\(c.Id)/\(action)", timeout: 30) }.value
-            if let r, r.status >= 400 { error = "\(action.capitalized) \(c.Name): " + String(decoding: r.body, as: UTF8.self) }
+            if case .failure(let f) = await DaemonProbe.send("POST", "/containers/\(c.Id)/\(action)") { error = "\(action.capitalized) \(c.Name): \(f)" }
             await refreshContainers()
         }
     }
 
     func clearAlerts() {
-        guard confirm("Clear \(alerts.count) alert\(alerts.count == 1 ? "" : "s")?",
+        guard Dialogs.confirm("Clear \(alerts.count) alert\(alerts.count == 1 ? "" : "s")?",
                       "They are removed from this list. Blocked images stay blocked until scan_allow or a rescan clears them.",
                       button: "Clear")
         else { return }

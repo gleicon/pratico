@@ -77,8 +77,7 @@ final class ArchiveService: @unchecked Sendable {
     }
 
     private func copyOut(_ rec: ContainerRecord, _ path: String, to host: URL) throws {
-        let q = { (s: String) in s.addingPercentEncoding(withAllowedCharacters: .alphanumerics.union(CharacterSet(charactersIn: "/._-"))) ?? s }
-        try embedded.shim.call(containers.shimFiles(rec.id), "POST", "/copy-out?src=\(q(path))&dst=\(q(host.path))")
+        try embedded.shim.call(containers.shimFiles(rec.id), "POST", "/copy-out?src=\(Self.query(path))&dst=\(Self.query(host.path))")
     }
 
     /// `GET`: a tar whose single top entry is the path's base name. The agent copies the
@@ -142,7 +141,6 @@ final class ArchiveService: @unchecked Sendable {
             try containers.whileStopped(ref) { _, rootfs in try RootfsEdit.add(layer, to: rootfs) }
             return
         }
-        let q = { (s: String) in s.addingPercentEncoding(withAllowedCharacters: .alphanumerics.union(CharacterSet(charactersIn: "/._-"))) ?? s }
         var targets: [String] = []
         for entry in try FileManager.default.contentsOfDirectory(atPath: work.path) {
             let src = work.appending(path: entry)
@@ -157,7 +155,7 @@ final class ArchiveService: @unchecked Sendable {
                 // whose target stays inside the tree; the rest are recreated below, as links.
                 let outer = (st.st_mode & S_IFMT) == S_IFDIR ? try Self.escapingLinks(in: src) : []
                 let mode = Int(st.st_mode & 0o7777)
-                try embedded.shim.call(files, "POST", "/copy-in?src=\(q(src.path))&dst=\(q(dst))&mode=\(String(mode, radix: 8))")
+                try embedded.shim.call(files, "POST", "/copy-in?src=\(Self.query(src.path))&dst=\(Self.query(dst))&mode=\(String(mode, radix: 8))")
                 for (rel, target) in outer {
                     let body: JSON = ["args": JSON(["ln", "-sfn", target, dst + "/" + rel]), "timeout": 10]
                     _ = try? embedded.shim.request(files, "POST", "/exec", body: body.encoded())
@@ -178,6 +176,11 @@ final class ArchiveService: @unchecked Sendable {
             let body: JSON = ["args": JSON(["chown", "-R", "0:0"] + targets), "timeout": 30]
             _ = try? embedded.shim.request(files, "POST", "/exec", body: body.encoded())
         }
+    }
+
+    /// A path as a query value for the shim's control socket.
+    static func query(_ path: String) -> String {
+        path.addingPercentEncoding(withAllowedCharacters: .alphanumerics.union(CharacterSet(charactersIn: "/._-"))) ?? path
     }
 
     /// `/a/b/` is `/a/b`; `/` stays.

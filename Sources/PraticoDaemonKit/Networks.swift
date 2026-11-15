@@ -135,12 +135,8 @@ final class NetworkService: @unchecked Sendable {
     private func file(_ id: String) -> URL { root.appending(path: "\(id).json") }
 
     private func load() {
-        let dec = JSONDecoder()
-        dec.dateDecodingStrategy = .iso8601
         for name in (try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? [] where name.hasSuffix(".json") {
-            guard let data = try? Data(contentsOf: root.appending(path: name)),
-                let rec = try? dec.decode(NetworkRecord.self, from: data)
-            else { continue }
+            guard let rec = Records.read(NetworkRecord.self, from: root.appending(path: name)) else { continue }
             records[rec.id] = rec
         }
         var bridge = records.values.first { $0.name == "bridge" } ?? Self.builtin("bridge", "default")
@@ -163,10 +159,7 @@ final class NetworkService: @unchecked Sendable {
     }
 
     private func save(_ rec: NetworkRecord) {
-        let enc = JSONEncoder()
-        enc.dateEncodingStrategy = .iso8601
-        enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try? enc.encode(rec).write(to: file(rec.id), options: .atomic)
+        try? Records.write(rec, to: file(rec.id))
     }
 
     // MARK: Lookup

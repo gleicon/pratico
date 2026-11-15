@@ -80,7 +80,7 @@ final class DaemonController {
     }
 
     func removeLogin(_ server: String) {
-        guard confirm("Remove the login for \(server)?", "Pratico forgets the credentials it kept for \(server). Docker's own login, if any, stays.", button: "Remove") else { return }
+        guard Dialogs.confirm("Remove the login for \(server)?", "Pratico forgets the credentials it kept for \(server). Docker's own login, if any, stays.", button: "Remove") else { return }
         let path = "/pratico/registries/logins/" + (server.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: "/"))) ?? server)
         Task.detached { _ = DaemonProbe.request("DELETE", path) }
         registries.logins.removeAll { $0.server == server }
@@ -276,18 +276,6 @@ final class DaemonController {
         refreshDefaultSocket()
     }
 
-    /// Every removal asks first.
-    func confirm(_ title: String, _ text: String, button: String) -> Bool {
-        let alert = NSAlert()
-        alert.messageText = title
-        alert.informativeText = text
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: button)
-        alert.addButton(withTitle: "Cancel")
-        NSApp.activate()
-        return alert.runModal() == .alertFirstButtonReturn
-    }
-
     /// An explanation and Terminal commands the user runs themselves, with a Copy button.
     func showCommands(title: String, text: String, commands: String) {
         let alert = NSAlert()
@@ -446,4 +434,47 @@ extension DaemonProbe {
         dec.dateDecodingStrategy = .iso8601
         return try? dec.decode(type, from: r.body)
     }
+}
+
+/// The app's dialogs, brought to the front: a menubar app is never frontmost on its own.
+enum Dialogs {
+    /// Every removal asks first; true when the user picked `button`.
+    @MainActor static func confirm(_ title: String, _ text: String, button: String) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = text
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: button)
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate()
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    @MainActor static func report(_ title: String, _ text: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = text
+        NSApp.activate()
+        alert.runModal()
+    }
+}
+
+extension DaemonProbe {
+    /// An action on the daemon, off the main actor: the response body on 2xx, else the
+    /// daemon's own message (Docker's `{"message": …}`) or that it did not answer.
+    static func send(_ method: String, _ path: String, timeout: Int = 30) async -> Result<Data, DaemonFailure> {
+        await Task.detached {
+            guard let r = request(method, path, timeout: timeout) else { return .failure(DaemonFailure("the daemon did not answer")) }
+            guard r.status < 300 else {
+                let message = (try? JSONSerialization.jsonObject(with: r.body) as? [String: Any])?["message"] as? String
+                return .failure(DaemonFailure(message ?? String(decoding: r.body, as: UTF8.self)))
+            }
+            return .success(r.body)
+        }.value
+    }
+}
+
+struct DaemonFailure: Error, CustomStringConvertible {
+    let description: String
+    init(_ description: String) { self.description = description }
 }

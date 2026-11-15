@@ -146,67 +146,9 @@ public final class Daemon: @unchecked Sendable {
             try images.backend.login(auth)
             conn.json(200, ["Status": "Login Succeeded", "IdentityToken": ""])
             return .keepAlive
-        // pratico's own endpoints (not Docker's): the menubar's status, and its view of
-        // registry trust and logins.
-        case ("GET", "pratico") where parts.count == 2 && parts[1] == "status":
-            let c = containers.counts
-            conn.json(200, ["Version": .string(Pratico.version), "Pid": .int(Int64(getpid())), "StartedAt": .string(startedAt.ISO8601Format()), "Socket": .string(socketPath),
-                            "Containers": .int(Int64(c.total)), "ContainersRunning": .int(Int64(c.running)),
-                            "Changes": .int(Int64(events.generation))])
-            return .keepAlive
-        case ("POST", "pratico") where parts.count == 2 && parts[1] == "snapshots":
-            conn.json(201, try snapshots.take())
-            return .keepAlive
-        case ("GET", "pratico") where parts.count == 2 && parts[1] == "snapshots":
-            conn.json(200, snapshots.list())
-            return .keepAlive
-        case ("POST", "pratico") where parts.count == 3 && parts[1] == "snapshots" && parts[2] == "restore":
-            guard let path = req.query["path"], !path.isEmpty else { throw APIError(400, "path is required") }
-            conn.json(200, try snapshots.restore(path: path, dryRun: req.flag("dry_run"), start: req.flag("start")))
-            return .keepAlive
-        case ("DELETE", "pratico") where parts.count == 2 && parts[1] == "alerts":
-            alerts.clear()
-            conn.respond(204)
-            return .keepAlive
-        case ("GET", "pratico") where parts.count == 2 && parts[1] == "containers":
-            conn.json(200, runningContainers())
-            return .keepAlive
-        case ("GET", "pratico") where parts.count == 2 && parts[1] == "registries":
-            conn.json(200, registries.state)
-            return .keepAlive
-        case ("DELETE", "pratico") where parts.count == 4 && parts[1] == "registries" && parts[2] == "logins":
-            try registries.logout(parts[3].removingPercentEncoding ?? parts[3])
-            conn.respond(204)
-            return .keepAlive
-        case ("GET", "pratico") where parts.count == 3 && parts[1] == "scans" && parts[2] == "summary":
-            conn.json(200, scans.summary())
-            return .keepAlive
-        case ("GET", "pratico") where parts.count == 2 && parts[1] == "scans":
-            conn.json(200, scans.results())
-            return .keepAlive
-        case ("POST", "pratico") where parts.count == 2 && parts[1] == "scans":
-            conn.json(202, scans.rescanAll())
-            return .keepAlive
-        case ("GET", "pratico") where parts.count == 4 && parts[1] == "scans" && parts[3] == "sbom":
-            guard let img = images.resolve(parts[2])?.image else { throw APIError(404, "No such image: \(parts[2])") }
-            guard let format = ScanService.SBOMFormat(rawValue: req.query["format"] ?? "spdx") else {
-                throw APIError(400, "format is spdx or cyclonedx")
-            }
-            guard let data = try? Data(contentsOf: scans.sbomFile(img.id, format)) else {
-                throw APIError(404, "no SBOM for \(img.displayName): install syft (brew install syft) and scan it again")
-            }
-            conn.respond(200, body: data, contentType: "application/json")
-            return .keepAlive
-        case ("POST", "pratico") where parts.count == 4 && parts[1] == "scans" && parts[3] == "allow":
-            try scans.allow(parts[2])
-            conn.respond(204)
-            return .keepAlive
-        case ("GET", "pratico") where parts.count == 2 && parts[1] == "scanners":
-            conn.json(200, scans.doctor())
-            return .keepAlive
-        case ("GET", "pratico") where parts.count == 2 && parts[1] == "disk":
-            conn.json(200, disk.usage())
-            return .keepAlive
+        // pratico's own endpoints, next to Docker's (PraticoAPI.swift).
+        case (_, "pratico"):
+            if let d = try routePratico(m, Array(parts.dropFirst()), req, conn) { return d }
         case ("GET", "system") where parts.count == 2 && parts[1] == "df":
             conn.json(200, disk.df())
             return .keepAlive
@@ -301,24 +243,6 @@ public final class Daemon: @unchecked Sendable {
             return nil
         }
         return .keepAlive
-    }
-
-    /// `GET /pratico/containers`: the menubar's list of running containers (FR-31, FR-40),
-    /// with ports, health, and usage, in one call.
-    private func runningContainers() -> JSON {
-        .array(containers.all().filter(\.state.running).map { rec in
-            let use = stats.usage(rec.id)
-            return [
-                "Id": .string(rec.id), "Name": .string(rec.name), "Image": .string(ImageRef.familiar(ImageRef.normalize(rec.image))),
-                "StartedAt": .string(rec.state.startedAt?.ISO8601Format() ?? ""),
-                "Paused": .bool(containers.isPaused(rec.id)),
-                "Health": containers.health.state(rec.id).map { .string($0.status) } ?? .null,
-                "Ports": .array(containers.ports(rec).map { p in
-                    ["IP": p["IP"] ?? "", "PublicPort": p["PublicPort"] ?? 0, "PrivatePort": p["PrivatePort"] ?? 0, "Type": p["Type"] ?? "tcp"]
-                }),
-                "CPU": .double(use?.cpu ?? 0), "Memory": .int(use?.memory ?? 0),
-            ]
-        })
     }
 
     private func routeVolumes(_ m: String, _ p: [String], _ req: Request, _ conn: Connection) throws -> Disposition? {

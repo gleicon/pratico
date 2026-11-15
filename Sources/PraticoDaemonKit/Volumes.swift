@@ -39,22 +39,15 @@ final class VolumeService: @unchecked Sendable {
     func dataPath(_ name: String) -> String { dir(name).appending(path: "_data").path }
 
     private func load() {
-        let dec = JSONDecoder()
-        dec.dateDecodingStrategy = .iso8601
         for name in (try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? [] {
-            guard let data = try? Data(contentsOf: dir(name).appending(path: "volume.json")),
-                let rec = try? dec.decode(VolumeRecord.self, from: data), rec.name == name
-            else { continue }
+            guard let rec = Records.read(VolumeRecord.self, from: dir(name).appending(path: "volume.json")), rec.name == name else { continue }
             records[name] = rec
         }
     }
 
     private func save(_ rec: VolumeRecord) throws {
-        let enc = JSONEncoder()
-        enc.dateEncodingStrategy = .iso8601
-        enc.outputFormatting = [.prettyPrinted, .sortedKeys]
         try FileManager.default.createDirectory(atPath: dataPath(rec.name), withIntermediateDirectories: true)
-        try enc.encode(rec).write(to: dir(rec.name).appending(path: "volume.json"), options: .atomic)
+        try Records.write(rec, to: dir(rec.name).appending(path: "volume.json"))
     }
 
     // MARK: Create, inspect, list
