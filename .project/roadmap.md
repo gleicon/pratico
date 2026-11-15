@@ -53,6 +53,7 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 - [x] `docker login` and push on the OCI client: credentials checked with the registry, kept in pratico's own Keychain items, used when a client sends none
 - [x] Scans read the embedded store (exports go through the image backend)
 - [x] Registry trust you choose and can see: plain HTTP for loopback (as Docker) and listed hosts, extra CAs added to the system's roots, system proxy/PAC; `docker info`, pull/push output and the menubar say so; kept logins removable from the menubar
+- [ ] Agent-native pratico (to discuss with Features): an MCP server and a container manager geared towards agents, so an agent can ask whether an image is safe before using it, run a task in a throwaway isolated VM, and read scan results and SBOMs; a way for developers to use containers for tests, agents, and builds from Claude Code
 - [ ] Local registry: pratico's image store served as an OCI registry on 127.0.0.1 (push and pull without tar files, Apple `container` and other tools pulling from it, images scanned on push), optionally a pull-through cache for Docker Hub (to discuss with Features)
 - [ ] Egress intercept: sandwich-proxy engine on container HTTP/HTTPS flows, per-container opt-in, log/replay/HAR/threat feeds
 - [x] Embedded is the default: the app bundles `pratico-shim`, the kernel and `vminit`; acknowledgements (licenses) in the app and DMG
@@ -126,4 +127,3 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 - [x] Image scanners work against pratico unchanged via `docker save` (osv-scanner, grype verified; trivy, snyk use the same path) (D-23)
 - [x] Automatic image scanning: osv-scanner + grype + CISA KEV after each pull and daily; `scan_block` levels; serious findings stop and block the image's containers; menubar alerts and notifications (D-24)
 - [ ] Scanning follow-ups: spotter on image filesystems (needs an all-files hash mode upstream), EPSS, Artifact Hub, syft SBOMs, menubar "allow image" action
-- [ ] Discuss and design a container manager geared towards agents: not just an MCP server, but a way for developers to use containers for tests, agents, and builds from Claude Code
