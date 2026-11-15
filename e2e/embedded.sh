@@ -228,8 +228,8 @@ eventually "a hot-connected container reaches the network by name" docker exec e
 eventually "the network resolves a hot-connected container" docker exec e-c1 ping -c1 -W2 e-b1
 check "disconnect a running container" docker network disconnect e-n1 e-b1
 if docker exec e-b1 ping -c1 -W2 "$c2" >/dev/null 2>&1; then bad "disconnect cuts traffic"; else ok "disconnect cuts traffic"; fi
-docker exec e-b1 ip link set eth1 up >/dev/null 2>&1
-if docker exec e-b1 ping -c1 -W2 "$c2" >/dev/null 2>&1; then bad "a guest cannot revive a disconnected NIC"; else ok "a guest cannot revive a disconnected NIC"; fi
+# The guest keeps the disconnected address (vminitd cannot delete it); the switch drops it.
+if docker exec e-b1 ping -c1 -W2 -I "$n1" "$c2" >/dev/null 2>&1; then bad "the disconnected address is cut at the switch"; else ok "the disconnected address is cut at the switch"; fi
 if docker exec e-c1 nslookup e-b1 >/dev/null 2>&1; then bad "a disconnected container leaves DNS"; else ok "a disconnected container leaves DNS"; fi
 docker network connect e-n1 e-b1
 expect_eq "reconnect gets the same address back" "$(docker inspect e-b1 --format '{{(index .NetworkSettings.Networks "e-n1").IPAddress}}')" "$n1"
@@ -240,6 +240,22 @@ if docker exec e-b1 ping -c1 -W2 "$b2" >/dev/null 2>&1; then bad "the old primar
 stop_daemon
 start_daemon
 eventually "hot-connected NICs survive a daemon restart" docker exec e-b1 ping -c1 -W2 e-c2
+
+# One card, an address per network (D-43): no limit of 4, and no spare cards to boot.
+for i in 1 2 3 4 5; do docker network create "e-many$i" >/dev/null; done
+docker run -d --name e-many --network e-many1 alpine sleep 300 >/dev/null
+for i in 2 3 4 5; do docker network connect "e-many$i" e-many; done
+docker run -d --name e-peer5 --network e-many5 alpine sleep 300 >/dev/null
+expect_eq "a container on five networks has one card" "$(docker exec e-many sh -c 'ls /sys/class/net | grep -c ^eth')" "1"
+eventually "and reaches the fifth network by name" docker exec e-many ping -c1 -W2 e-peer5
+expect_eq "inspect lists all five networks" "$(docker inspect e-many --format '{{len .NetworkSettings.Networks}}')" "5"
+if docker exec e-peer5 ping -c1 -W2 "$(docker inspect e-many --format '{{(index .NetworkSettings.Networks "e-many1").IPAddress}}')" >/dev/null 2>&1; then
+    bad "a peer on one network cannot reach the container's address on another"
+else
+    ok "a peer on one network cannot reach the container's address on another"
+fi
+docker rm -f e-many e-peer5 >/dev/null
+for i in 1 2 3 4 5; do docker network rm "e-many$i" >/dev/null; done
 
 docker rm -f e-b1 e-b2 e-c1 e-c2 e-i1 e-i2 >/dev/null
 check "network rm" docker network rm e-n1

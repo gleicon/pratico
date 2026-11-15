@@ -1,7 +1,8 @@
 import Foundation
 
-/// One NIC of a running container, attached to one network. The shim relays the NIC's
-/// frames between its VM and the switch over a datagram socket bound at `path`.
+/// One endpoint of a running container: its address on one network, on the card whose
+/// frames the shim relays over the datagram socket bound at `path`. Endpoints on one card
+/// share the path and MAC (D-43); the switch tells them apart by their address.
 struct NetPort: Sendable, Equatable {
     var path: String
     var containerId: String
@@ -20,8 +21,10 @@ struct NetSegment: Sendable {
 }
 
 /// pratico-net's user-space switch (SPEC D-27). Each network is a broadcast domain; a
-/// frame never crosses networks. A port may only send as its own MAC and IP (no spoofing,
-/// unlike a plain bridge). The gateway address answers ARP, ping, and DNS.
+/// frame never crosses networks. A frame from a card belongs to the endpoint whose address
+/// it is sent from, and goes only where that endpoint's network reaches: a container on two
+/// networks cannot carry traffic between them, and may only send as its own MAC and
+/// addresses (no spoofing, unlike a plain bridge). The gateway answers ARP, ping, and DNS.
 ///
 /// It survives daemon restarts: shims send to `socketPath` connectionless, so a restarted
 /// daemon rebinds it and traffic resumes once ports are registered again.
@@ -32,7 +35,7 @@ final class NetSwitch: @unchecked Sendable {
 
     private var fd: Int32 = -1
     private let lock = NSLock()
-    private var ports: [String: NetPort] = [:]  // by socket path
+    private var ports: [String: [NetPort]] = [:]  // by socket path: a card's endpoints
     private var segments: [String: NetSegment] = [:]  // by network ID
     private let lookups = DispatchSemaphore(value: 32)  // bounds concurrent host DNS lookups
     /// Made in `init`, never later: a `lazy var` is not thread-safe, and the first use can
@@ -70,26 +73,47 @@ final class NetSwitch: @unchecked Sendable {
         lock.unlock()
     }
 
+    /// Plugs an endpoint in, replacing the card's endpoint on the same network.
     func register(_ p: NetPort) {
         lock.lock()
-        ports[p.path] = p
+        ports[p.path, default: []].removeAll { $0.networkId == p.networkId }
+        ports[p.path, default: []].append(p)
         lock.unlock()
     }
 
     func unregister(container id: String) {
         lock.lock()
-        let gone = ports.values.filter { $0.containerId == id }.map(\.path)
-        ports = ports.filter { $0.value.containerId != id }
+        let gone = ports.filter { $0.value.contains { $0.containerId == id } }.map(\.key)
+        for path in gone { ports[path] = nil }
         lock.unlock()
         for path in gone { uplink.drop(path: path) }
     }
 
-    /// The NIC's frames are dropped from here on and its flows end.
-    func unregister(path: String) {
+    /// The endpoint's frames are dropped from here on and its flows end; the card's other
+    /// endpoints carry on.
+    func unregister(path: String, networkId: String) {
         lock.lock()
-        ports[path] = nil
+        let gone = ports[path]?.filter { $0.networkId == networkId } ?? []
+        ports[path]?.removeAll { $0.networkId == networkId }
+        if ports[path]?.isEmpty == true { ports[path] = nil }
         lock.unlock()
-        uplink.drop(path: path)
+        for p in gone { uplink.drop(path: path, ip: p.ip) }
+    }
+
+    /// The endpoint a frame from `path` speaks for: the one whose address it is sent from.
+    private func endpoint(_ path: String, _ frame: [UInt8]) -> NetPort? {
+        lock.lock()
+        let card = ports[path] ?? []
+        lock.unlock()
+        guard let eth = Ethernet(frame) else { return nil }
+        let source: UInt32?
+        switch eth.type {
+        case EtherType.arp.rawValue: source = ARP(eth.payload)?.senderIP
+        case EtherType.ipv4.rawValue: source = IPv4Packet(eth.payload)?.src
+        default: source = nil
+        }
+        guard let source else { return nil }
+        return card.first { $0.ip == source }
     }
 
     // MARK: Forwarding
@@ -109,11 +133,10 @@ final class NetSwitch: @unchecked Sendable {
             let path = withUnsafeBytes(of: from.sun_path) { raw in
                 String(decoding: raw.prefix(while: { $0 != 0 }), as: UTF8.self)
             }
-            lock.lock()
-            let port = ports[path]
-            lock.unlock()
-            guard let port else { continue }  // unknown sender: not a pratico NIC
-            handle(Array(buf[0..<n]), from: port)
+            let frame = Array(buf[0..<n])
+            // Unknown senders (not a pratico card) and addresses no endpoint holds are dropped.
+            guard let port = endpoint(path, frame) else { continue }
+            handle(frame, from: port)
         }
     }
 
@@ -147,7 +170,7 @@ final class NetSwitch: @unchecked Sendable {
     /// Same-network delivery by destination MAC; broadcast and multicast flood the network.
     private func forward(_ eth: Ethernet, _ frame: [UInt8], from port: NetPort) {
         lock.lock()
-        let peers = ports.values.filter { $0.networkId == port.networkId && $0.path != port.path }
+        let peers = ports.values.joined().filter { $0.networkId == port.networkId && $0.path != port.path }
         lock.unlock()
         if eth.dst.isMulticast {
             for p in peers { send(frame, to: p) }
@@ -233,7 +256,7 @@ final class NetSwitch: @unchecked Sendable {
     /// An IPv4 packet from beyond the network to a container, fragmented to the MTU.
     func deliver(to port: NetPort, src: UInt32, proto: UInt8, _ payload: [UInt8]) {
         lock.lock()
-        let plugged = ports[port.path] == port
+        let plugged = ports[port.path]?.contains(port) == true
         lock.unlock()
         guard plugged else { return }  // unplugged (hot disconnect) or replugged elsewhere
         for packet in IPv4Packet.fragments(src: src, dst: port.ip, proto: proto, payload: payload, mtu: Self.mtu) {

@@ -118,8 +118,10 @@ public enum ShimHost {
         let container: LinuxContainer
         let interfaces: [SwitchNIC]
         do {
-            interfaces = try spec.nics.slots.indices.map { i in
-                try NICRelay.start(spec.nics.slots[i], switchSocket: spec.switchSocket, primary: i == spec.nics.primary)
+            // One relay per card, which boots with its boot endpoint's address (D-43).
+            interfaces = try spec.nics.cards.indices.map { n in
+                let entry = spec.nics.bootEntry(card: n)
+                return try NICRelay.start(spec.nics.slots[entry], switchSocket: spec.switchSocket, primary: entry == spec.nics.primary)
             }
         } catch {
             return fail("cannot set up networking: \(error)")
@@ -165,12 +167,19 @@ public enum ShimHost {
             trace.mark("container configured")
             try await container.create()
             trace.mark("VM booted, container created")
-            // Spare slots stay link-down until the daemon connects them (`POST /nic`).
-            let spares = spec.nics.slots.indices.filter { spec.nics.slots[$0].isSpare }
-            if !spares.isEmpty {
+            // A card's other networks are more addresses on it; spare cards (VMs from before
+            // D-43) stay link-down until the daemon connects them (`POST /nic`).
+            let nics = spec.nics
+            let boot = Set(nics.cards.indices.map { nics.bootEntry(card: $0) })
+            let extra = nics.slots.indices.filter { !boot.contains($0) && !nics.slots[$0].isSpare }
+            let spares = nics.cards.indices.filter { nics.slots[nics.bootEntry(card: $0)].isSpare }
+            if !extra.isEmpty || !spares.isEmpty {
                 try await container.withVirtualMachineInstance { vm in
                     let agent = try await vm.dialAgent()
-                    for i in spares { try await agent.down(name: "eth\(i)") }
+                    for i in extra {
+                        try await agent.addressAdd(name: "eth\(nics.card(of: i))", address: InterfaceAddress(ipv4Address: try CIDRv4(nics.slots[i].address)))
+                    }
+                    for n in spares { try await agent.down(name: "eth\(n)") }
                     try await agent.close()
                 }
             }
@@ -180,7 +189,7 @@ public enum ShimHost {
         }
         // The VM is up; the process waits for the daemon's `POST /start`, so its ports are
         // bound and it reads as running before its first instruction, as in Docker.
-        trace.mark("spare NICs down")
+        trace.mark("extra addresses, spare NICs down")
         writeJSON(["pid": .int(Int64(getpid())), "status": "created"], to: files.state)
 
         try? FileManager.default.createDirectory(at: files.socket.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -259,7 +268,11 @@ final class ShimControl: Sendable {
         self.files = files
         self.spec = spec
         self.stdin = stdin
-        addresses = GuestAddresses(spec.nics.slots.map(\.address))
+        // What each card holds: its boot address and the extra ones added after create.
+        addresses = GuestAddresses(spec.nics.cards.indices.map { n in
+            spec.nics.slots.indices.filter { spec.nics.card(of: $0) == n && !spec.nics.slots[$0].isSpare }.map { spec.nics.slots[$0].address }
+                + [spec.nics.slots[spec.nics.bootEntry(card: n)].address]
+        })
     }
 
     /// Whether a host path stays inside `dir` once `.`/`..` and symlinks are resolved (the
@@ -389,7 +402,7 @@ final class GuestAddresses: @unchecked Sendable {
     private let lock = NSLock()
     private var held: [Set<String>]
 
-    init(_ boot: [String]) { held = boot.map { [$0] } }
+    init(_ boot: [[String]]) { held = boot.map(Set.init) }
 
     /// True when `address` is new on `slot` (the caller adds it).
     func claim(_ slot: Int, _ address: String) -> Bool {
@@ -409,9 +422,10 @@ extension ShimControl {
     /// Hot connect and disconnect (`docker network connect`), as the guest sees them.
     func nic(_ change: NICChange) throws {
         let slot = change.slot
-        guard spec.nics.slots.indices.contains(slot) else { throw APIError(400, "shim: no NIC slot \(slot)") }
+        guard spec.nics.cards.indices.contains(slot) else { throw APIError(400, "shim: no NIC \(slot)") }
         let name = "eth\(slot)"
         let addresses = addresses
+        let rootfs = "/run/container/\(spec.id)/rootfs"
         try blocking { [container] in
             try await container.withVirtualMachineInstance { vm in
                 let agent = try await vm.dialAgent()
@@ -430,7 +444,15 @@ extension ShimControl {
                 case .down:
                     try await agent.down(name: name)
                 case .route(_, let gateway):
+                    // The primary network changed. Bouncing the link drops its old default
+                    // route (vminitd has no route delete) and keeps its addresses and their
+                    // subnet routes; the new default then takes its source from the
+                    // gateway's subnet. resolv.conf follows: the old gateway's address
+                    // stays on the card, and the switch drops what it sends.
+                    try await agent.down(name: name)
+                    try await agent.up(name: name, mtu: 1500)
                     try await agent.routeAddDefault(name: name, route: DefaultRoute(ipv4Gateway: try IPv4Address(gateway)))
+                    try await agent.configureDNS(config: DNS(nameservers: [gateway]), location: rootfs)
                 }
             }
         }

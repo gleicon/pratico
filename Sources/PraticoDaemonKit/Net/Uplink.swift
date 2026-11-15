@@ -212,18 +212,20 @@ final class Uplink: @unchecked Sendable {
         }
     }
 
-    /// Everything a container NIC had open goes when the container stops.
-    func drop(path: String) {
+    /// Everything a card had open goes when the container stops; with `ip`, only what that
+    /// endpoint had (a network disconnected while the card's other networks stay).
+    func drop(path: String, ip: UInt32? = nil) {
         queue.async { [self] in
-            for (k, f) in udp where k.path == path {
+            let mine = { (k: FlowKey) in k.path == path && (ip == nil || k.srcIP == ip) }
+            for (k, f) in udp where mine(k) {
                 f.source.cancel()
                 udp[k] = nil
             }
-            for (k, c) in tcp where k.path == path {
+            for (k, c) in tcp where mine(k) {
                 c.close(reset: false)
                 tcp[k] = nil
             }
-            inboundUDP = inboundUDP.filter { $0.key.path != path }
+            inboundUDP = inboundUDP.filter { !mine($0.key) }
         }
     }
 

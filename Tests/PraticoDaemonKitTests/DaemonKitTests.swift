@@ -374,13 +374,30 @@ private let grypeSample = Data(#"""
     #expect(try JSONDecoder().decode(NICSlots.self, from: JSONEncoder().encode(current)) == current)
 }
 
-@Test func guestAddressesAreAddedOncePerSlot() {
-    let held = GuestAddresses(["172.17.0.2/16", "169.254.255.2/32"])
+@Test func guestAddressesAreAddedOncePerCard() {
+    let held = GuestAddresses([["172.17.0.2/16"], ["169.254.255.2/32"]])
     #expect(!held.claim(0, "172.17.0.2/16"))
-    #expect(held.claim(1, "172.18.0.3/24"))
-    #expect(!held.claim(1, "172.18.0.3/24"))
-    held.release(1, "172.18.0.3/24")
-    #expect(held.claim(1, "172.18.0.3/24"))
+    #expect(held.claim(0, "172.18.0.3/24"))
+    #expect(!held.claim(0, "172.18.0.3/24"))
+    held.release(0, "172.18.0.3/24")
+    #expect(held.claim(0, "172.18.0.3/24"))
+}
+
+@Test func networksShareOneCard() {
+    let first = ShimNIC(networkId: "a", mac: "02:42:00:00:00:01", address: "172.17.0.2/16", gateway: "172.17.0.1", socket: "/s.0")
+    var nics = NICSlots([first], primary: 0)
+    for n in 1...5 {
+        _ = nics.add(networkId: "n\(n)", address: "172.\(18 + n).0.2/24", gateway: "172.\(18 + n).0.1")
+    }
+    #expect(nics.cards == ["/s.0"] && nics.slots.count == 6)
+    #expect(nics.slots.allSatisfy { $0.mac == first.mac } && nics.card(of: 5) == 0)
+    #expect(nics.cardShared(0))
+    // Losing the primary hands the default route to the next network on the same card.
+    let gone = nics.unbind("a")
+    #expect(gone?.wasPrimary == true && gone?.successor == 1 && nics.bootEntry(card: 0) == 1)
+    let b = nics.add(networkId: "x", address: "10.9.0.2/24", gateway: "10.9.0.1")!
+    nics.revert(b)
+    #expect(nics.slots.count == 6 && nics.primary == 1)
 }
 
 @Test func registryPolicyReadsConfigAndCAs() throws {
@@ -619,4 +636,21 @@ private func emptyDir() throws -> URL {
     #expect(!Filters.pass(f, labels: api) { _, _ in true })
     #expect(Filters.pass(["name": ["a", "b"]], labels: [:]) { _, v in v == "b" })  // OR within a key
     #expect(Filters.isTrue("TRUE") && Filters.isTrue("1") && !Filters.isTrue("0"))
+}
+
+@Test func oneCardCarriesAnAddressPerNetwork() {
+    let mac = MAC.derive("c").description
+    let a = ShimNIC(networkId: "n1", mac: mac, address: "172.18.0.2/24", gateway: "172.18.0.1", socket: "/s.0")
+    let b = ShimNIC(networkId: "n2", mac: mac, address: "172.19.0.2/24", gateway: "172.19.0.1", socket: "/s.0")
+    var nics = NICSlots([a, b], primary: 1)
+    #expect(nics.cards == ["/s.0"])
+    #expect(nics.card(of: 1) == 0)
+    #expect(nics.bootEntry(card: 0) == 1)  // the primary's address boots the card
+    #expect(nics.cardShared(0) && nics.cardShared(1))
+    let added = nics.add(networkId: "n3", address: "172.20.0.2/24", gateway: "172.20.0.1")!
+    #expect(nics.slots.count == 3 && nics.slots[2].socket == "/s.0" && nics.slots[2].mac == mac)
+    nics.revert(added)
+    #expect(nics.slots == [a, b] && nics.primary == 1)
+    _ = nics.unbind("n2")
+    #expect(nics.primary == 0 && !nics.cardShared(0))
 }

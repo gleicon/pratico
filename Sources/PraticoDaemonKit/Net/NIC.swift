@@ -3,8 +3,10 @@ import ContainerizationExtras
 import Foundation
 import Virtualization
 
-/// One NIC slot as the daemon plans it and the shim builds it (part of `NICSlots`).
-/// A spare slot is link-down with no switch port until `docker network connect`.
+/// One network endpoint of a VM: an address on one of its virtual NICs (cards), as the
+/// daemon plans it and the shim builds it (part of `NICSlots`). Since 2026-11-15 a VM has
+/// one card carrying an address per network (D-43); VMs from before have a card per
+/// endpoint, and spare cards link-down with no switch port until `docker network connect`.
 struct ShimNIC: Codable, Sendable, Equatable {
     /// Empty for a spare slot: no switch port, so no frame reaches or leaves it.
     var networkId: String
@@ -13,10 +15,10 @@ struct ShimNIC: Codable, Sendable, Equatable {
     /// it, as the guest cannot delete addresses) or a link-local placeholder.
     var address: String
     var gateway: String
-    /// Where the shim's relay binds; the switch knows the port by this path.
+    /// Where the shim's relay for this endpoint's card binds: endpoints on one card share it.
     var socket: String
 
-    /// Virtualization.framework allows 4 network devices per VM.
+    /// Virtualization.framework allows 4 network devices per VM (one-card-per-network VMs).
     static let slots = 4
 
     /// Containerization gives every NIC an address at boot; a /32 link-local one adds no route.
@@ -32,9 +34,9 @@ struct ShimNIC: Codable, Sendable, Equatable {
     }
 }
 
-/// A VM's NIC slots (`ethN` is slot N) and which one is primary: it holds the default
-/// route, DNS, and the published ports. Virtualization.framework cannot hot-plug NICs,
-/// so a VM boots with `ShimNIC.slots` of them; empty for `--network none`.
+/// A VM's network endpoints and which one is primary: it holds the default route, DNS,
+/// and the published ports. Endpoints sharing a `socket` are addresses on one card;
+/// `ethN` is the Nth card in order of first appearance. Empty for `--network none`.
 struct NICSlots: Codable, Sendable, Equatable {
     var slots: [ShimNIC] = []
     var primary: Int?
@@ -45,6 +47,38 @@ struct NICSlots: Codable, Sendable, Equatable {
     }
 
     var primaryNIC: ShimNIC? { primary.map { slots[$0] } }
+
+    /// The VM's cards, by socket, in order: card N is `ethN`.
+    var cards: [String] {
+        var seen: [String] = []
+        for s in slots where !seen.contains(s.socket) { seen.append(s.socket) }
+        return seen
+    }
+
+    /// The card endpoint `entry` lives on.
+    func card(of entry: Int) -> Int { cards.firstIndex(of: slots[entry].socket) ?? 0 }
+
+    /// The endpoint whose address a card boots with: the primary when it is on that card,
+    /// else the card's first. The others are added once the guest is up.
+    func bootEntry(card n: Int) -> Int {
+        let socket = cards[n]
+        if let p = primary, slots[p].socket == socket { return p }
+        return slots.firstIndex { $0.socket == socket }!
+    }
+
+    /// Whether another bound endpoint shares `entry`'s card (its link must stay up).
+    func cardShared(_ entry: Int) -> Bool {
+        slots.indices.contains { $0 != entry && slots[$0].socket == slots[entry].socket && !slots[$0].isSpare }
+    }
+
+    /// A new endpoint on card 0 (one-card VMs, D-43); `revert` removes it.
+    mutating func add(networkId: String, address: String, gateway: String) -> Binding? {
+        guard let first = slots.first else { return nil }
+        slots.append(ShimNIC(networkId: networkId, mac: first.mac, address: address, gateway: gateway, socket: first.socket))
+        let b = Binding(slot: slots.count - 1, previous: nil, previousPrimary: primary)
+        if primary == nil { primary = b.slot }
+        return b
+    }
 
     /// The slot `docker network connect` binds on a network with subnet `subnet`: one that
     /// last held an address in it (the guest still holds it, and gets it back instead of
@@ -59,7 +93,8 @@ struct NICSlots: Codable, Sendable, Equatable {
     /// What `bind` changed, so `revert` undoes exactly that.
     struct Binding: Sendable {
         var slot: Int
-        var previous: ShimNIC
+        /// nil for an endpoint `add` appended.
+        var previous: ShimNIC?
         var previousPrimary: Int?
     }
 
@@ -74,8 +109,8 @@ struct NICSlots: Codable, Sendable, Equatable {
     }
 
     mutating func revert(_ b: Binding) {
-        slots[b.slot] = b.previous
-        if primary == b.slot { primary = b.previousPrimary }
+        if let previous = b.previous { slots[b.slot] = previous } else { slots.remove(at: b.slot) }
+        primary = b.previousPrimary
     }
 
     /// Unbinds the network's slot, which keeps its address (the guest cannot delete it).
