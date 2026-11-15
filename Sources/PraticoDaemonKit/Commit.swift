@@ -34,7 +34,7 @@ extension ContainerService {
         let imageTree = try RootfsTree.read(cache)
         try withQuietRootfs(rec.id, pause: r.pause) { _, rootfs in
             let changes = RootfsTree.changes(from: imageTree, to: try RootfsTree.read(rootfs))
-            try CommitLayer.write(changes, from: rootfs, to: layer)
+            try CommitLayer.write(changes, from: rootfs, to: layer, maxBytes: Tar.unpackLimit(at: work))
         }
         var config = try Dockerfile.apply(r.changes, to: Self.committedConfig(rec, overrides: r.config))
         config["Image"] = nil
@@ -61,15 +61,20 @@ extension ContainerService {
     }
 }
 
-/// A layer as an uncompressed OCI tar: changed and added entries read from the rootfs,
-/// deletions as `.wh.` whiteouts.
+/// A tar of entries read from a rootfs, streamed a MiB at a time: an uncompressed OCI
+/// layer (changed and added entries, deletions as `.wh.` whiteouts) or a whole export.
+/// The rootfs is the container's, so its file sizes are not trusted: a sparse file can
+/// claim exabytes, and every byte written counts against `maxBytes` (free disk).
 enum CommitLayer {
-    static func write(_ changes: [RootfsTree.Change], from rootfs: URL, to file: URL) throws {
+    static func write(_ changes: [RootfsTree.Change], from rootfs: URL, to file: URL, maxBytes: Int64) throws {
+        guard changes.count <= 2 * RootfsTree.maxEntries else {
+            throw APIError(500, "pratico: more than \(2 * RootfsTree.maxEntries) changes to write")
+        }
         let reader = try EXT4.EXT4Reader(blockDevice: FilePath(rootfs.path))
         let writer = try ArchiveWriter(configuration: ArchiveWriterConfiguration(format: .pax, filter: .none))
         try writer.open(file: file)
         let w = try writer.makeTransactionWriter()
-        precondition(changes.count <= RootfsTree.maxEntries, "more changes than a walk reads")
+        var left = maxBytes
         for change in changes {
             if change.kind == 2 {
                 let parent = (change.path as NSString).deletingLastPathComponent
@@ -82,13 +87,13 @@ enum CommitLayer {
                 try w.writeHeader(entry: entry)
                 try w.finish()
             } else {
-                try add(change.path, reader, w)
+                try add(change.path, reader, w, budget: &left)
             }
         }
         try writer.finishEncoding()
     }
 
-    private static func add(_ path: String, _ reader: EXT4.EXT4Reader, _ w: ArchiveWriterTransaction) throws {
+    private static func add(_ path: String, _ reader: EXT4.EXT4Reader, _ w: ArchiveWriterTransaction, budget left: inout Int64) throws {
         let (_, inode) = try reader.stat(FilePath(path), followSymlinks: false)
         let entry = WriteEntry()
         entry.path = String(path.dropFirst())
@@ -107,6 +112,10 @@ enum CommitLayer {
             try w.writeHeader(entry: entry)
         case CopyUp.fileType:
             let size = UInt64(inode.sizeLow) | (UInt64(inode.sizeHigh) << 32)
+            guard size <= UInt64(max(left, 0)) else {
+                throw APIError(507, "pratico: \(path) holds \(size) bytes, more than the \(max(left, 0)) left for this archive on the Mac's disk")
+            }
+            left -= Int64(size)
             entry.fileType = .regular
             entry.size = Int64(size)
             try w.writeHeader(entry: entry)

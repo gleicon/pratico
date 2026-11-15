@@ -161,7 +161,19 @@ enum RootfsEdit {
 
     static func add(_ files: URL, to rootfs: URL) throws { try rebuild(rootfs, adding: files) }
 
+    /// The largest file a rebuild takes: Containerization's exporter, which keeps extended
+    /// attributes (file capabilities), reads each file whole into memory.
+    static let maxRebuildFile: Int64 = 4 << 30
+
     private static func rebuild(_ rootfs: URL, adding files: URL?) throws {
+        // The rootfs is the container's: sizes are checked before anything is read.
+        let tree = try RootfsTree.read(rootfs)
+        let sizes = tree.values.filter { $0.mode & CopyUp.typeMask == CopyUp.fileType }.map(\.size)
+        let total = sizes.reduce(Int64(0)) { $0 + $1 }
+        let budget = Tar.unpackLimit(at: rootfs.deletingLastPathComponent())
+        guard total <= budget, (sizes.max() ?? 0) <= maxRebuildFile else {
+            throw APIError(507, "pratico: the root filesystem holds \(total) bytes (largest file \(sizes.max() ?? 0)); a rebuild takes at most \(budget) in all and \(maxRebuildFile) per file")
+        }
         let fm = FileManager.default
         let dir = rootfs.deletingLastPathComponent()
         let export = dir.appending(path: "rootfs-export.tar")

@@ -727,6 +727,13 @@ check "image prune removes it" docker image prune -f
 expect_eq "and only it" "$(docker images -q --no-trunc -f dangling=true | wc -l | tr -d ' ') $(docker images -q e2e-committed:v1 | wc -l | tr -d ' ')" "0 1"
 docker rm -f e-cm >/dev/null
 docker rmi e2e-committed:v1 >/dev/null
+# A sparse file that claims a terabyte: export and commit refuse it, the daemon stays up.
+docker run -d --name e-sparse alpine sh -c 'truncate -s 1099511627776 /huge && sync && sleep 300' >/dev/null
+sleep 2
+expect_has "export refuses a file larger than the disk left" "$(docker export e-sparse 2>&1 >/dev/null | head -1)" "more than the"
+expect_has "commit too" "$(docker commit e-sparse e2e-sparse 2>&1)" "more than the"
+check "and the daemon is still up" docker version
+docker rm -f e-sparse >/dev/null
 docker run -d --name e-sig --stop-signal SIGWINCH alpine sh -c 'trap "echo got-winch; exit 0" WINCH; while :; do sleep 0.1; done' >/dev/null
 sleep 0.5
 docker stop e-sig >/dev/null

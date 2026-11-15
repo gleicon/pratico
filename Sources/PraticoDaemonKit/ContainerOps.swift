@@ -64,7 +64,13 @@ extension ContainerService {
     func export(_ ref: String, conn: Connection) throws {
         let tar = try withQuietRootfs(ref) { rec, rootfs -> URL in
             let out = shimFiles(rec.id).dir.appending(path: "export-\(UUID().uuidString).tar")
-            try EXT4.EXT4Reader(blockDevice: FilePath(rootfs.path)).export(archive: FilePath(out.path))
+            // Streamed and bounded, as a commit layer is: the upstream exporter reads each file
+            // whole into memory, and a container can make one that claims exabytes.
+            let all = try RootfsTree.read(rootfs).keys.sorted().map { RootfsTree.Change(path: $0, kind: 1) }
+            do { try CommitLayer.write(all, from: rootfs, to: out, maxBytes: Tar.unpackLimit(at: out.deletingLastPathComponent())) } catch {
+                try? FileManager.default.removeItem(at: out)
+                throw error
+            }
             return out
         }
         defer { try? FileManager.default.removeItem(at: tar) }

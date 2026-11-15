@@ -56,7 +56,7 @@ symlinks, and caps sizes and entry counts.
 
 ## Export and diff
 
-`docker export` writes the root filesystem as a tar. `docker diff` compares it with the
+`docker export` writes the root filesystem as a tar, streamed, without extended attributes. A file larger than the Mac's free disk (a sparse file can claim any size) stops `export` and `commit` with an error. `docker diff` compares it with the
 image's unpacked copy, as Docker lists changes: added, deleted, and changed, a directory
 when something under it changed. `/etc/hosts`, `/etc/hostname`, and `/etc/resolv.conf`,
 which pratico writes, are left out, as Docker leaves them out. For a running container
