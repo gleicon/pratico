@@ -203,6 +203,14 @@ expect_eq "20 MB upload arrives intact" "$(shasum -a 256 "$HOME_DIR/up.bin" | cu
 kill "$WWW_PID" 2>/dev/null
 
 docker network create --internal e-int >/dev/null
+# Compose puts a service on its networks by name; an internal one may sort first.
+docker network create --internal a-int >/dev/null
+docker create --name e-both --network a-int alpine sleep 600 >/dev/null
+docker network connect e-n1 e-both
+docker start e-both >/dev/null
+eventually "on an internal and a normal network, the default route goes out the normal one" docker exec e-both ping -c1 -W3 1.1.1.1
+docker rm -f e-both >/dev/null
+docker network rm a-int >/dev/null
 docker run -d --name e-i1 --network e-int alpine sleep 600 >/dev/null
 docker run -d --name e-i2 --network e-int alpine sleep 600 >/dev/null
 check "internal networks resolve their containers" docker exec e-i1 ping -c1 -W2 e-i2

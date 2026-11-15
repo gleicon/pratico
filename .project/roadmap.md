@@ -111,7 +111,7 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 
 ## Known gaps (found while building, not yet scheduled)
 
-- [ ] More than 4 networks per container (Virtualization.framework allows 4 NICs per VM)
+- [ ] More than 4 networks per container: verified 2026-11-15 that Virtualization.framework refuses a 5th NIC ("The number of network devices is greater than the maximum number supported"), and vminitd has no call to create VLAN interfaces, so carrying extra networks on one NIC needs guest-agent support first. Compose projects, private networks, and up to 4 networks per container work.
 - [ ] IPv6 on pratico-net
 - [x] `docker cp` with a stopped container: read from its ext4 rootfs on the Mac; copies in rewrite the rootfs (no VM), and the container cannot start meanwhile
 - [x] `docker save` of several images at once; `docker load` (OCI archives, Docker 25+); request bodies of `cp` in and `load` stream to disk past the 64 MiB in-memory limit

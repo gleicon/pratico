@@ -348,8 +348,11 @@ final class NetworkService: @unchecked Sendable {
     /// connect. `--network none` gets no NICs at all.
     func allocateNICs(_ rec: ContainerRecord, runDir: URL) throws -> NICSlots {
         let mode = rec.hostConfig["NetworkMode"]?.string ?? ""
+        // Primary first: it carries the default route, so a network that reaches out (not
+        // `--internal`) wins over one that cannot, as in Docker, then `NetworkMode`, then name.
         let nets = active(rec).keys.compactMap { try? resolve($0) }.filter { $0.name != "none" }
             .sorted { a, b in
+                if a.isInternal != b.isInternal { return !a.isInternal }
                 let pa = a.name == mode || a.id == mode, pb = b.name == mode || b.id == mode
                 return pa != pb ? pa : a.name < b.name
             }
