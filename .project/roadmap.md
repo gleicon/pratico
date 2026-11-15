@@ -58,7 +58,13 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 - [ ] Egress intercept: sandwich-proxy engine on container HTTP/HTTPS flows, per-container opt-in, log/replay/HAR/threat feeds
 - [ ] IPv6 on pratico-net: addresses, neighbour discovery, and the uplink (to discuss with Features)
 - [ ] Snapshots that optionally carry volume data (to discuss with Features)
-- [ ] Own guest kernel (last in the Features discussion): a harness that builds the latest Linux LTS (6.18.63 as of 2026-11-15, vs 6.18.56 in Kata 4.3.1) with Kata's kernel configuration inside a Linux VM, reproducibly, pins the result by SHA-256, and ships its GPL source offer; until then the kernel follows Kata's latest release (D-41)
+- [ ] Own VM, self-contained (last in the Features discussion; decided 2026-11-15): pratico stops depending on upstream releases and binaries for what runs in and drives a VM. Containerization (Apache-2.0) is forked whole, host package and guest `vminitd`/`vmexec` at one pinned commit, since both speak one agent protocol; LICENSE, NOTICE, and modified files marked; upstream security fixes merged by us, as for the kernel.
+  - [ ] Build VM: pratico boots a Linux VM on the previous release's pinned kernel and init (bootstrap) and builds inside it, from pinned sources only, then rebuilds once with its own output to check the SHA-256s match (reproducible)
+  - [ ] Own kernel: the latest Linux LTS (6.18.63 as of 2026-11-15, vs 6.18.56 in Kata 4.3.1) with Kata's configuration plus what the items below need (`virtio_balloon`, seccomp filter); GPL source offer shipped; until then the kernel follows Kata's latest release (D-41)
+  - [ ] Own init: `vminitd` and `vmexec` built with Swift's static Linux SDK into `initfs.ext4`
+  - [ ] Seccomp: `vmexec` installs the filter before exec (Docker's default profile, already ported in ContainerizationOCI), default on; `--security-opt seccomp=<file>` applied; `unconfined` accepted. No runc in the guest (fewer parts, no runc CVEs)
+  - [ ] Live limits: `docker update` writes the container's cgroup in the guest (`cpu.max`, `cpu.weight`, `cpuset.cpus`, `memory.max`, `memory.low`, `memory.swap.max`, `pids.max`) within the VM's size; more vCPUs or memory than the VM booted with still needs a restart (Virtualization.framework has no vCPU hotplug, memory cannot grow past boot size)
+  - [ ] Memory balloon: a virtio balloon per VM, so idle VMs give RAM back to the Mac and a lower `--memory` on a running container returns the difference
 - [x] Embedded is the default: the app bundles `pratico-shim`, the kernel and `vminit`; acknowledgements (licenses) in the app and DMG
 - [x] `container` CLI adapter, `/etc/hosts` sync, freezer agent and default-network anchor removed; SPEC and docs updated
 
