@@ -105,6 +105,7 @@ public enum ShimHost {
             return fail("cannot read \(files.spec.path)")
         }
         writeJSON(["pid": .int(Int64(getpid())), "status": "starting"], to: files.state)
+        var trace = Trace("shim \(spec.id)")
 
         let log = LogStore(path: files.log)
         let stdin = spec.openStdin ? StdinStream() : nil
@@ -121,6 +122,7 @@ public enum ShimHost {
             return fail("cannot set up networking: \(error)")
         }
         do {
+            trace.mark("nic relays")
             container = try LinuxContainer(
                 spec.id, rootfs: .block(format: "ext4", source: spec.rootfs, destination: "/"), vmm: vmm,
                 vm: VMResources(cpus: spec.cpus, memoryInBytes: UInt64(spec.memoryMiB).mib() + VMResources.guestMemoryOverhead)
@@ -157,7 +159,9 @@ public enum ShimHost {
                     }
                 }
             }
+            trace.mark("container configured")
             try await container.create()
+            trace.mark("VM booted, container created")
             // Spare slots stay link-down until the daemon connects them (`POST /nic`).
             let spares = spec.nics.slots.indices.filter { spec.nics.slots[$0].isSpare }
             if !spares.isEmpty {
@@ -173,6 +177,7 @@ public enum ShimHost {
         }
         // The VM is up; the process waits for the daemon's `POST /start`, so its ports are
         // bound and it reads as running before its first instruction, as in Docker.
+        trace.mark("spare NICs down")
         writeJSON(["pid": .int(Int64(getpid())), "status": "created"], to: files.state)
 
         try? FileManager.default.createDirectory(at: files.socket.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -194,6 +199,7 @@ public enum ShimHost {
         let go = await withCheckedContinuation { done in
             DispatchQueue.global().async { done.resume(returning: control.awaitStart()) }
         }
+        trace.mark("waited for /start")
         if !go || control.startError.value != nil {
             log.finish()
             server.stop()
@@ -282,6 +288,8 @@ final class ShimControl: Sendable {
                 guard !startOnce.value else { throw APIError(409, "already started") }
                 startOnce.value = true
                 defer { started.signal() }
+                var trace = Trace("shim /start")
+                defer { trace.mark("process started") }
                 do { try blocking { try await c.start() } } catch {
                     startError.value = "\(error)"
                     throw APIError(500, "\(error)")

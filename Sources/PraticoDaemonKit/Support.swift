@@ -102,3 +102,22 @@ final class Box<T>: @unchecked Sendable {
     var value: T
     init(_ value: T) { self.value = value }
 }
+
+/// `PRATICO_TRACE=1`: milliseconds between the steps of a container start, on stderr (the
+/// daemon log and each `shim.log`). Off by default; for finding where time goes.
+struct Trace {
+    static let on = ProcessInfo.processInfo.environment["PRATICO_TRACE"] != nil
+    let label: String
+    private let start = Date()
+    private var last = Date()
+
+    init(_ label: String) { self.label = label }
+
+    mutating func mark(_ step: String) {
+        guard Self.on else { return }
+        let now = Date()
+        FileHandle.standardError.write(Data(String(format: "trace %@ %@ +%.1f ms (%.1f)\n", label, step,
+            now.timeIntervalSince(last) * 1000, now.timeIntervalSince(start) * 1000).utf8))
+        last = now
+    }
+}

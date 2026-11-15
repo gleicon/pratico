@@ -333,10 +333,14 @@ public final class ContainerService: @unchecked Sendable {
         lock.unlock()
         log.tailExternalWriter()
         let pid: pid_t
+        var trace = Trace("start \(rec.appleId)")
+        trace.mark("spec written")
+        defer { trace.mark("start returned") }
         do { pid = try embedded.shim.spawn(files) } catch {
             networks.stopped(rec.id)
             throw error
         }
+        trace.mark("shim reported created")
         networks.attach(rec, nics)
         do {
             let ports = try networks.publish(rec, nics)
@@ -356,7 +360,9 @@ public final class ContainerService: @unchecked Sendable {
         // does, instead of reporting a container that exited at once.
         var failure = ShimClient.exitStatus(files)?.error ?? ""
         if failure.isEmpty {
+            trace.mark("networks attached, ports published, recorded running")
             do { try embedded.shim.call(files, "POST", "/start") } catch let e as APIError { failure = e.message } catch { failure = "\(error)" }
+            trace.mark("shim started the process")
         }
         if !failure.isEmpty {
             awaitExit(rec.id, seconds: 5)
