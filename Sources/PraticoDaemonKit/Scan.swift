@@ -199,7 +199,14 @@ final class ScanService: @unchecked Sendable {
     static let kevURL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
     static let rescanInterval: TimeInterval = 24 * 3600
 
+    let home: URL
+    /// `scan_allow`, normalized to full IDs; grows when the menubar allows an image.
+    private var allowed: Set<String>
+    private let allowLock = NSLock()
+
     init(home: URL, images: ImageService, containers: ContainerService, config: Config, events: EventBus, alerts: AlertLog) {
+        self.home = home
+        allowed = Set(config.scanAllow.map { $0.hasPrefix("sha256:") ? $0 : "sha256:" + $0 })
         self.images = images
         self.containers = containers
         self.config = config
@@ -266,12 +273,38 @@ final class ScanService: @unchecked Sendable {
 
     private func gateReason(_ r: ScanReport) -> String? {
         let (verdict, reasons) = ScanVerdict.judge(r.findings, ran: r.scanners.contains(where: \.ran), block: config.scanBlock)
-        guard verdict == .serious, !config.scanAllow.contains(r.imageId),
-            !config.scanAllow.contains(String(r.imageId.dropFirst(7)))
-        else { return nil }
+        guard verdict == .serious, !isAllowed(r.imageId) else { return nil }
         let name = ImageRef.displayName(refs: r.refs, id: r.imageId)
         return "image \(name) is blocked by pratico's scan: \(reasons.prefix(3).joined(separator: "; ")). "
-            + "Add \"\(r.imageId)\" to scan_allow in ~/.pratico/config.toml to run it anyway."
+            + "Allow it in the menubar's Scan Results, or add \"\(r.imageId)\" to scan_allow in ~/.pratico/config.toml, to run it anyway."
+    }
+
+    func isAllowed(_ imageId: String) -> Bool {
+        allowLock.lock()
+        defer { allowLock.unlock() }
+        return allowed.contains(imageId)
+    }
+
+    /// `POST /pratico/scans/{id}/allow` (the menubar's Allow This Image…): the image may
+    /// run despite its findings, at once and after restarts, as `scan_allow` in
+    /// config.toml, where the rest of the file is kept as it is. Its alert is cleared.
+    func allow(_ ref: String) throws {
+        guard let img = images.resolve(ref)?.image else { throw APIError(404, "No such image: \(ref)") }
+        allowLock.lock()
+        defer { allowLock.unlock() }
+        guard !allowed.contains(img.id) else { return }
+        let file = Config.path(home: home)
+        let text = (try? String(contentsOf: file, encoding: .utf8)) ?? ""
+        let current = ((try? Config.parse(text))?.scanAllow ?? []).filter { !$0.isEmpty }
+        do {
+            try Config.setting("scan_allow", to: .strings(current + [img.id]), in: text).write(to: file, atomically: true, encoding: .utf8)
+        } catch {
+            throw APIError(500, "cannot update \(file.path): \(error)")
+        }
+        allowed.insert(img.id)
+        setBlocked(img.id, nil)
+        alerts.resolve(key: "image:\(img.id)")
+        events.touch()
     }
 
     // MARK: Scanning
@@ -300,6 +333,7 @@ final class ScanService: @unchecked Sendable {
                 out["Verdict"] = .string(verdict.rawValue)
                 out["Reasons"] = JSON(reasons)
                 out["Blocked"] = .bool(blockReason(imageId: img.id) != nil)
+                out["Allowed"] = .bool(isAllowed(img.id))
             }
             return .object(out)
         })

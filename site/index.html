@@ -155,7 +155,7 @@
     </a>
     <nav aria-label="Sections">
       <ul>
-        <li><a href="#why">Why a VM each</a></li>
+        <li><a href="#why">Isolation</a></li>
         <li><a href="#compatible">Compatible</a></li>
         <li><a href="#network">Networking</a></li>
         <li><a href="#protect">Security</a></li>
@@ -201,21 +201,21 @@
   <section id="why" aria-labelledby="why-h">
     <div class="wrap">
       <div class="head">
-        <p class="kicker">The obvious question</p>
-        <h2 id="why-h">"Isn't one shared VM faster and lighter?"</h2>
-        <p>Per container, yes: a process in a shared VM costs less than a VM of its own. Here is what pratico costs, measured, and what you get for it.</p>
+        <p class="kicker">One VM per workload</p>
+        <h2 id="why-h">Real isolation, at the cost of a container</h2>
+        <p>A shared VM looks lighter on paper, but it runs all day whether you use it or not, and every container in it shares one kernel. Pratico starts a small VM only for what you run, in well under a second, and gives everything back when it stops.</p>
       </div>
       <dl class="stats">
-        <div><dt>From run to running</dt><dd>≈ 400 ms</dd></div>
+        <div><dt>Start a container</dt><dd>≈ 400 ms</dd></div>
+        <div><dt>With nothing running</dt><dd>0 VMs</dd></div>
         <div><dt>Memory per idle container</dt><dd>≈ 200 MB</dd></div>
-        <div><dt>With nothing running</dt><dd>no VM at all</dd></div>
         <div><dt>Daemon, 32 containers running</dt><dd>48 MB</dd></div>
       </dl>
       <div class="claims spaced">
-        <div><h3>Nothing idle in the background</h3><p>A shared VM keeps its memory while it is up, whether you run one container or none. Here, stopping a container ends its VM and gives all of its memory back.</p></div>
-        <div><h3>Limits the hypervisor enforces</h3><p>Memory and CPU limits are the size of the VM, set by macOS, not by settings inside a kernel every container shares.</p></div>
+        <div><h3>Pay only for what runs</h3><p>No background VM holding gigabytes while you work on something else. Stop a container and its VM ends, with all of its memory back on your Mac.</p></div>
         <div><h3>One workload cannot reach another</h3><p>No shared kernel, no shared process table, no files in common unless you share a volume. A crash, a runaway process, or a breakout stays in its own VM.</p></div>
-        <div><h3>Fast where you feel it</h3><p>CPU runs natively on Apple silicon, each root file system is a disk image of its own, and control calls answer in under 2 ms with 100 containers.</p></div>
+        <div><h3>Limits the hypervisor enforces</h3><p>Memory and CPU limits are the size of each VM, set by macOS, not settings inside a kernel every container shares.</p></div>
+        <div><h3>Fast where you feel it</h3><p>CPU runs natively on Apple silicon, each root file system is its own disk image, and control calls answer in under 2 ms with 100 containers.</p></div>
       </div>
     </div>
   </section>
@@ -298,7 +298,7 @@
         <div>
           <h3>What happens with the results</h3>
           <ul class="outcomes">
-            <li class="stop"><strong>Malware or an exploited flaw.</strong> The image is blocked, its containers stop, and a notification says why. You can allow an image you trust.</li>
+            <li class="stop"><strong>Malware or an exploited flaw.</strong> The image is blocked, its containers stop, and a notification says why. One click in Scan Results allows an image you trust, after showing what was found.</li>
             <li class="warn"><strong>Critical or high findings.</strong> The menubar shield changes, and Scan Results lists each one, which scanner found it, and the versions that fix it.</li>
             <li><strong>Medium and low.</strong> Listed, never in your way. You choose what blocks in Settings.</li>
           </ul>

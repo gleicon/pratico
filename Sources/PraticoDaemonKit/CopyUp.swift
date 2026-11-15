@@ -12,6 +12,28 @@ enum CopyUp {
     static let fileType: UInt16 = 0o100000
     static let linkType: UInt16 = 0o120000
     static let chunk = 4 << 20
+    /// The rootfs is untrusted (a container writes it): a link target past PATH_MAX is not one.
+    static let maxLinkTarget = 4096
+
+    /// What one copy may write to the Mac, counted as it goes.
+    final class Budget {
+        let maxBytes: Int64
+        let maxEntries: Int
+        var bytes: Int64 = 0
+        var entries = 0
+        init(maxBytes: Int64, maxEntries: Int = 1_000_000) {
+            self.maxBytes = maxBytes
+            self.maxEntries = maxEntries
+        }
+        func entry() throws {
+            entries += 1
+            guard entries <= maxEntries else { throw APIError(400, "more than \(maxEntries) files to copy") }
+        }
+        func bytes(_ n: Int) throws {
+            bytes += Int64(n)
+            guard bytes <= maxBytes else { throw APIError(400, "more than \(maxBytes >> 20) MiB to copy") }
+        }
+    }
 
     /// Copies what `rootfs` holds under `path` into `dest`, an empty directory: directories,
     /// regular files, and symlinks, with their permission bits. Ownership stays the Mac
@@ -26,7 +48,7 @@ enum CopyUp {
         let root = open(dest.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard root >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         defer { close(root) }
-        try walk(reader, FilePath(path), root, depth: 0)
+        try walk(reader, FilePath(path), root, depth: 0, Budget(maxBytes: Tar.unpackLimit(at: dest)))
     }
 
     static let maxDepth = 64
@@ -42,7 +64,7 @@ enum CopyUp {
         let root = open(dest.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard root >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         defer { close(root) }
-        try entry(reader, FilePath(path), root, name, depth: 0)
+        try entry(reader, FilePath(path), root, name, depth: 0, Budget(maxBytes: Tar.unpackLimit(at: dest)))
     }
 
     /// `lstat` of a path in the rootfs: size, mode bits, mtime, link target.
@@ -57,21 +79,23 @@ enum CopyUp {
         // Targets under 60 bytes live in the inode itself (ext4 fast symlinks); longer
         // ones are read as the link's data.
         let size = Int(inode.sizeLow)
+        guard inode.sizeHigh == 0, size <= maxLinkTarget else { return nil }
         if size < 60 { return withUnsafeBytes(of: inode.block) { String(bytes: $0.prefix(size), encoding: .utf8) } }
         return (try? reader.readFile(at: src, count: size, followSymlinks: false)).flatMap { String(data: $0, encoding: .utf8) }
     }
 
-    private static func walk(_ reader: EXT4.EXT4Reader, _ dir: FilePath, _ parent: Int32, depth: Int) throws {
+    private static func walk(_ reader: EXT4.EXT4Reader, _ dir: FilePath, _ parent: Int32, depth: Int, _ budget: Budget) throws {
         guard depth < maxDepth else { throw APIError(500, "copy-up: \(dir) nests too deeply") }
         for name in try reader.listDirectory(dir) {
             // One plain component, never a path: the entry is made in `parent` itself.
             guard !name.isEmpty, name != ".", name != "..", !name.contains("/") else { continue }
-            try entry(reader, dir.appending(name), parent, name, depth: depth)
+            try entry(reader, dir.appending(name), parent, name, depth: depth, budget)
         }
     }
 
     /// One entry from the rootfs made as `name` in `parent`, never following a link.
-    private static func entry(_ reader: EXT4.EXT4Reader, _ src: FilePath, _ parent: Int32, _ name: String, depth: Int) throws {
+    private static func entry(_ reader: EXT4.EXT4Reader, _ src: FilePath, _ parent: Int32, _ name: String, depth: Int, _ budget: Budget) throws {
+        try budget.entry()
         let (_, inode) = try reader.stat(src, followSymlinks: false)
         let perms = mode_t(inode.mode & 0o7777)
         switch inode.mode & typeMask {
@@ -80,7 +104,7 @@ enum CopyUp {
             let fd = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
             guard fd >= 0 else { throw fail("open \(src)") }
             defer { close(fd) }
-            try walk(reader, src, fd, depth: depth + 1)
+            try walk(reader, src, fd, depth: depth + 1, budget)
             fchmod(fd, perms)
         case fileType:
             let fd = openat(parent, name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
@@ -88,6 +112,7 @@ enum CopyUp {
             let h = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
             var offset: UInt64 = 0
             while case let data = try reader.readFile(at: src, offset: offset, count: chunk, followSymlinks: false), !data.isEmpty {
+                try budget.bytes(data.count)
                 try h.write(contentsOf: data)
                 offset += UInt64(data.count)
             }

@@ -471,6 +471,18 @@ was=$(blocked)
 docker rmi -f busybox:uclibc >/dev/null
 check "a removed image's scan report goes with it" test ! -e "$HOME_DIR/scans/${uclibc#sha256:}.json"
 expect_eq "and it stops counting as blocked" "$(blocked)" "$((was - 1))"
+# Allow This Image…: unblocked at once, kept in config.toml, other settings untouched.
+docker pull busybox:uclibc >/dev/null 2>&1
+docker create --name e2e-allow busybox:uclibc true >/dev/null
+for _ in $(seq 100); do docker start e2e-allow 2>&1 | grep -q MAL-CUSTOM-1 && break; sleep 0.1; done
+uclibc=$(docker image inspect busybox:uclibc --format '{{.Id}}')
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST --unix-socket "$SOCK" "http://d/pratico/scans/$uclibc/allow")
+expect_eq "allowing a blocked image answers 204" "$code" "204"
+check "and its container starts at once" docker start e2e-allow
+check "the allow is kept in config.toml" grep -qF "scan_allow = [\"$uclibc\"]" "$HOME_DIR/config.toml"
+expect_has "next to the settings already there" "$(cat "$HOME_DIR/config.toml")" "scan_custom"
+check "scan results say it is allowed" python3 -c "import json,sys; r={t: i for i in json.loads(sys.argv[1]) for t in i['Tags']}['busybox:uclibc']; assert r['Allowed'] and not r['Blocked']" "$(curl -s --unix-socket "$SOCK" http://d/pratico/scans)"
+docker rm -f e2e-allow >/dev/null
 rm -f "$HOME_DIR/config.toml"
 
 docker rm -f $(docker ps -aq) >/dev/null 2>&1

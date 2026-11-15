@@ -187,6 +187,10 @@ public final class Daemon: @unchecked Sendable {
         case ("POST", "pratico") where parts.count == 2 && parts[1] == "scans":
             conn.json(202, scans.rescanAll())
             return .keepAlive
+        case ("POST", "pratico") where parts.count == 4 && parts[1] == "scans" && parts[3] == "allow":
+            try scans.allow(parts[2])
+            conn.respond(204)
+            return .keepAlive
         case ("GET", "pratico") where parts.count == 2 && parts[1] == "scanners":
             conn.json(200, scans.doctor())
             return .keepAlive

@@ -100,6 +100,22 @@ extension DaemonController {
     /// Off while a scan runs (another would only queue the same images) or scanning is off.
     var canScanNow: Bool { scanners?.enabled != false && (scanSummary?.Scanning ?? 0) == 0 }
 
+    /// Asks, naming what was found, then adds the image to `scan_allow` through the daemon,
+    /// which unblocks it at once and keeps it allowed after restarts.
+    func allowImage(_ r: ScanResult) {
+        let reasons = (r.Reasons ?? []).prefix(5).map { "• " + $0 }.joined(separator: "\n")
+        guard confirm("Allow \(r.Name) to run?",
+                      "Pratico blocked it for:\n\(reasons)\n\nContainers from this image will start despite these findings. Only allow images you trust. You can remove it from Settings › Scanning (scan_allow).",
+                      button: "Allow")
+        else { return }
+        Task {
+            let id = r.Id
+            let response = await Task.detached { DaemonProbe.request("POST", "/pratico/scans/\(id)/allow", timeout: 10) }.value
+            if let response, response.status >= 400 { error = "Allow \(r.Name): " + String(decoding: response.body, as: UTF8.self) }
+            await refreshScanSummary()
+        }
+    }
+
     /// Homebrew commands for what is missing, or how to get Homebrew, or each project's page.
     func showScannerInstall() {
         guard let r = scanners else { return }

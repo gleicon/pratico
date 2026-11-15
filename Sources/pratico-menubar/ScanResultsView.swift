@@ -38,6 +38,8 @@ struct ScanResult: Decodable, Identifiable, Equatable {
     var Verdict: String?
     var Reasons: [String]?
     var Blocked: Bool?
+    /// In `scan_allow`: runs despite its findings.
+    var Allowed: Bool?
     var Report: Report?
 
     var id: String { Id }
@@ -113,7 +115,15 @@ struct ScanResultsView: View {
 
     @ViewBuilder private func detail(_ r: ScanResult) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(r.Name).font(.title2)
+            HStack {
+                Text(r.Name).font(.title2)
+                Spacer()
+                if r.Blocked == true {
+                    Button("Allow This Image…") { daemon.allowImage(r) }
+                        .help("Let containers from this image run despite its findings")
+                }
+            }
+            if r.Allowed == true { Text("Allowed to run despite its findings (scan_allow)").foregroundStyle(.secondary) }
             if r.Scanning { Text("Scanning…").foregroundStyle(.secondary) }
             if let report = r.Report {
                 Text("Scanned \(report.time.formatted(date: .abbreviated, time: .shortened))").foregroundStyle(.secondary)
