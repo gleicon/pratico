@@ -717,3 +717,11 @@ private func emptyDir() throws -> URL {
     #expect(try RunOptions.bytes("10m") == 10_485_760 && RunOptions.bytes("1g") == 1 << 30 && RunOptions.bytes("512") == 512 && RunOptions.bytes("64kb") == 65_536)
     #expect(RunOptions.cpuList("0-2,4") == [0, 1, 2, 4] && RunOptions.cpuList("2-1") == nil && RunOptions.cpuList("a") == nil)
 }
+
+@Test func logWindowBoundsByUnixSeconds() throws {
+    let w = try LogWindow(since: "100.5", until: "200")
+    #expect(w.contains(Date(timeIntervalSince1970: 150)) && !w.contains(Date(timeIntervalSince1970: 100)) && !w.contains(Date(timeIntervalSince1970: 201)))
+    #expect(try LogWindow(since: "0", until: nil) == LogWindow(since: nil, until: nil))
+    #expect(throws: APIError.self) { try LogWindow(since: "10m", until: nil) }
+    #expect(throws: APIError.self) { try LogWindow(since: "300", until: "200") }
+}

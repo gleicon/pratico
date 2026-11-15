@@ -36,7 +36,9 @@ vminitd ───────── guest init and agent: processes, exec, cp, s
   [run options](run-options.md#restart-policies).
 - **pause** pauses the whole VM: its vCPUs stop, not just a cgroup.
 - **exec**, **cp**, **stats**, and healthchecks go through the agent; images need no
-  shell or tools for them.
+  shell or tools for them. An exec has the container's capabilities and limits.
+- **logs** keep timestamps per line: `--since`, `--until`, `--tail`, and `-f` (which
+  ends at `--until`).
 
 Shims outlive the daemon. A daemon restart, upgrade, or crash reconnects to every
 running shim; output goes to files the shim writes, and exit codes are kept in

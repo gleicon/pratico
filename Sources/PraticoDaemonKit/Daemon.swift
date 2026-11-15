@@ -194,8 +194,8 @@ public final class Daemon: @unchecked Sendable {
     private func routeContainers(_ m: String, _ p: [String], _ req: Request, _ conn: Connection) throws -> Disposition? {
         switch (m, p.count, p.last) {
         case ("GET", 1, "json"):
-            let all = req.flag("all")
-            conn.json(200, .array(containers.list(all: all, filters: ContainerService.parseFilters(req.query["filters"]))))
+            let list = containers.list(all: req.flag("all"), filters: ContainerService.parseFilters(req.query["filters"]))
+            conn.json(200, .array(req.flag("size") ? disk.sized(list) : list))
         case ("POST", 1, "create"):
             guard let body = JSON.parse(req.body) else { throw APIError(400, "invalid JSON body") }
             let rec = try containers.create(name: req.query["name"], body: body)
@@ -204,7 +204,8 @@ public final class Daemon: @unchecked Sendable {
             try containers.remove(p[0], force: req.flag("force"), volumes: req.flag("v"))
             conn.respond(204)
         case ("GET", 2, "json"):
-            conn.json(200, containers.inspect(try containers.resolve(p[0])))
+            let view = containers.inspect(try containers.resolve(p[0]))
+            conn.json(200, req.flag("size") ? disk.sized([view])[0] : view)
         case ("POST", 2, "start"):
             conn.respond(try containers.start(p[0]) ? 204 : 304)
             stats.wake()

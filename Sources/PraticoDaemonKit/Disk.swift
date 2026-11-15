@@ -141,6 +141,23 @@ struct DiskService {
         }
     }
 
+    /// Container summaries or inspects with Docker's `SizeRw` (what the container wrote)
+    /// and `SizeRootFs` (that plus its image): `ps --size`, `inspect --size`, `system df`.
+    func sized(_ items: [JSON]) -> [JSON] {
+        let sizes = Dictionary(uniqueKeysWithValues: imageUse().items.map { ($0.image.id, $0.size) })
+        return Self.sized(items, containerUse(), imageSizes: sizes)
+    }
+
+    private static func sized(_ items: [JSON], _ use: [ContainerUse], imageSizes: [String: Int64]) -> [JSON] {
+        let byId = Dictionary(uniqueKeysWithValues: use.map { ($0.record.id, $0) })
+        return items.map { item in
+            guard var s = item.object, let id = s["Id"]?.string, let c = byId[id] else { return item }
+            s["SizeRw"] = .int(c.rootfs)
+            s["SizeRootFs"] = .int(c.rootfs + (imageSizes[c.record.imageId] ?? 0))
+            return .object(s)
+        }
+    }
+
     /// `GET /pratico/disk`: the menubar's Disk menu.
     func usage() -> JSON {
         let use = imageUse()
@@ -213,12 +230,7 @@ struct DiskService {
             return s
         }
         let ctrs = containerUse()
-        let containerItems: [JSON] = ctrs.map { c in
-            var s = containers.summary(c.record)
-            s["SizeRw"] = .int(c.rootfs)
-            s["SizeRootFs"] = .int(c.rootfs + (sizes[c.record.imageId] ?? 0))
-            return s
-        }
+        let containerItems = Self.sized(ctrs.map { containers.summary($0.record) }, ctrs, imageSizes: sizes)
         let unusedImages = imgs.filter { $0.containers == 0 }
         let stopped = ctrs.filter { !$0.record.state.running }
         let empty: JSON = ["ActiveCount": 0, "TotalCount": 0, "TotalSize": 0, "Reclaimable": 0, "Items": []]

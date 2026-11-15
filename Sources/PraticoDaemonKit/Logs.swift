@@ -7,6 +7,34 @@ struct LogLine: Sendable {
     var data: Data  // includes the trailing newline when present
 }
 
+/// `docker logs --since` and `--until`: Unix seconds, with an optional fraction, as the
+/// CLI sends them (it turns durations and RFC 3339 times into that). `0` or absent is no
+/// bound.
+struct LogWindow: Equatable {
+    var since: Date?
+    var until: Date?
+
+    init(since: String?, until: String?) throws {
+        self.since = try Self.bound(since, "since")
+        self.until = try Self.bound(until, "until")
+        if let a = self.since, let b = self.until, a > b {
+            throw APIError(400, "since (\(since ?? "")) is after until (\(until ?? ""))")
+        }
+    }
+
+    private static func bound(_ raw: String?, _ name: String) throws -> Date? {
+        guard let raw, !raw.isEmpty else { return nil }
+        guard let seconds = Double(raw), seconds.isFinite, seconds >= 0 else {
+            throw APIError(400, "invalid value for \(name): \(raw)")
+        }
+        return seconds == 0 ? nil : Date(timeIntervalSince1970: seconds)
+    }
+
+    func contains(_ time: Date) -> Bool {
+        (since.map { time >= $0 } ?? true) && (until.map { time <= $0 } ?? true)
+    }
+}
+
 /// Per-container log: an append-only file of framed lines plus live followers.
 /// Frame layout: stream (1 byte) · unix time (Float64, 8 bytes LE) · length (UInt32 LE) · bytes.
 /// Capped (SPEC NFR-11): when `log` reaches half the cap it becomes `log.1`, replacing

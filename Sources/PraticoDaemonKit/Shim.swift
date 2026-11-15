@@ -262,21 +262,36 @@ public enum ShimHost {
         return DNS(nameservers: servers, searchDomains: r?.search ?? [], options: r?.options ?? [])
     }
 
-    /// The process and cgroup side of the run options (D-45).
+    /// What a process in the container may do: the container's capabilities (every one
+    /// with `privileged`, as `docker exec --privileged`), `no_new_privs`, rlimits, and
+    /// groups. Execs and healthchecks get the same as the container's own process, as on
+    /// Docker; without this an exec in a `--cap-drop ALL` container had the default set.
+    static func secure(_ process: inout LinuxProcessConfiguration, _ o: RunOptions?, privileged: Bool) throws {
+        if privileged {
+            process.capabilities = .allCapabilities
+        } else if let caps = o?.capabilities {
+            process.capabilities = LinuxCapabilities(capabilities: try caps.map { try CapabilityName(rawValue: $0) })
+        }
+        guard let o else { return }
+        process.noNewPrivileges = o.noNewPrivileges
+        process.rlimits = try o.ulimits.map { LinuxRLimit(kind: try LinuxRLimit.Kind($0.kind), hard: $0.hard, soft: $0.soft) }
+        process.user.additionalGids = o.groups.map { g in
+            guard let gid = UInt32(g) else { preconditionFailure("group \(g) reached the shim unresolved") }
+            return gid
+        }
+    }
+
+    /// The container side of the run options (D-45): cgroup, sysctls, init, `/proc`
+    /// masking, `/dev/shm`, and its process's security.
     static func apply(_ o: RunOptions, to config: inout LinuxContainer.Configuration) throws {
         config.unified = o.cgroup
         config.sysctl = o.sysctls
         config.useInit = o.useInit
-        if let caps = o.capabilities {
-            config.process.capabilities = LinuxCapabilities(capabilities: try caps.map { try CapabilityName(rawValue: $0) })
-        }
         if o.unmaskedPaths {
             config.maskedPaths = []
             config.readonlyPaths = []
         }
-        config.process.noNewPrivileges = o.noNewPrivileges
-        config.process.rlimits = try o.ulimits.map { LinuxRLimit(kind: try LinuxRLimit.Kind($0.kind), hard: $0.hard, soft: $0.soft) }
-        config.process.user.additionalGids = o.groups.compactMap(UInt32.init)
+        try secure(&config.process, o, privileged: false)
         if let shm = o.shmBytes, let i = config.mounts.firstIndex(where: { $0.destination == "/dev/shm" }) {
             config.mounts[i].options = config.mounts[i].options.filter { !$0.hasPrefix("size=") } + ["size=\(shm / 1024)k"]
         }
@@ -513,6 +528,7 @@ extension ShimControl {
                 cfg.environmentVariables = spec.environment
                 cfg.workingDirectory = spec.workingDirectory.isEmpty ? "/" : spec.workingDirectory
                 cfg.user = ShimHost.user(spec.user)
+                try ShimHost.secure(&cfg, spec.options, privileged: false)
                 cfg.stdout = output
                 cfg.stderr = output
             }
@@ -602,6 +618,8 @@ extension ShimControl {
         let env = spec.environment + (body["env"]?.strings ?? [])
         let workdir = body["workdir"]?.string.flatMap { $0.isEmpty ? nil : $0 } ?? (spec.workingDirectory.isEmpty ? "/" : spec.workingDirectory)
         let user = body["user"]?.string.flatMap { $0.isEmpty ? nil : $0 } ?? spec.user
+        let privileged = body["privileged"]?.bool ?? false
+        let options = spec.options
         let c = container
         let process = try blocking {
             try await c.exec(id) { cfg in
@@ -609,6 +627,7 @@ extension ShimControl {
                 cfg.environmentVariables = env
                 cfg.workingDirectory = workdir
                 cfg.user = ShimHost.user(user)
+                try ShimHost.secure(&cfg, options, privileged: privileged)
                 cfg.terminal = tty
                 cfg.stdin = input
                 let out: any Writer = wantStdout ? ConnWriter(conn: conn, stream: 1, raw: tty) : NullWriter()

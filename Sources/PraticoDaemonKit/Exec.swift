@@ -12,6 +12,8 @@ final class ExecInstance: @unchecked Sendable {
     let env: [String]
     let workdir: String
     let user: String
+    /// `docker exec --privileged`: every capability for this process.
+    let privileged: Bool
 
     let lock = NSLock()
     var running = false
@@ -30,6 +32,7 @@ final class ExecInstance: @unchecked Sendable {
         env = body["Env"]?.strings ?? []
         workdir = body["WorkingDir"]?.string ?? ""
         user = body["User"]?.string ?? ""
+        privileged = body["Privileged"]?.bool ?? false
     }
 }
 
@@ -88,7 +91,7 @@ final class ExecService: @unchecked Sendable {
         let files = containers.shimFiles(rec.id)
         var req: [String: JSON] = [
             "id": .string(e.id), "args": JSON(e.cmd), "env": JSON(e.env), "workdir": .string(e.workdir),
-            "user": .string(e.user), "tty": .bool(e.tty), "stdin": .bool(e.attachStdin && !detach),
+            "user": .string(e.user), "privileged": .bool(e.privileged), "tty": .bool(e.tty), "stdin": .bool(e.attachStdin && !detach),
             "stdout": .bool(e.attachStdout && !detach), "stderr": .bool(e.attachStderr && !detach),
         ]
         if let size = body["ConsoleSize"]?.array, size.count == 2 {
@@ -171,7 +174,7 @@ final class ExecService: @unchecked Sendable {
             "ExitCode": e.exitCode.map { .int(Int64($0)) } ?? .null,
             "ProcessConfig": [
                 "tty": .bool(e.tty), "entrypoint": .string(e.cmd.first ?? ""),
-                "arguments": JSON(Array(e.cmd.dropFirst())), "privileged": false, "user": .string(e.user),
+                "arguments": JSON(Array(e.cmd.dropFirst())), "privileged": .bool(e.privileged), "user": .string(e.user),
             ],
             "OpenStdin": .bool(e.attachStdin),
             "OpenStdout": .bool(e.attachStdout),

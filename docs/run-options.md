@@ -38,6 +38,9 @@ Docker CLI sends by default (zero, empty, `private`) are accepted.
 
 Image `USER`, `STOPSIGNAL`, `EXPOSE`, and labels apply unless the request overrides them.
 
+`docker exec` and healthchecks run with the container's capabilities, `no-new-privileges`,
+ulimits, and groups; `docker exec --privileged` gets every capability for that process.
+
 ### Restart policies
 
 A container that exits is started again when its policy says so, after a delay that

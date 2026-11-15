@@ -56,9 +56,11 @@ symlinks, and caps sizes and entry counts.
 
 ## Disk use
 
-`docker system df` and the menubar's Disk menu count allocated blocks: each image's
-unpacked copy once, each container's rootfs by the blocks it owns (not those shared
-with the image), logs, volumes, and scan data. The menu's cleanup actions list what
+`docker system df`, `docker ps --size`, `docker inspect --size`, and the menubar's Disk
+menu count allocated blocks: each image's unpacked copy once, each container's rootfs
+by the blocks it owns (not those shared with the image), logs, volumes, and scan data.
+A running container's writes count once its kernel has flushed them to its disk image,
+which Linux does within 30 seconds, or at `sync`. The menu's cleanup actions list what
 they remove, ask, then call the matching prune endpoint. Prune filters: `until`,
 `label`, `label!`.
 

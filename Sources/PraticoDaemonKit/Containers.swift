@@ -1,4 +1,5 @@
 import Foundation
+import os
 import PraticoCore
 
 /// Labels marking what pratico created (SPEC FR-27).
@@ -743,12 +744,14 @@ public final class ContainerService: @unchecked Sendable {
         let wantOut = query.flag("stdout")
         let wantErr = query.flag("stderr")
         let stamps = query.flag("timestamps")
-        let follow = query.flag("follow") && rec.state.running
+        let window = try LogWindow(since: query.query["since"], until: query.query["until"])
+        // Following stops at `until`; one already past is a plain read.
+        let follow = query.flag("follow") && rec.state.running && (window.until.map { $0 > Date() } ?? true)
         let tail = query.query["tail"].flatMap(Int.init)
         let tty = rec.tty
 
         @Sendable func encode(_ l: LogLine) -> Data? {
-            guard (l.stream == 1 && wantOut) || (l.stream == 2 && wantErr) else { return nil }
+            guard (l.stream == 1 && wantOut) || (l.stream == 2 && wantErr), window.contains(l.time) else { return nil }
             var payload = l.data
             if stamps { payload = Data((Timestamp.format(l.time) + " ").utf8) + payload }
             return tty ? payload : StdCopy.frame(stream: l.stream, payload)
@@ -760,17 +763,24 @@ public final class ContainerService: @unchecked Sendable {
             return
         }
         let done = DispatchSemaphore(value: 0)
+        let ended = OSAllocatedUnfairLock(initialState: false)
         var past: [LogLine]
         if follow {
             past = store.follow { line in
-                guard let line else { done.signal(); return false }
+                guard let line, !ended.withLock({ $0 }) else { done.signal(); return false }
                 if let d = encode(line) { return conn.chunk(d) }
                 return true
+            }
+            if let until = window.until {
+                DispatchQueue.global().asyncAfter(wallDeadline: .now() + until.timeIntervalSinceNow) {
+                    ended.withLock { $0 = true }
+                    done.signal()
+                }
             }
         } else {
             past = store.read()
         }
-        past = past.filter { ($0.stream == 1 && wantOut) || ($0.stream == 2 && wantErr) }
+        past = past.filter { (($0.stream == 1 && wantOut) || ($0.stream == 2 && wantErr)) && window.contains($0.time) }
         if let tail, tail >= 0 { past = Array(past.suffix(tail)) }
         var batch = Data()
         for l in past { if let d = encode(l) { batch.append(d) } }

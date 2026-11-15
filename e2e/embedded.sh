@@ -679,6 +679,21 @@ expect_eq "--init runs an init as PID 1" "$(run --init alpine cat /proc/1/comm |
 expect_has "--security-opt no-new-privileges" "$(run --security-opt no-new-privileges alpine grep NoNewPrivs /proc/self/status)" "1"
 expect_has "--device is refused" "$(run --device /dev/null alpine true)" "pratico: --device is not supported"
 expect_has "--pid host is refused" "$(run --pid host alpine true)" "pratico: --pid=host is not supported"
+docker run -d --name e-caps --cap-drop ALL alpine sleep 300 >/dev/null
+expect_eq "an exec keeps the container's capabilities" "$(docker exec e-caps awk '/CapEff/ {print $2}' /proc/self/status)" "0000000000000000"
+expect_eq "exec --privileged has every one" "$(docker exec --privileged e-caps awk '/CapEff/ {print $2}' /proc/self/status)" "000001ffffffffff"
+docker rm -f e-caps >/dev/null
+docker run -d --name e-logs alpine sh -c 'echo early; sleep 2; echo late; sleep 300' >/dev/null
+sleep 3
+cut=$(python3 -c 'import time; print(f"{time.time() - 1.5:.3f}")')
+expect_eq "logs --since" "$(docker logs --since "$cut" e-logs)" "late"
+expect_eq "logs --until" "$(docker logs --until "$cut" e-logs)" "early"
+expect_eq "logs -f --until ends at until" "$(docker logs -f --until "$cut" e-logs)" "early"
+docker exec e-logs sh -c 'head -c 1048576 /dev/urandom > /blob && sync'
+rw=$(docker ps --size --filter name=e-logs --format '{{.Size}}')
+expect_has "ps --size counts what the container wrote" "$rw" "virtual"
+expect_eq "inspect --size counts the MiB it wrote" "$(docker inspect --size e-logs --format '{{.SizeRw}}' | awk '{print ($1 > 1000000)}')" "1"
+docker rm -f e-logs >/dev/null
 docker run -d --name e-sig --stop-signal SIGWINCH alpine sh -c 'trap "echo got-winch; exit 0" WINCH; while :; do sleep 0.1; done' >/dev/null
 sleep 0.5
 docker stop e-sig >/dev/null
