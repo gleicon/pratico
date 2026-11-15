@@ -89,10 +89,10 @@ latency and daemon-memory bounds):
 
 | | |
 |---|---|
-| `docker run --rm alpine true` | P99 436 ms over 50 runs, VM boot included |
-| Memory per running container | ≈ 200 MB (VM process ≈ 190–210 MB, shim ≈ 20 MB) |
+| `docker run --rm alpine true` | P99 415 ms over 50 runs, VM boot included |
+| Memory per running container | ≈ 250 MB (VM process ≈ 215 MB, shim ≈ 33 MB) |
 | No containers running | no VMs |
-| Daemon | ≈ 45 MB; 48 MB with 32 containers running |
+| Daemon | ≈ 45 MB; 51 MB with 32 containers running |
 | `/_ping`, `/version`, `ps -a` with 100 containers | P99 ≤ 2 ms |
 
 `--memory` (default 1 GiB, plus 128 MiB for the guest) is a ceiling: the Mac backs only
