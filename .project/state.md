@@ -16,6 +16,8 @@
 
 - `pratico-shim` needs `com.apple.security.virtualization`. A plain `swift build` drops it; use `make build`, which re-signs. Symptom: `exit.json` says the process lacks the entitlement, exit 127.
 - Shim sockets live in `<home>/run/<short id>.sock`; anything under `containers/<64-hex id>/` exceeds the 104-byte Unix socket limit.
+- Container output reaches the daemon through `LogWatch` (kqueue on the shim's log, reopened after rotation, plus a 1 s tick). Do not go back to a polling thread per container: it cost 2.6% of a core with 16 idle containers (0.5% now).
+- Invariants are `precondition`s (Tiger Style): a broken one stops the process, the daemon or that container's shim. Input from clients is never asserted; it is answered with an APIError.
 - `blocking { }` (ImageBackend.swift) waits on a semaphore; call it only from the daemon's connection threads or plain threads, never from a Swift concurrency context.
 - Swift `case A, B where cond:` applies `where` to `B` only. A route written that way matched `A` unconditionally and sent no response, hanging `docker cp`.
 - `make probe` and an embedded daemon without `--home` use `~/.pratico`, which the installed app also uses. Test with a temporary `--home`.

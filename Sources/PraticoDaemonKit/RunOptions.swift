@@ -77,6 +77,8 @@ extension RunOptions {
         try o.parseSecurity(host)
         try o.parseProcess(host, config: config)
         try o.parseLifecycle(host, config: config)
+        precondition(o.cpus >= 1 && o.memoryMiB >= 64, "VM below its minimum: \(o.cpus) vCPUs, \(o.memoryMiB) MiB")
+        precondition(o.capabilities.map { !$0.contains("ALL") } ?? true, "ALL must be expanded")
         return o
     }
 
@@ -233,7 +235,10 @@ extension RunOptions {
             guard Signals.number(s) != nil else { throw APIError(400, "invalid signal: \(s)") }
             stopSignal = s
         }
-        if let t = config["StopTimeout"]?.int { stopTimeout = Int(t) }
+        if let t = config["StopTimeout"]?.int {
+            guard t >= -1 else { throw APIError(400, "invalid stop timeout: \(t); -1 waits without limit") }
+            stopTimeout = Int(t)
+        }
         let policy = host["RestartPolicy"]
         let name = policy?["Name"]?.string ?? ""
         switch name {

@@ -183,68 +183,18 @@ public final class ContainerService: @unchecked Sendable {
     // MARK: Create
 
     func create(name requested: String?, body: JSON) throws -> ContainerRecord {
-        let name = requested.flatMap { $0.isEmpty ? nil : $0 } ?? uniqueName()
-        let shortName = name.hasPrefix("/") ? String(name.dropFirst()) : name
-        guard Names.valid(shortName) else {
-            throw APIError(400, "Invalid container name (\(shortName)), only [a-zA-Z0-9][a-zA-Z0-9_.-] are allowed")
-        }
-        // The name is reserved from this check until the record exists: creates take a
-        // while (the rootfs is unpacked), and two at once must not both get one name.
-        lock.lock()
-        if let existing = records.values.first(where: { $0.name == shortName }) {
-            lock.unlock()
-            throw APIError(409, "Conflict. The container name \"/\(shortName)\" is already in use by container \"\(existing.id)\". You have to remove (or rename) that container to be able to reuse that name.")
-        }
-        guard reservedNames.insert(shortName).inserted else {
-            lock.unlock()
-            throw APIError(409, "Conflict. The container name \"/\(shortName)\" is already being created.")
-        }
-        lock.unlock()
-        defer {
-            lock.lock()
-            reservedNames.remove(shortName)
-            lock.unlock()
-        }
+        let name = try reserveName(requested)
+        defer { lock.withLock { _ = reservedNames.remove(name) } }
         guard let imageRef = body["Image"]?.string, !imageRef.isEmpty else { throw APIError(400, "No image specified") }
         guard let img = images.find(imageRef) else {
             throw APIError(404, "No such image: \(ImageRef.familiar(ImageRef.normalize(imageRef)))")
         }
-
         let id = randomHexID()
-        let appleId = String(id.prefix(12))
         let imageConfig = ImageService.config(img)
         let attach = try networks.attachments(host: body["HostConfig"] ?? [:], networking: body["NetworkingConfig"])
         var hostFields = body["HostConfig"]?.object ?? [:]
         if ["", "default"].contains(hostFields["NetworkMode"]?.string ?? "") { hostFields["NetworkMode"] = "bridge" }
-        // Docker merges image defaults into the container config; an explicit
-        // Entrypoint resets the image Cmd.
-        let userEntry = body["Entrypoint"]?.strings.flatMap { $0.isEmpty ? nil : $0 }
-        let userCmd = body["Cmd"]?.strings.flatMap { $0.isEmpty ? nil : $0 }
-        let entry = userEntry ?? imageConfig["Entrypoint"]?.strings ?? []
-        let cmd = userCmd ?? (userEntry == nil ? imageConfig["Cmd"]?.strings ?? [] : [])
-        let imageEnv = imageConfig["Env"]?.strings ?? []
-        let userEnv = body["Env"]?.strings ?? []
-        let userKeys = Set(userEnv.map { $0.splitOnce("=").0 })
-        let env = imageEnv.filter { !userKeys.contains($0.splitOnce("=").0) } + userEnv
-        let workdir = body["WorkingDir"]?.string.flatMap { $0.isEmpty ? nil : $0 } ?? imageConfig["WorkingDir"]?.string ?? ""
-        let full = entry + cmd
-
-        var config = body.object ?? [:]
-        config["HostConfig"] = nil
-        config["NetworkingConfig"] = nil
-        if (body["Hostname"]?.string ?? "").isEmpty { config["Hostname"] = .string(appleId) }
-        // Image defaults the request leaves empty, as Docker merges them.
-        for key in ["User", "StopSignal"] where (body[key]?.string ?? "").isEmpty {
-            config[key] = imageConfig[key] ?? .string("")
-        }
-        config["ExposedPorts"] = .object((imageConfig["ExposedPorts"]?.object ?? [:]).merging(body["ExposedPorts"]?.object ?? [:]) { _, b in b })
-        config["Env"] = JSON(env)
-        config["Cmd"] = JSON(cmd)
-        config["Entrypoint"] = entry.isEmpty ? .null : JSON(entry)
-        config["WorkingDir"] = .string(workdir)
-        config["Image"] = .string(imageRef)
-        config["Labels"] = .object((imageConfig["Labels"]?.object ?? [:]).merging(body["Labels"]?.object ?? [:]) { _, b in b })
-        config["Healthcheck"] = body["Healthcheck"] ?? imageConfig["Healthcheck"]
+        let (config, command) = Self.containerConfig(body, image: imageConfig, imageRef: imageRef, hostname: String(id.prefix(12)))
 
         // Every option is checked before anything is made (D-45).
         let asked = try Self.publishingAll(.object(hostFields), exposed: config["ExposedPorts"])
@@ -254,32 +204,93 @@ public final class ContainerService: @unchecked Sendable {
         // which the Docker CLI sends as `Volumes`, not in `Binds`.
         let wanted = [imageConfig["Volumes"], body["Volumes"]].flatMap { $0?.object.map { Array($0.keys) } ?? [] }
         let host = try namingVolumes(asked, imageVolumes: Array(Set(wanted)))
+        try makeRootfs(id, host: host, imageRef: imageRef)
 
+        let rec = ContainerRecord(
+            id: id, name: name, appleId: String(id.prefix(12)), image: imageRef, imageId: ImageService.id(img),
+            created: Date(), path: command.first ?? "", args: Array(command.dropFirst()),
+            config: .object(config), hostConfig: host,
+            endpoints: Dictionary(attach.map { ($0.0.id, $0.1) }, uniquingKeysWith: { a, _ in a }))
+        let log = LogStore(path: dir(id).appending(path: "log"))
+        lock.withLock {
+            precondition(records[id] == nil, "container ID \(id) taken twice")
+            records[id] = rec
+            logs[id] = log
+        }
+        save(rec)
+        emit(rec, "create")
+        return rec
+    }
+
+    /// Checks the name and holds it from here until the record exists: creates take a
+    /// while (the rootfs is unpacked), and two at once must not both get one name.
+    private func reserveName(_ requested: String?) throws -> String {
+        let name = requested.flatMap { $0.isEmpty ? nil : $0 } ?? uniqueName()
+        let short = name.hasPrefix("/") ? String(name.dropFirst()) : name
+        guard Names.valid(short) else {
+            throw APIError(400, "Invalid container name (\(short)), only [a-zA-Z0-9][a-zA-Z0-9_.-] are allowed")
+        }
+        try lock.withLock {
+            if let existing = records.values.first(where: { $0.name == short }) {
+                throw APIError(409, "Conflict. The container name \"/\(short)\" is already in use by container \"\(existing.id)\". You have to remove (or rename) that container to be able to reuse that name.")
+            }
+            guard reservedNames.insert(short).inserted else {
+                throw APIError(409, "Conflict. The container name \"/\(short)\" is already being created.")
+            }
+        }
+        return short
+    }
+
+    /// The container's `Config` and command, with the image's defaults merged as Docker
+    /// does: what the request leaves empty comes from the image, and an explicit
+    /// Entrypoint resets the image's Cmd.
+    static func containerConfig(_ body: JSON, image: JSON, imageRef: String, hostname: String) -> (config: [String: JSON], command: [String]) {
+        let userEntry = body["Entrypoint"]?.strings.flatMap { $0.isEmpty ? nil : $0 }
+        let userCmd = body["Cmd"]?.strings.flatMap { $0.isEmpty ? nil : $0 }
+        let entry = userEntry ?? image["Entrypoint"]?.strings ?? []
+        let cmd = userCmd ?? (userEntry == nil ? image["Cmd"]?.strings ?? [] : [])
+        let userEnv = body["Env"]?.strings ?? []
+        let userKeys = Set(userEnv.map { $0.splitOnce("=").0 })
+        let env = (image["Env"]?.strings ?? []).filter { !userKeys.contains($0.splitOnce("=").0) } + userEnv
+        func merged(_ key: String) -> JSON {
+            .object((image[key]?.object ?? [:]).merging(body[key]?.object ?? [:]) { _, mine in mine })
+        }
+        var config = body.object ?? [:]
+        config["HostConfig"] = nil
+        config["NetworkingConfig"] = nil
+        if (body["Hostname"]?.string ?? "").isEmpty { config["Hostname"] = .string(hostname) }
+        for key in ["User", "StopSignal"] where (body[key]?.string ?? "").isEmpty {
+            config[key] = image[key] ?? .string("")
+        }
+        config["ExposedPorts"] = merged("ExposedPorts")
+        config["Labels"] = merged("Labels")
+        config["Env"] = JSON(env)
+        config["Cmd"] = JSON(cmd)
+        config["Entrypoint"] = entry.isEmpty ? .null : JSON(entry)
+        config["WorkingDir"] = .string(body["WorkingDir"]?.string.flatMap { $0.isEmpty ? nil : $0 } ?? image["WorkingDir"]?.string ?? "")
+        config["Image"] = .string(imageRef)
+        config["Healthcheck"] = body["Healthcheck"] ?? image["Healthcheck"]
+        return (config, entry + cmd)
+    }
+
+    /// The container's directory and root filesystem (a clone of the unpacked image), the
+    /// host folders `-v` asks for, and copy-up into new volumes.
+    private func makeRootfs(_ id: String, host: JSON, imageRef: String) throws {
         // `-v` creates a missing host directory, as Docker does.
         for m in try mounts(host) where m.createSource {
-            try? FileManager.default.createDirectory(atPath: m.source, withIntermediateDirectories: true)
+            do { try FileManager.default.createDirectory(atPath: m.source, withIntermediateDirectories: true) } catch {
+                throw APIError(400, "error while creating mount source path '\(m.source)': \(error.localizedDescription)")
+            }
         }
-        try FileManager.default.createDirectory(at: dir(id), withIntermediateDirectories: true)
+        let rootfs = dir(id).appending(path: "rootfs.ext4")
         do {
-            try embedded.prepareRootfs(image: ImageRef.normalize(imageRef), at: dir(id).appending(path: "rootfs.ext4"))
+            try FileManager.default.createDirectory(at: dir(id), withIntermediateDirectories: true)
+            try embedded.prepareRootfs(image: ImageRef.normalize(imageRef), at: rootfs)
         } catch {
             try? FileManager.default.removeItem(at: dir(id))
             throw APIError(500, "container create failed: \(error)")
         }
-        copyUp(host, rootfs: dir(id).appending(path: "rootfs.ext4"))
-
-        let rec = ContainerRecord(
-            id: id, name: shortName, appleId: appleId, image: imageRef, imageId: ImageService.id(img),
-            created: Date(), path: full.first ?? "", args: Array(full.dropFirst()),
-            config: .object(config), hostConfig: host,
-            endpoints: Dictionary(attach.map { ($0.0.id, $0.1) }, uniquingKeysWith: { a, _ in a }))
-        lock.lock()
-        records[id] = rec
-        lock.unlock()
-        save(rec)
-        logs[id] = LogStore(path: dir(id).appending(path: "log"))
-        emit(rec, "create")
-        return rec
+        copyUp(host, rootfs: rootfs)
     }
 
     private func uniqueName() -> String {
@@ -358,32 +369,7 @@ public final class ContainerService: @unchecked Sendable {
     /// through the log file the shim writes.
     private func launch(_ rec: ContainerRecord) throws {
         let files = ShimFiles(dir: dir(rec.id))
-        let mounts = try mounts(rec.hostConfig).map { Self.shimMount($0, dockerSocket: dockerSocket) }
-        let options = try runOptions(rec)
-        let rootfs: String = files.dir.appending(path: "rootfs.ext4").path
-        if !RootfsEdit.isClean(URL(filePath: rootfs)) {
-            Pratico.log("pratico-daemon: \(rec.name)'s root filesystem was not unmounted cleanly; rebuilding it from its files")
-            do { try RootfsEdit.repair(URL(filePath: rootfs)) } catch { throw APIError(500, "cannot repair the root filesystem of \(rec.name): \(error)") }
-        }
-        let env: [String] = rec.config["Env"]?.strings ?? []
-        let workdir: String = rec.config["WorkingDir"]?.string ?? ""
-        let user: String = rec.config["User"]?.string ?? ""
-        let hostname: String = rec.config["Hostname"]?.string ?? rec.appleId
-        let openStdin: Bool = rec.config["OpenStdin"]?.bool ?? false
-        let nics = try networks.allocateNICs(rec, runDir: files.socket.deletingLastPathComponent())
-        var spec = ShimSpec(
-            id: rec.appleId, kernel: embedded.kernel, initfs: embedded.initfs, rootfs: rootfs,
-            arguments: [rec.path] + rec.args, environment: env, workingDirectory: workdir, user: user,
-            tty: rec.tty, openStdin: openStdin, hostname: hostname, cpus: options.cpus, memoryMiB: options.memoryMiB,
-            mounts: mounts)
-        spec.nics = nics
-        do { spec.options = try resolved(options, rec, nics: nics, rootfs: files.dir.appending(path: "rootfs.ext4")) } catch {
-            networks.stopped(rec.id)
-            throw error
-        }
-        spec.switchSocket = networks.netSwitch.socketPath ?? ""
-        try JSONEncoder().encode(spec).write(to: files.spec, options: .atomic)
-
+        let (nics, options) = try writeSpec(rec, files)
         lock.lock()
         let log = LogStore(path: files.log, maxBytes: options.logBytes)
         logs[rec.id] = log
@@ -431,6 +417,35 @@ public final class ContainerService: @unchecked Sendable {
         health.started(rec)
     }
 
+    /// Repairs the rootfs if it needs it, plans the networks, and writes `spec.json` for the
+    /// shim. Addresses planned are released again on any failure after that.
+    private func writeSpec(_ rec: ContainerRecord, _ files: ShimFiles) throws -> (NICSlots, RunOptions) {
+        let mounts = try mounts(rec.hostConfig).map { Self.shimMount($0, dockerSocket: dockerSocket) }
+        let options = try runOptions(rec)
+        let rootfs = files.dir.appending(path: "rootfs.ext4")
+        if !RootfsEdit.isClean(rootfs) {
+            Pratico.log("pratico-daemon: \(rec.name)'s root filesystem was not unmounted cleanly; rebuilding it from its files")
+            do { try RootfsEdit.repair(rootfs) } catch { throw APIError(500, "cannot repair the root filesystem of \(rec.name): \(error)") }
+        }
+        let nics = try networks.allocateNICs(rec, runDir: files.socket.deletingLastPathComponent())
+        do {
+            var spec = ShimSpec(
+                id: rec.appleId, kernel: embedded.kernel, initfs: embedded.initfs, rootfs: rootfs.path,
+                arguments: [rec.path] + rec.args, environment: rec.config["Env"]?.strings ?? [],
+                workingDirectory: rec.config["WorkingDir"]?.string ?? "", user: rec.config["User"]?.string ?? "",
+                tty: rec.tty, openStdin: rec.config["OpenStdin"]?.bool ?? false, hostname: rec.config["Hostname"]?.string ?? rec.appleId,
+                cpus: options.cpus, memoryMiB: options.memoryMiB, mounts: mounts)
+            spec.nics = nics
+            spec.options = try resolved(options, rec, nics: nics, rootfs: rootfs)
+            spec.switchSocket = networks.netSwitch.socketPath ?? ""
+            try JSONEncoder().encode(spec).write(to: files.spec, options: .atomic)
+        } catch {
+            networks.stopped(rec.id)
+            throw error
+        }
+        return (nics, options)
+    }
+
     /// Docker's wording for a process that cannot start. The CLI picks `run`'s exit code
     /// from it: "executable file not found" → 127, "permission denied" → 126.
     static func startError(_ error: String, executable: String) -> APIError {
@@ -452,15 +467,9 @@ public final class ContainerService: @unchecked Sendable {
             self.broadcast(id, tty ? line.data : StdCopy.frame(stream: line.stream, line.data))
             return true
         }
-        let done = Box(false)
-        Thread.detachNewThread {
-            while !done.value {
-                log.refresh()
-                Thread.sleep(forTimeInterval: 0.05)
-            }
-        }
+        let watch = LogWatch(log)
         shim.onExit(pid) { [weak self] in
-            done.value = true
+            watch.cancel()
             log.refresh()  // last output reaches attached clients before they are closed
             let status = ShimClient.exitStatus(ShimFiles(dir: log.path.deletingLastPathComponent()))
             if let error = status?.error, !error.isEmpty { self?.update(id) { $0.state.error = error } }
@@ -515,13 +524,15 @@ public final class ContainerService: @unchecked Sendable {
         if !auto, let rec = try? resolve(id) { restarts.exited(rec, code: code) }
     }
 
-    /// Waits (bounded) for the shim's exit to be recorded.
+    /// Waits, at most `seconds`, for the shim's exit to be recorded.
     private func awaitExit(_ id: String, seconds: Double) {
-        let deadline = Date().addingTimeInterval(seconds)
-        while Date() < deadline {
-            guard let rec = try? resolve(id), rec.state.running else { return }
-            Thread.sleep(forTimeInterval: 0.05)
-        }
+        precondition(seconds > 0 && seconds <= 3600, "exit wait out of bounds: \(seconds) s")
+        let exited = DispatchSemaphore(value: 0)
+        lock.lock()
+        guard records[id]?.state.running == true else { lock.unlock(); return }
+        exitWaiters[id, default: []].append { _ in exited.signal() }
+        lock.unlock()
+        _ = exited.wait(timeout: .now() + seconds)
     }
 
     // MARK: Pause
@@ -577,7 +588,8 @@ public final class ContainerService: @unchecked Sendable {
         let signal = Signals.number(options?.stopSignal ?? "TERM") ?? 15
         emit(rec, "kill", ["signal": "\(signal)"])
         try embedded.shim.call(ShimFiles(dir: dir(rec.id)), "POST", "/stop?t=\(t)&signal=\(signal)")
-        awaitExit(rec.id, seconds: Double(t) + 10)
+        // -1 waits for the process however long it takes; the call returns within an hour.
+        awaitExit(rec.id, seconds: t < 0 ? 3600 : Double(t) + 10)
         emit(rec, "stop")
         return true
     }

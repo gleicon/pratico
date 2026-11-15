@@ -227,3 +227,71 @@ enum StdCopy {
         return out
     }
 }
+
+/// Delivers what another process (the shim) appends to a log as it lands: kqueue on the
+/// file wakes `refresh` per write, where polling cost a thread waking 20 times a second
+/// per container. The shim rotates by renaming `log` to `log.1`, so a rename or delete
+/// reopens the path; a 1 s tick covers the moment between rename and the new file.
+final class LogWatch: @unchecked Sendable {
+    private let store: LogStore
+    private let queue = DispatchQueue(label: "pratico.log-watch")
+    private var source: DispatchSourceFileSystemObject?
+    private var tick: DispatchSourceTimer?
+    private var cancelled = false
+
+    static let tickSeconds = 1.0
+
+    init(_ store: LogStore) {
+        self.store = store
+        queue.sync {
+            arm()
+            let t = DispatchSource.makeTimerSource(queue: queue)
+            t.schedule(deadline: .now() + Self.tickSeconds, repeating: Self.tickSeconds)
+            t.setEventHandler { [weak self] in
+                guard let self else { return }
+                if source == nil { arm() }
+                store.refresh()
+            }
+            t.resume()
+            tick = t
+        }
+    }
+
+    /// Opens the file for events; on failure (between a rename and the new file) the tick retries.
+    private func arm() {
+        dispatchPrecondition(condition: .onQueue(queue))
+        precondition(source == nil, "log watch armed twice")
+        guard !cancelled else { return }
+        let fd = open(store.path.path, O_EVTONLY | O_CLOEXEC)
+        guard fd >= 0 else { return }
+        let s = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: [.write, .extend, .rename, .delete], queue: queue)
+        s.setEventHandler { [weak self] in
+            guard let self else { return }
+            store.refresh()
+            if !s.data.isDisjoint(with: [.rename, .delete]) {
+                s.cancel()
+                source = nil
+                arm()
+            }
+        }
+        s.setCancelHandler { close(fd) }
+        s.resume()
+        source = s
+    }
+
+    deinit {
+        source?.cancel()
+        tick?.cancel()
+    }
+
+    /// Stops watching; nothing is delivered after it returns.
+    func cancel() {
+        queue.sync {
+            cancelled = true
+            source?.cancel()
+            source = nil
+            tick?.cancel()
+            tick = nil
+        }
+    }
+}

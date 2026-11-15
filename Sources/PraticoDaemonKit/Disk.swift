@@ -28,14 +28,25 @@ struct DiskService {
     func unpackedSize(_ imageId: String) -> Int64 { Self.allocated(rootfsCache.appending(path: "\(imageId.dropFirst(7)).ext4").path) }
     private var blobs: URL { store.appending(path: "content/blobs/sha256", directoryHint: .isDirectory) }
 
-    /// Bytes allocated under `path`, symlinks not followed.
+    /// Directories deeper than this under one root are not counted (a volume can hold
+    /// anything; the walk must end).
+    static let maxDepth = 256
+
+    /// Bytes allocated under `path`, symlinks not followed. Iterative, with a depth bound.
     static func allocated(_ path: String) -> Int64 {
-        var st = stat()
-        guard lstat(path, &st) == 0 else { return 0 }
-        let own = Int64(st.st_blocks) * 512
-        guard st.st_mode & S_IFMT == S_IFDIR else { return own }
-        let names = (try? FileManager.default.contentsOfDirectory(atPath: path)) ?? []
-        return names.reduce(own) { $0 + allocated(path + "/" + $1) }
+        var total: Int64 = 0
+        var pending: [(path: String, depth: Int)] = [(path, 0)]
+        while let (next, depth) = pending.popLast() {
+            precondition(depth <= maxDepth, "walk deeper than its bound")
+            var st = stat()
+            guard lstat(next, &st) == 0 else { continue }
+            total += Int64(st.st_blocks) * 512
+            guard st.st_mode & S_IFMT == S_IFDIR, depth < maxDepth else { continue }
+            for name in (try? FileManager.default.contentsOfDirectory(atPath: next)) ?? [] {
+                pending.append((next + "/" + name, depth + 1))
+            }
+        }
+        return total
     }
 
     struct ImageUse {

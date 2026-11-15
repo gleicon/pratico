@@ -69,6 +69,7 @@ latency and daemon bounds on every run.
 | Memory per running container | ≈ 250 MB (VM process ≈ 215 MB, shim ≈ 33 MB) |
 | No containers running | no VMs |
 | Daemon | ≈ 45 MB; 48 MB with 32 containers running |
+| Daemon CPU, 16 idle containers | 0.5% of a core |
 | `/_ping`, `/version`, `ps -a` with 100 containers | P99 ≤ 3 ms |
 
 Most of a start is the VM itself. Profiled with `PRATICO_TRACE=1` (step timings in the

@@ -188,6 +188,7 @@ final class NetSwitch: @unchecked Sendable {
         lock.lock()
         let peers = ports.values.joined().filter { $0.networkId == port.networkId && $0.path != port.path }
         lock.unlock()
+        precondition(!port.networkId.isEmpty, "a frame from an unbound endpoint")
         for p in peers where (eth.dst.isMulticast || p.mac == eth.dst) && addressedTo(p) {
             send(frame, to: p)
         }
@@ -294,6 +295,7 @@ final class NetSwitch: @unchecked Sendable {
     /// Replaces the MAC `old` with `new` at each offset that holds it; ARP offsets only in
     /// an ARP frame. Translates between a card's MAC and its endpoints' (D-44).
     static func rewrite(_ frame: [UInt8], from old: MAC, to new: MAC, at offsets: [Int]) -> [UInt8] {
+        precondition(offsets.allSatisfy { $0 >= 0 && ($0 < 14 || $0 >= arpSender) }, "MAC offsets outside Ethernet and ARP headers")
         guard old != new, frame.count >= 14 else { return frame }
         let isARP = frame[12] == 0x08 && frame[13] == 0x06
         var out = frame
