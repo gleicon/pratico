@@ -56,6 +56,8 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 - [ ] Agent-native pratico (to discuss with Features): an MCP server and a container manager geared towards agents, so an agent can ask whether an image is safe before using it, run a task in a throwaway isolated VM, and read scan results and SBOMs; a way for developers to use containers for tests, agents, and builds from Claude Code
 - [ ] Local registry: pratico's image store served as an OCI registry on 127.0.0.1 (push and pull without tar files, Apple `container` and other tools pulling from it, images scanned on push), optionally a pull-through cache for Docker Hub (to discuss with Features)
 - [ ] Egress intercept: sandwich-proxy engine on container HTTP/HTTPS flows, per-container opt-in, log/replay/HAR/threat feeds
+- [ ] IPv6 on pratico-net: addresses, neighbour discovery, and the uplink (to discuss with Features)
+- [ ] Snapshots that optionally carry volume data (to discuss with Features)
 - [ ] Own guest kernel (last in the Features discussion): a harness that builds the latest Linux LTS (6.18.63 as of 2026-11-15, vs 6.18.56 in Kata 4.3.1) with Kata's kernel configuration inside a Linux VM, reproducibly, pins the result by SHA-256, and ships its GPL source offer; until then the kernel follows Kata's latest release (D-41)
 - [x] Embedded is the default: the app bundles `pratico-shim`, the kernel and `vminit`; acknowledgements (licenses) in the app and DMG
 - [x] `container` CLI adapter, `/etc/hosts` sync, freezer agent and default-network anchor removed; SPEC and docs updated
@@ -89,7 +91,7 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 - [x] Restore recreates containers, networks, volumes, and starts the containers that ran (AC-38)
 - [x] Restore skips and reports existing names (AC-39); the menubar shows a dry run first
 - [x] Restore refuses an unsupported `format_version` and changes nothing (AC-39.a)
-- [ ] Optional volume data in snapshots (definitions only today)
+- [ ] Optional volume data in snapshots (moved to the Features discussion)
 
 ## Bounds, performance, compatibility
 
@@ -113,7 +115,7 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 ## Known gaps (found while building, not yet scheduled)
 
 - [ ] More than 4 networks per container: verified 2026-11-15 that Virtualization.framework refuses a 5th NIC ("The number of network devices is greater than the maximum number supported"), and vminitd has no call to create VLAN interfaces, so carrying extra networks on one NIC needs guest-agent support first. Compose projects, private networks, and up to 4 networks per container work.
-- [ ] IPv6 on pratico-net
+- [ ] IPv6 on pratico-net (moved to the Features discussion)
 - [x] `docker cp` with a stopped container: read from its ext4 rootfs on the Mac; copies in rewrite the rootfs (no VM), and the container cannot start meanwhile
 - [x] `docker save` of several images at once; `docker load` (OCI archives, Docker 25+); request bodies of `cp` in and `load` stream to disk past the 64 MiB in-memory limit
 - [ ] A per-install CA for egress interception (with the egress task)
@@ -127,4 +129,4 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 
 - [x] Image scanners work against pratico unchanged via `docker save` (osv-scanner, grype verified; trivy, snyk use the same path) (D-23)
 - [x] Automatic image scanning: osv-scanner + grype + CISA KEV after each pull and daily; `scan_block` levels; serious findings stop and block the image's containers; menubar alerts and notifications (D-24)
-- [ ] Scanning follow-ups: spotter on image filesystems (needs an all-files hash mode upstream), EPSS, Artifact Hub, syft SBOMs, menubar "allow image" action
+- [x] Scanning follow-ups: EPSS, syft SBOMs, Allow This Image (D-38..D-40); spotter waits on an all-files hash mode upstream; Artifact Hub undecided

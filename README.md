@@ -235,6 +235,7 @@ The e2e suites use `/opt/homebrew/bin/docker` (`DOCKER=` to override), an isolat
 and verifies the DMG, tags `vX.Y.Z`, and publishes the release; with `SIGN_IDENTITY` and
 `NOTARY_PROFILE` set it signs with a Developer ID and notarizes.
 
+Runnable examples of each feature, and pratico's own API endpoints: [examples/](examples/).
 Requirements, acceptance criteria, and design decisions: [SPEC.md](SPEC.md).
 
 ## Acknowledgements
