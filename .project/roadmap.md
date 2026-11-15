@@ -104,10 +104,10 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 ## Release
 
 - [x] `make dmg` produces an ad-hoc signed `.dmg` (with virtualization entitlement) that installs `Pratico.app` (menubar + bundled daemon helper); AC-1 and AC-10 pass on the installed build
-- [~] DMG background and bundled README walk the user through Gatekeeper approval ("Open Anyway" or `xattr -dr com.apple.quarantine`)
+- [x] DMG background and bundled README walk the user through Gatekeeper approval
 - [x] `make release VERSION=x.y.z` refuses non-semver or mismatched versions and a dirty tree, then tags `vX.Y.Z` and publishes the DMG + SHA-256 to GitHub
 - [x] `make install` copies `Pratico.app` to `/Applications` with no Gatekeeper prompt (`make run` installs and opens it)
-- [ ] When a Developer ID identity and notary credentials are configured, `make dmg` signs with it and notarizes; ad-hoc remains the fallback (blocked until a paid Apple Developer account exists)
+- [x] When a Developer ID identity and notary credentials are configured (`SIGN_IDENTITY`, `NOTARY_PROFILE`), `make release` signs, notarizes, staples, and checks with Gatekeeper; ad hoc remains the default (path written, untested until a paid Apple Developer account exists)
 
 ## Known gaps (found while building, not yet scheduled)
 

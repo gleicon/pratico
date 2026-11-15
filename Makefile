@@ -66,16 +66,9 @@ sign:
 	codesign --force --sign "$(SIGN_IDENTITY)" --entitlements "$(ENTITLEMENTS)" --options runtime "$(APP)"
 
 # Drag-to-Applications image with the Gatekeeper walkthrough (SPEC D-10).
+# The app, Applications, the read-me, and a background with the steps (scripts/dmg.sh).
 dmg: app
-	rm -rf "$(DIST_DIR)/dmg" "$(DMG)"
-	mkdir -p "$(DIST_DIR)/dmg"
-	cp -R "$(APP)" "$(DIST_DIR)/dmg/"
-	ln -s /Applications "$(DIST_DIR)/dmg/Applications"
-	cp Support/dmg-README.txt "$(DIST_DIR)/dmg/READ ME FIRST.txt"
-	cp "$(APP)/Contents/Resources/Acknowledgements.txt" "$(DIST_DIR)/dmg/"
-	hdiutil create -volname "Pratico $(VERSION)" -srcfolder "$(DIST_DIR)/dmg" -ov -format UDZO "$(DMG)"
-	codesign --force --sign "$(SIGN_IDENTITY)" "$(DMG)"
-	rm -rf "$(DIST_DIR)/dmg"
+	scripts/dmg.sh "$(APP)" "$(DMG)" "$(VERSION)" "$(SIGN_IDENTITY)"
 
 # Tags vVERSION and publishes the DMG to GitHub; see scripts/release.sh for the checks.
 release:

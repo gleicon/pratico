@@ -5,6 +5,9 @@
 # Usage: scripts/release.sh <version>    (or: make release VERSION=x.y.z)
 #   SKIP_E2E=1   skip the end-to-end suite (unit tests still run)
 #   PRERELEASE=1 mark the GitHub release as a pre-release
+#   SIGN_IDENTITY="Developer ID Application: …"  sign with a Developer ID instead of ad hoc
+#   NOTARY_PROFILE=<name>  notarize and staple the DMG with the credentials saved by
+#                          `xcrun notarytool store-credentials <name>` (needs SIGN_IDENTITY)
 set -euo pipefail
 
 VERSION="${1:?usage: scripts/release.sh <version>}"
@@ -23,11 +26,25 @@ git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1 && die 
 command -v gh >/dev/null || die "gh is required"
 gh auth status >/dev/null 2>&1 || die "gh is not logged in"
 
+IDENTITY="${SIGN_IDENTITY:--}"
+if [ -n "${NOTARY_PROFILE:-}" ]; then
+    [ "$IDENTITY" != "-" ] || die "NOTARY_PROFILE needs SIGN_IDENTITY set to a Developer ID Application identity"
+    security find-identity -v -p codesigning | grep -qF "$IDENTITY" || die "no signing identity '$IDENTITY' in the keychain"
+    xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" >/dev/null 2>&1 || die "notary profile '$NOTARY_PROFILE' does not work (xcrun notarytool store-credentials)"
+fi
+
 make test
 [ "${SKIP_E2E:-0}" = 1 ] || make e2e
-make dmg VERSION="$VERSION"
+make dmg VERSION="$VERSION" SIGN_IDENTITY="$IDENTITY"
 DMG="dist/Pratico-$VERSION.dmg"
 hdiutil verify "$DMG" >/dev/null
+notarized=0
+if [ -n "${NOTARY_PROFILE:-}" ]; then
+    xcrun notarytool submit "$DMG" --keychain-profile "$NOTARY_PROFILE" --wait
+    xcrun stapler staple "$DMG"
+    spctl --assess --type open --context context:primary-signature "$DMG" || die "Gatekeeper does not accept the notarized DMG"
+    notarized=1
+fi
 (cd dist && shasum -a 256 "Pratico-$VERSION.dmg" >"Pratico-$VERSION.dmg.sha256")
 
 git tag -a "$TAG" -m "Pratico $VERSION"
@@ -36,6 +53,11 @@ git push origin "$TAG"
 
 flags=()
 if [ "${PRERELEASE:-0}" = 1 ]; then flags+=(--prerelease); fi
+if [ "$notarized" = 1 ]; then
+    open_note='Signed with a Developer ID and notarized by Apple: it opens like any other app.'
+else
+    open_note='Ad-hoc signed, not notarized: approve the first launch in System Settings > Privacy & Security ("Open Anyway"), or run `xattr -dr com.apple.quarantine /Applications/Pratico.app`.'
+fi
 gh release create "$TAG" "$DMG" "$DMG.sha256" --title "Pratico $VERSION" --verify-tag "${flags[@]}" \
-    --notes "$(printf 'Ad-hoc signed, not notarized: approve the first launch in System Settings > Privacy & Security ("Open Anyway"), or run `xattr -dr com.apple.quarantine /Applications/Pratico.app`. Requires macOS 26 on Apple silicon; nothing else to install.\n\nSHA-256: %s' "$(cut -d' ' -f1 "$DMG.sha256")")"
+    --notes "$(printf '%s Requires macOS 26 on Apple silicon; nothing else to install.\n\nSHA-256: %s' "$open_note" "$(cut -d' ' -f1 "$DMG.sha256")")"
 echo "released $TAG"
