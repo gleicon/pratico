@@ -114,6 +114,8 @@ final class NetworkService: @unchecked Sendable {
     weak var containers: ContainerService?
 
     private let lock = NSLock()
+    /// Serializes `create`, which reads every network to pick a free subnet before it adds one.
+    private let creating = NSLock()
     private var records: [String: NetworkRecord] = [:]
     private var addresses: [String: [String: NetworkAddress]] = [:]  // container id → network key
     private var slots: [String: NICSlots] = [:]  // container id → its VM's NIC slots
@@ -207,6 +209,11 @@ final class NetworkService: @unchecked Sendable {
     // MARK: Create, remove
 
     func create(_ body: JSON) throws -> NetworkRecord {
+        // One create at a time, from the name check to the record: concurrent creates
+        // (Compose makes a project's networks in parallel) would otherwise all pick the
+        // same free subnet, and the switch could not keep those networks apart.
+        creating.lock()
+        defer { creating.unlock() }
         guard let name = body["Name"]?.string, !name.isEmpty else { throw APIError(400, "network name is required") }
         // Container-name rules, but one character is allowed.
         guard Names.valid(name) || (name.count == 1 && (name.first!.isLetter || name.first!.isNumber)) else {
@@ -269,18 +276,10 @@ final class NetworkService: @unchecked Sendable {
 
     func prune(filters: [String: [String]]) -> JSON {
         var deleted: [JSON] = []
-        for rec in all() where !rec.builtin && matchesLabels(rec, filters["label"] ?? []) {
+        for rec in all() where !rec.builtin && Filters.labels(filters["label"], in: rec.labels) {
             if (try? remove(rec.id)) != nil { deleted.append(.string(rec.name)) }
         }
         return ["NetworksDeleted": .array(deleted)]
-    }
-
-    private func matchesLabels(_ rec: NetworkRecord, _ wanted: [String]) -> Bool {
-        wanted.allSatisfy { v in
-            let (k, val) = v.splitOnce("=")
-            guard let have = rec.labels[k] else { return false }
-            return val == nil || have == val
-        }
     }
 
     func emit(_ rec: NetworkRecord, _ action: String, container: String? = nil) {
@@ -614,21 +613,16 @@ final class NetworkService: @unchecked Sendable {
 
     func list(filters: [String: [String]]) -> [JSON] {
         all().filter { rec in
-            for (key, values) in filters where !values.isEmpty {
-                let ok = values.contains { v in
-                    switch key {
-                    case "name": return rec.name.contains(v)
-                    case "id": return rec.id.hasPrefix(v)
-                    case "label": return matchesLabels(rec, [v])
-                    case "driver": return rec.driver == v
-                    case "type": return v == (rec.builtin ? "builtin" : "custom")
-                    case "dangling": return (v == "true" || v == "1") == (!rec.builtin && members(rec).isEmpty)
-                    default: return true
-                    }
+            Filters.pass(filters, labels: rec.labels) { key, v in
+                switch key {
+                case "name": return rec.name.contains(v)
+                case "id": return rec.id.hasPrefix(v)
+                case "driver": return rec.driver == v
+                case "type": return v == (rec.builtin ? "builtin" : "custom")
+                case "dangling": return Filters.isTrue(v) == (!rec.builtin && members(rec).isEmpty)
+                default: return true
                 }
-                if !ok { return false }
             }
-            return true
         }.map { json($0, withContainers: false) }
     }
 }

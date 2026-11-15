@@ -76,6 +76,8 @@ public final class ContainerService: @unchecked Sendable {
     private var pausedVMs: Set<String> = []
     /// Stopped containers whose rootfs is being read or rewritten (`docker cp`): no start.
     private var busy: Set<String> = []
+    /// Names of containers being created, held until their records exist.
+    private var reservedNames: Set<String> = []
     private var published: [String: [String: [(ip: String, port: String)]]] = [:]  // bound host ports
     /// Serializes network connect and disconnect, which read, check, and write a
     /// container's endpoints and NIC slots.
@@ -183,8 +185,22 @@ public final class ContainerService: @unchecked Sendable {
         guard Names.valid(shortName) else {
             throw APIError(400, "Invalid container name (\(shortName)), only [a-zA-Z0-9][a-zA-Z0-9_.-] are allowed")
         }
-        if let existing = try? resolve(shortName), existing.name == shortName {
+        // The name is reserved from this check until the record exists: creates take a
+        // while (the rootfs is unpacked), and two at once must not both get one name.
+        lock.lock()
+        if let existing = records.values.first(where: { $0.name == shortName }) {
+            lock.unlock()
             throw APIError(409, "Conflict. The container name \"/\(shortName)\" is already in use by container \"\(existing.id)\". You have to remove (or rename) that container to be able to reuse that name.")
+        }
+        guard reservedNames.insert(shortName).inserted else {
+            lock.unlock()
+            throw APIError(409, "Conflict. The container name \"/\(shortName)\" is already being created.")
+        }
+        lock.unlock()
+        defer {
+            lock.lock()
+            reservedNames.remove(shortName)
+            lock.unlock()
         }
         guard let imageRef = body["Image"]?.string, !imageRef.isEmpty else { throw APIError(400, "No image specified") }
         guard let img = images.find(imageRef) else {
@@ -816,13 +832,8 @@ public final class ContainerService: @unchecked Sendable {
     func list(all: Bool, filters: [String: [String]]) -> [JSON] {
         self.all().filter { rec in
             if !all && !rec.state.running && filters["status"] == nil { return false }
-            for (key, values) in filters where !values.isEmpty {
-                let ok = values.contains { v in
+            return Filters.pass(filters, labels: rec.labels) { key, v in
                     switch key {
-                    case "label":
-                        let (k, val) = v.splitOnce("=")
-                        guard let have = rec.labels[k] else { return false }
-                        return val == nil || have == val
                     case "name": return rec.name.contains(v.hasPrefix("/") ? String(v.dropFirst()) : v)
                     case "id": return rec.id.hasPrefix(v)
                     case "status": return dockerState(rec) == v
@@ -835,9 +846,6 @@ public final class ContainerService: @unchecked Sendable {
                     default: return true
                     }
                 }
-                if !ok { return false }
-            }
-            return true
         }.map(summary)
     }
 
