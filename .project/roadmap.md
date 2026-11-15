@@ -56,6 +56,7 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 - [ ] Agent-native pratico (to discuss with Features): an MCP server and a container manager geared towards agents, so an agent can ask whether an image is safe before using it, run a task in a throwaway isolated VM, and read scan results and SBOMs; a way for developers to use containers for tests, agents, and builds from Claude Code
 - [ ] Local registry: pratico's image store served as an OCI registry on 127.0.0.1 (push and pull without tar files, Apple `container` and other tools pulling from it, images scanned on push), optionally a pull-through cache for Docker Hub (to discuss with Features)
 - [ ] Egress intercept: sandwich-proxy engine on container HTTP/HTTPS flows, per-container opt-in, log/replay/HAR/threat feeds
+- [ ] Own guest kernel (last in the Features discussion): a harness that builds the latest Linux LTS (6.18.63 as of 2026-11-15, vs 6.18.56 in Kata 4.3.1) with Kata's kernel configuration inside a Linux VM, reproducibly, pins the result by SHA-256, and ships its GPL source offer; until then the kernel follows Kata's latest release (D-41)
 - [x] Embedded is the default: the app bundles `pratico-shim`, the kernel and `vminit`; acknowledgements (licenses) in the app and DMG
 - [x] `container` CLI adapter, `/etc/hosts` sync, freezer agent and default-network anchor removed; SPEC and docs updated
 
