@@ -14,11 +14,11 @@ set -euo pipefail
 OUT="${1:?usage: scripts/fetch-runtime-assets.sh <out-dir>}"
 CACHE="${PRATICO_ASSET_CACHE:-.cache/assets}"
 
-KATA_VERSION=3.28.0
+KATA_VERSION=4.3.1
 KATA_URL="https://github.com/kata-containers/kata-containers/releases/download/$KATA_VERSION/kata-static-$KATA_VERSION-arm64.tar.zst"
-KATA_SHA256=f63d54507d1f18635d94475077e4c2330de4d8e05cedf25f7c38f063b0e66a91  # published by GitHub for the asset
-KERNEL_MEMBER=./opt/kata/share/kata-containers/vmlinux-6.18.15-186
-KERNEL_SHA256=2fe4a58d2885d623bcb4d705900ac8c1d4f02371152da8126b3b00c8c47fc3a1
+KATA_SHA256=2c5bf7cde334ad5307d482f45cceda496f91c9b6b96f5278c47f4f4eac1bbae6  # published by GitHub for the asset
+KERNEL_MEMBER=./opt/kata/share/kata-containers/vmlinux-6.18.56-208
+KERNEL_SHA256=dece388830720fe8bddb41552fff5f486240aeece5acc0aebc1812761e3e3f66
 
 VMINIT_REPO=apple/containerization/vminit
 VMINIT_TAG=0.54.0

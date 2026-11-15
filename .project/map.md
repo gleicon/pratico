@@ -8,7 +8,7 @@ Pratico is a Docker Remote API daemon plus SwiftUI menubar app for Apple silicon
 
 - Swift 6.2 (swift-tools-version 6.2), macOS 26, Apple silicon; SwiftPM via `Package.swift`
 - Dependency: `apple/containerization` 0.54.0 (products Containerization, ContainerizationOCI, ContainerizationExtras)
-- Runtime assets: Kata 3.28.0 kernel + `vminit:0.54.0`, fetched by `scripts/fetch-runtime-assets.sh`
+- Runtime assets: Kata 4.3.1 kernel (Linux 6.18.56) + `vminit:0.54.0`, fetched by `scripts/fetch-runtime-assets.sh`
 - Build: `make build | assets | app | dmg | install | release`
 - Test: `make test` (Swift Testing), `make e2e`, `make e2e-embedded`, `make e2e-registry`, `make probe`
 

@@ -58,7 +58,9 @@ rc=$?
 expect_eq "run --rm prints output" "$(tail -1 <<<"$out")" "hello"
 expect_eq "run --rm returns the exit code" "$rc" "7"
 check "image is listed" test "$(docker images --format '{{.Repository}}:{{.Tag}}' | grep -c '^alpine:latest$')" = 1
-check "kernel is pratico's" test "$(docker run --rm alpine uname -r)" = "6.18.15"
+# The kernel the app bundles: its Linux version, from the pinned asset's name.
+kernel=$(sed -n 's|^KERNEL_MEMBER=.*/vmlinux-\([0-9.]*\)-.*|\1|p' scripts/fetch-runtime-assets.sh)
+expect_eq "kernel is pratico's ($kernel)" "$(docker run --rm alpine uname -r)" "$kernel"
 
 # stdin and terminals
 expect_eq "run -i pipes stdin" "$(printf 'a\nb\nc\n' | docker run -i --rm alpine wc -l | tr -d ' ')" "3"
