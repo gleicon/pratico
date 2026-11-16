@@ -1,0 +1,6375 @@
+//===----------------------------------------------------------------------===//
+// Copyright © 2025-2026 Apple Inc. and the Containerization project authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//   https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//===----------------------------------------------------------------------===//
+
+import ArgumentParser
+import Containerization
+import ContainerizationEXT4
+import ContainerizationError
+import ContainerizationExtras
+import ContainerizationOCI
+import ContainerizationOS
+import Crypto
+import Foundation
+import Logging
+import SystemPackage
+
+extension IntegrationSuite {
+    func testProcessTrue() async throws {
+        let id = "test-process-true"
+
+        let bs = try await bootstrap(id)
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["/bin/true"]
+            config.memoryInBytes = 250_000_000
+            config.bootLog = bs.bootLog
+        }
+
+        try await container.create()
+        try await container.start()
+
+        let status = try await container.wait()
+        try await container.stop()
+
+        guard status.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "process status \(status) != 0")
+        }
+    }
+
+    func testProcessFalse() async throws {
+        let id = "test-process-false"
+
+        let bs = try await bootstrap(id)
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["/bin/false"]
+            config.bootLog = bs.bootLog
+        }
+
+        try await container.create()
+        try await container.start()
+
+        let status = try await container.wait()
+        try await container.stop()
+
+        guard status.exitCode == 1 else {
+            throw IntegrationError.assert(msg: "process status \(status) != 1")
+        }
+    }
+
+    final class DiscardingWriter: @unchecked Sendable, Writer {
+        var count: Int = 0
+
+        func write(_ data: Data) throws {
+            count += data.count
+        }
+
+        func close() throws {
+            return
+        }
+    }
+
+    final class BufferWriter: Writer {
+        // `data` isn't used concurrently.
+        nonisolated(unsafe) var data = Data()
+
+        func write(_ data: Data) throws {
+            guard data.count > 0 else {
+                return
+            }
+            self.data.append(data)
+        }
+
+        func close() throws {
+            return
+        }
+    }
+
+    final class StdinBuffer: ReaderStream {
+        let data: Data
+
+        init(data: Data) {
+            self.data = data
+        }
+
+        func stream() -> AsyncStream<Data> {
+            let (stream, cont) = AsyncStream<Data>.makeStream()
+            cont.yield(self.data)
+            cont.finish()
+            return stream
+        }
+    }
+
+    final class ChunkedStdinBuffer: ReaderStream {
+        let chunks: [Data]
+        let delayMs: Int
+
+        init(chunks: [Data], delayMs: Int = 0) {
+            self.chunks = chunks
+            self.delayMs = delayMs
+        }
+
+        func stream() -> AsyncStream<Data> {
+            let chunks = self.chunks
+            let delayMs = self.delayMs
+            return AsyncStream { cont in
+                Task {
+                    for chunk in chunks {
+                        if delayMs > 0 {
+                            try? await Task.sleep(for: .milliseconds(delayMs))
+                        }
+                        cont.yield(chunk)
+                    }
+                    cont.finish()
+                }
+            }
+        }
+    }
+
+    func testProcessEchoHi() async throws {
+        let id = "test-process-echo-hi"
+        let bs = try await bootstrap(id)
+
+        let buffer = BufferWriter()
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["/bin/echo", "hi"]
+            config.process.stdout = buffer
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            let status = try await container.wait()
+            try await container.stop()
+
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "process status \(status) != 1")
+            }
+
+            guard String(data: buffer.data, encoding: .utf8) == "hi\n" else {
+                throw IntegrationError.assert(
+                    msg: "process should have returned on stdout 'hi' != '\(String(data: buffer.data, encoding: .utf8)!)'")
+            }
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testProcessNoExecutable() async throws {
+        let id = "test-process-no-executable"
+        let bs = try await bootstrap(id)
+
+        let buffer = BufferWriter()
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["foobarbaz"]
+            config.process.stdout = buffer
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            let _ = try await container.wait()
+            try await container.stop()
+
+            throw IntegrationError.assert(msg: "process didn't throw 'no executable' error")
+        } catch {
+            try? await container.stop()
+            guard let err = error as? ContainerizationError,
+                err.isCode(.internalError), err.description.contains("failed to find target executable")
+            else {
+                throw error
+            }
+        }
+    }
+
+    func testMultipleConcurrentProcesses() async throws {
+        let id = "test-concurrent-processes"
+
+        let bs = try await bootstrap(id)
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["/bin/sleep", "1000"]
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                for i in 0...80 {
+                    let exec = try await container.exec("exec-\(i)") { config in
+                        config.arguments = ["/bin/true"]
+                    }
+
+                    group.addTask {
+                        try await exec.start()
+                        let status = try await exec.wait()
+                        if status.exitCode != 0 {
+                            throw IntegrationError.assert(msg: "process status \(status) != 0")
+                        }
+                        try await exec.delete()
+                    }
+                }
+
+                try await group.waitForAll()
+
+                try await container.stop()
+            }
+        } catch {
+            throw error
+        }
+    }
+
+    func testMultipleConcurrentProcessesOutputStress() async throws {
+        let id = "test-concurrent-processes-output-stress"
+        let bs = try await bootstrap(id)
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["/bin/sleep", "1000"]
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            let buffer = BufferWriter()
+            let exec = try await container.exec("expected-value") { config in
+                config.arguments = [
+                    "sh",
+                    "-c",
+                    "dd if=/dev/random of=/tmp/bytes bs=1M count=20 status=none ; sha256sum /tmp/bytes",
+                ]
+                config.stdout = buffer
+            }
+
+            try await exec.start()
+            let status = try await exec.wait()
+            if status.exitCode != 0 {
+                throw IntegrationError.assert(msg: "process status \(status) != 0")
+            }
+
+            let output = String(data: buffer.data, encoding: .utf8)!
+            let expected = String(output.split(separator: " ").first!)
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                for i in 0...80 {
+                    let idx = i
+                    group.addTask {
+                        let buffer = BufferWriter()
+                        let exec = try await container.exec("exec-\(idx)") { config in
+                            config.arguments = ["cat", "/tmp/bytes"]
+                            config.stdout = buffer
+                        }
+                        try await exec.start()
+
+                        let status = try await exec.wait()
+                        if status.exitCode != 0 {
+                            throw IntegrationError.assert(msg: "process \(idx) status \(status) != 0")
+                        }
+
+                        var hasher = SHA256()
+                        hasher.update(data: buffer.data)
+                        let hash = hasher.finalize().encoded
+                        guard hash == expected else {
+                            throw IntegrationError.assert(
+                                msg: "process \(idx) output \(hash) != expected \(expected)")
+                        }
+                        try await exec.delete()
+                    }
+                }
+
+                try await group.waitForAll()
+            }
+            try await exec.delete()
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        }
+    }
+
+    func testProcessUser() async throws {
+        let id = "test-process-user"
+
+        let bs = try await bootstrap(id)
+        var buffer = BufferWriter()
+        var container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["/usr/bin/id"]
+            config.process.user = .init(uid: 1, gid: 1, additionalGids: [1])
+            config.process.stdout = buffer
+            config.bootLog = bs.bootLog
+        }
+
+        try await container.create()
+        try await container.start()
+
+        var status = try await container.wait()
+        try await container.stop()
+
+        guard status.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "process status \(status) != 0")
+        }
+
+        var expected = "uid=1(bin) gid=1(bin) groups=1(bin)"
+        guard String(data: buffer.data, encoding: .utf8) == "\(expected)\n" else {
+            throw IntegrationError.assert(
+                msg: "process should have returned on stdout '\(expected)' != '\(String(data: buffer.data, encoding: .utf8)!)'")
+        }
+
+        buffer = BufferWriter()
+        container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["/usr/bin/id"]
+            // Try some uid that doesn't exist. This is supported.
+            config.process.user = .init(uid: 40000, gid: 40000)
+            config.process.stdout = buffer
+            config.bootLog = bs.bootLog
+        }
+
+        try await container.create()
+        try await container.start()
+
+        status = try await container.wait()
+        try await container.stop()
+
+        guard status.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "process status \(status) != 0")
+        }
+
+        expected = "uid=40000 gid=40000 groups=40000"
+        guard String(data: buffer.data, encoding: .utf8) == "\(expected)\n" else {
+            throw IntegrationError.assert(
+                msg: "process should have returned on stdout '\(expected)' != '\(String(data: buffer.data, encoding: .utf8)!)'")
+        }
+
+        buffer = BufferWriter()
+        container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["/usr/bin/id"]
+            // Try some uid that doesn't exist. This is supported.
+            config.process.user = .init(username: "40000:40000")
+            config.process.stdout = buffer
+            config.bootLog = bs.bootLog
+        }
+
+        try await container.create()
+        try await container.start()
+
+        status = try await container.wait()
+        try await container.stop()
+
+        guard status.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "process status \(status) != 0")
+        }
+
+        expected = "uid=40000 gid=40000 groups=40000"
+        guard String(data: buffer.data, encoding: .utf8) == "\(expected)\n" else {
+            throw IntegrationError.assert(
+                msg: "process should have returned on stdout '\(expected)' != '\(String(data: buffer.data, encoding: .utf8)!)'")
+        }
+
+        buffer = BufferWriter()
+        container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["/usr/bin/id"]
+            // Now for our final trick, try and run a username that doesn't exist.
+            config.process.user = .init(username: "thisdoesntexist")
+            config.process.stdout = buffer
+            config.bootLog = bs.bootLog
+        }
+
+        try await container.create()
+        do {
+            try await container.start()
+        } catch {
+            return
+        }
+        throw IntegrationError.assert(msg: "container start should have failed")
+    }
+
+    // Ensure if we ask for a terminal we set TERM.
+    func testProcessTtyEnvvar() async throws {
+        let id = "test-process-tty-envvar"
+
+        let bs = try await bootstrap(id)
+        let buffer = BufferWriter()
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["env"]
+            config.process.terminal = true
+            config.process.stdout = buffer
+            config.bootLog = bs.bootLog
+        }
+
+        try await container.create()
+        try await container.start()
+
+        let status = try await container.wait()
+        try await container.stop()
+
+        guard status.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "process status \(status) != 0")
+        }
+
+        guard let str = String(data: buffer.data, encoding: .utf8) else {
+            throw IntegrationError.assert(
+                msg: "failed to convert standard output to a UTF8 string")
+        }
+
+        let homeEnvvar = "TERM=xterm"
+        guard str.contains(homeEnvvar) else {
+            throw IntegrationError.assert(
+                msg: "process should have TERM environment variable defined")
+        }
+    }
+
+    // Make sure we set HOME by default if we can find it in /etc/passwd in the guest.
+    func testProcessHomeEnvvar() async throws {
+        let id = "test-process-home-envvar"
+
+        let bs = try await bootstrap(id)
+        let buffer = BufferWriter()
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["env"]
+            config.process.user = .init(uid: 0, gid: 0)
+            config.process.stdout = buffer
+            config.bootLog = bs.bootLog
+        }
+
+        try await container.create()
+        try await container.start()
+
+        let status = try await container.wait()
+        try await container.stop()
+
+        guard status.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "process status \(status) != 0")
+        }
+
+        guard let str = String(data: buffer.data, encoding: .utf8) else {
+            throw IntegrationError.assert(
+                msg: "failed to convert standard output to a UTF8 string")
+        }
+
+        let homeEnvvar = "HOME=/root"
+        guard str.contains(homeEnvvar) else {
+            throw IntegrationError.assert(
+                msg: "process should have HOME environment variable defined")
+        }
+    }
+
+    func testProcessCustomHomeEnvvar() async throws {
+        let id = "test-process-custom-home-envvar"
+
+        let bs = try await bootstrap(id)
+        let customHomeEnvvar = "HOME=/tmp/custom/home"
+        let buffer = BufferWriter()
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["sh", "-c", "echo HOME=$HOME"]
+            config.process.environmentVariables.append(customHomeEnvvar)
+            config.process.user = .init(uid: 0, gid: 0)
+            config.process.stdout = buffer
+            config.bootLog = bs.bootLog
+        }
+
+        try await container.create()
+        try await container.start()
+
+        let status = try await container.wait()
+        try await container.stop()
+
+        guard status.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "process status \(status) != 0")
+        }
+
+        guard let output = String(data: buffer.data, encoding: .utf8) else {
+            throw IntegrationError.assert(msg: "failed to convert stdout to UTF8")
+        }
+
+        guard output.contains(customHomeEnvvar) else {
+            throw IntegrationError.assert(msg: "process should have preserved custom HOME environment variable, expected \(customHomeEnvvar), got: \(output)")
+        }
+    }
+
+    func testHostname() async throws {
+        let id = "test-container-hostname"
+
+        let bs = try await bootstrap(id)
+        let buffer = BufferWriter()
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["/bin/hostname"]
+            config.hostname = "foo-bar"
+            config.process.stdout = buffer
+            config.bootLog = bs.bootLog
+        }
+
+        try await container.create()
+        try await container.start()
+
+        let status = try await container.wait()
+        try await container.stop()
+
+        guard status.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "process status \(status) != 0")
+        }
+        let expected = "foo-bar"
+
+        guard String(data: buffer.data, encoding: .utf8) == "\(expected)\n" else {
+            throw IntegrationError.assert(
+                msg: "process should have returned on stdout '\(expected)' != '\(String(data: buffer.data, encoding: .utf8)!)'")
+        }
+    }
+
+    func testHostnameDefaultsToContainerID() async throws {
+        let id = "test-container-hostname-default"
+
+        let bs = try await bootstrap(id)
+        let buffer = BufferWriter()
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["/bin/hostname"]
+            config.process.stdout = buffer
+            config.bootLog = bs.bootLog
+        }
+
+        try await container.create()
+        try await container.start()
+
+        let status = try await container.wait()
+        try await container.stop()
+
+        guard status.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "process status \(status) != 0")
+        }
+
+        guard String(data: buffer.data, encoding: .utf8) == "\(id)\n" else {
+            throw IntegrationError.assert(
+                msg: "hostname should default to container id '\(id)', got '\(String(data: buffer.data, encoding: .utf8)!)'")
+        }
+    }
+
+    func testHostsFile() async throws {
+        let id = "test-container-hosts-file"
+
+        let bs = try await bootstrap(id)
+        let entry = Hosts.Entry.localHostIPV4(comment: "Testaroo")
+        let buffer = BufferWriter()
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["cat", "/etc/hosts"]
+            config.hosts = Hosts(entries: [entry])
+            config.process.stdout = buffer
+            config.bootLog = bs.bootLog
+        }
+
+        try await container.create()
+        try await container.start()
+
+        let status = try await container.wait()
+        try await container.stop()
+
+        guard status.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "process status \(status) != 0")
+        }
+
+        let expected = entry.rendered
+        guard String(data: buffer.data, encoding: .utf8) == "\(expected)\n" else {
+            throw IntegrationError.assert(
+                msg: "process should have returned on stdout '\(expected)' != '\(String(data: buffer.data, encoding: .utf8)!)'")
+        }
+    }
+
+    func testProcessStdin() async throws {
+        let id = "test-container-stdin"
+
+        let bs = try await bootstrap(id)
+        let buffer = BufferWriter()
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["cat"]
+            config.process.stdin = StdinBuffer(data: "Hello from test".data(using: .utf8)!)
+            config.process.stdout = buffer
+            config.bootLog = bs.bootLog
+        }
+
+        try await container.create()
+        try await container.start()
+
+        let status = try await container.wait()
+        try await container.stop()
+
+        guard status.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "process status \(status) != 0")
+        }
+        let expected = "Hello from test"
+
+        guard String(data: buffer.data, encoding: .utf8) == "\(expected)" else {
+            throw IntegrationError.assert(
+                msg: "process should have returned on stdout '\(expected)' != '\(String(data: buffer.data, encoding: .utf8)!)'")
+        }
+    }
+
+    func testMounts() async throws {
+        let id = "test-cat-mount"
+
+        let bs = try await bootstrap(id)
+        let buffer = BufferWriter()
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            let directory = try createMountDirectory()
+            config.process.arguments = ["/bin/cat", "/mnt/hi.txt"]
+            config.mounts.append(.share(source: directory.path, destination: "/mnt"))
+            config.process.stdout = buffer
+            config.bootLog = bs.bootLog
+        }
+
+        try await container.create()
+        try await container.start()
+
+        let status = try await container.wait()
+        try await container.stop()
+
+        guard status.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "process status \(status) != 0")
+        }
+
+        let value = String(data: buffer.data, encoding: .utf8)
+        guard value == "hello" else {
+            throw IntegrationError.assert(
+                msg: "process should have returned from file 'hello' != '\(String(data: buffer.data, encoding: .utf8)!)")
+
+        }
+    }
+
+    #if os(macOS)
+    func testNestedVirtualizationEnabled() async throws {
+        let id = "test-nested-virt"
+
+        let bs = try await bootstrap(id)
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["/bin/true"]
+            config.virtualization = true
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+        } catch {
+            if let err = error as? ContainerizationError {
+                if err.code == .unsupported {
+                    throw SkipTest(reason: err.message)
+                }
+            }
+        }
+
+        let status = try await container.wait()
+        try await container.stop()
+
+        guard status.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "process status \(status) != 0")
+        }
+    }
+
+    func testContainerManagerCreate() async throws {
+        let id = "test-container-manager"
+
+        let bs = try await bootstrap(id)
+
+        var manager = try ContainerManager(vmm: bs.vmm)
+        defer {
+            try? manager.delete(id)
+        }
+
+        let buffer = BufferWriter()
+        let container = try await manager.create(
+            id,
+            image: bs.image,
+            rootfs: bs.rootfs
+        ) { config in
+            config.process.arguments = ["/bin/echo", "ContainerManager test"]
+            config.process.stdout = buffer
+            config.bootLog = bs.bootLog
+        }
+
+        try await container.create()
+        try await container.start()
+
+        let status = try await container.wait()
+        try await container.stop()
+
+        guard status.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "process status \(status) != 0")
+        }
+
+        let output = String(data: buffer.data, encoding: .utf8)
+        guard output == "ContainerManager test\n" else {
+            throw IntegrationError.assert(
+                msg: "process should have returned 'ContainerManager test' != '\(output ?? "nil")'")
+        }
+    }
+
+    func testContainerStopIdempotency() async throws {
+        let id = "test-container-stop-idempotency"
+
+        let bs = try await bootstrap(id)
+
+        var manager = try ContainerManager(vmm: bs.vmm)
+        defer {
+            try? manager.delete(id)
+        }
+
+        let buffer = BufferWriter()
+        let container = try await manager.create(
+            id,
+            image: bs.image,
+            rootfs: bs.rootfs
+        ) { config in
+            config.process.arguments = ["/bin/echo", "please stop me"]
+            config.process.stdout = buffer
+            config.bootLog = bs.bootLog
+        }
+
+        try await container.create()
+        try await container.start()
+
+        let status = try await container.wait()
+        guard status.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "process status \(status) != 0")
+        }
+
+        try await container.stop()
+        try await container.stop()
+
+        let output = String(data: buffer.data, encoding: .utf8)
+        guard output == "please stop me\n" else {
+            throw IntegrationError.assert(
+                msg: "process should have returned 'ContainerManager test' != '\(output ?? "nil")'")
+        }
+    }
+
+    func testContainerReuse() async throws {
+        let id = "test-container-reuse"
+
+        let bs = try await bootstrap(id)
+
+        var manager = try ContainerManager(vmm: bs.vmm)
+        defer {
+            try? manager.delete(id)
+        }
+
+        let buffer = BufferWriter()
+        let container = try await manager.create(
+            id,
+            image: bs.image,
+            rootfs: bs.rootfs
+        ) { config in
+            config.process.arguments = ["/bin/echo", "ContainerManager test"]
+            config.process.stdout = buffer
+            config.bootLog = bs.bootLog
+        }
+
+        try await container.create()
+        try await container.start()
+
+        var status = try await container.wait()
+        guard status.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "process status \(status) != 0")
+        }
+        try await container.stop()
+
+        try await container.create()
+        try await container.start()
+
+        // Wait for completion.. again.
+        status = try await container.wait()
+        guard status.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "process status \(status) != 0")
+        }
+
+        let output = String(data: buffer.data, encoding: .utf8)
+        let expected = "ContainerManager test\nContainerManager test\n"
+        guard output == expected else {
+            throw IntegrationError.assert(
+                msg: "process should have returned '\(expected)' != '\(output ?? "nil")'")
+        }
+    }
+
+    func testContainerDevConsole() async throws {
+        let id = "test-container-devconsole"
+
+        let bs = try await bootstrap(id)
+
+        var manager = try ContainerManager(vmm: bs.vmm)
+        defer {
+            try? manager.delete(id)
+        }
+
+        let buffer = BufferWriter()
+        let container = try await manager.create(
+            id,
+            image: bs.image,
+            rootfs: bs.rootfs
+        ) { config in
+            // We mount devtmpfs by default, and while this includes creating
+            // /dev/console typically that'll be pointing to /dev/hvc0 (the
+            // virtio serial console). This is just a character device, so a trivial
+            // way to check that our bind mounted console setup worked is by just
+            // parsing `mount`'s output and looking for /dev/console as it wouldn't
+            // be there normally without our dance.
+            config.process.arguments = ["mount"]
+            config.process.terminal = true
+            config.process.stdout = buffer
+            config.bootLog = bs.bootLog
+        }
+
+        try await container.create()
+        try await container.start()
+
+        let status = try await container.wait()
+        try await container.stop()
+        guard status.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "process status \(status) != 0")
+        }
+
+        guard let str = String(data: buffer.data, encoding: .utf8) else {
+            throw IntegrationError.assert(
+                msg: "failed to convert standard output to a UTF8 string")
+        }
+
+        let devConsole = "/dev/console"
+        guard str.contains(devConsole) else {
+            throw IntegrationError.assert(
+                msg: "process should have \(devConsole) in `mount` output")
+        }
+    }
+
+    #endif
+
+    func testContainerStatistics() async throws {
+        let id = "test-container-statistics"
+
+        let bs = try await bootstrap(id)
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["sleep", "infinity"]
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            let stats = try await container.statistics()
+
+            guard stats.id == id else {
+                throw IntegrationError.assert(msg: "stats container ID '\(stats.id)' != '\(id)'")
+            }
+
+            guard let process = stats.process, process.current > 0 else {
+                throw IntegrationError.assert(msg: "process count should be > 0, got \(stats.process?.current ?? 0)")
+            }
+
+            guard let memory = stats.memory, memory.usageBytes > 0 else {
+                throw IntegrationError.assert(msg: "memory usage should be > 0, got \(stats.memory?.usageBytes ?? 0)")
+            }
+
+            guard let cpu = stats.cpu, cpu.usageUsec > 0 else {
+                throw IntegrationError.assert(msg: "CPU usage should be > 0, got \(stats.cpu?.usageUsec ?? 0)")
+            }
+
+            guard let filesystem = stats.filesystem?.first, filesystem.blocks > filesystem.freeBlocks else {
+                throw IntegrationError.assert(
+                    msg: "filesystem used blocks should be > 0, got blocks=\(stats.filesystem?.first?.blocks ?? 0) freeBlocks=\(stats.filesystem?.first?.freeBlocks ?? 0)")
+            }
+
+            guard filesystem.inodes > filesystem.freeInodes else {
+                throw IntegrationError.assert(msg: "filesystem used inodes should be > 0, got inodes=\(filesystem.inodes) freeInodes=\(filesystem.freeInodes)")
+            }
+
+            let usedBytes = (filesystem.blocks - filesystem.freeBlocks) * filesystem.blockSize
+            let inodesUsed = filesystem.inodes - filesystem.freeInodes
+
+            print("Container statistics:")
+            print("  Processes: \(process.current)")
+            print("  Memory: \(memory.usageBytes) bytes")
+            print("  CPU: \(cpu.usageUsec) usec")
+            print("  Networks: \(stats.networks?.count ?? 0) interfaces")
+            print("  Filesystem: \(usedBytes) bytes, \(inodesUsed) inodes")
+
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testContainerNetworkProtocolStatistics() async throws {
+        let id = "test-container-network-protocol-statistics"
+
+        let bs = try await bootstrap(id)
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["sleep", "infinity"]
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            // Protocol counters are only reported with the network category.
+            let nonNetwork = try await container.statistics(categories: .memory)
+            guard nonNetwork.networkProtocols == nil else {
+                throw IntegrationError.assert(msg: "networkProtocols should be nil when .network is not requested")
+            }
+
+            guard let before = try await container.statistics(categories: .network).networkProtocols else {
+                throw IntegrationError.assert(msg: "expected networkProtocols to be present when .network is requested")
+            }
+
+            // Loopback traffic counts toward the namespace's protocol counters.
+            let pings: UInt64 = 5
+            let exec = try await container.exec("ping-loopback") { config in
+                config.arguments = ["ping", "-c", "\(pings)", "127.0.0.1"]
+            }
+            try await exec.start()
+            let status = try await exec.wait()
+            try await exec.delete()
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "ping failed with exit code \(status.exitCode)")
+            }
+
+            guard let after = try await container.statistics(categories: .network).networkProtocols else {
+                throw IntegrationError.assert(msg: "expected networkProtocols to be present after traffic")
+            }
+
+            // Each ping sends an echo request and receives a reply on loopback.
+            let icmpRx = after.icmp.receivedPackets - before.icmp.receivedPackets
+            let icmpTx = after.icmp.transmittedPackets - before.icmp.transmittedPackets
+            guard icmpRx >= pings, icmpTx >= pings else {
+                throw IntegrationError.assert(msg: "expected icmp rx/tx >= \(pings), got rx=\(icmpRx) tx=\(icmpTx)")
+            }
+
+            let ipRx = after.ip.receivedPackets - before.ip.receivedPackets
+            let ipTx = after.ip.transmittedPackets - before.ip.transmittedPackets
+            guard ipRx >= icmpRx, ipTx >= icmpTx else {
+                throw IntegrationError.assert(msg: "ip packets should cover icmp, got ip rx=\(ipRx) tx=\(ipTx), icmp rx=\(icmpRx) tx=\(icmpTx)")
+            }
+
+            guard
+                let ipRxBefore = before.ip.receivedBytes, let ipTxBefore = before.ip.transmittedBytes,
+                let ipRxAfter = after.ip.receivedBytes, let ipTxAfter = after.ip.transmittedBytes,
+                ipRxAfter > ipRxBefore, ipTxAfter > ipTxBefore
+            else {
+                throw IntegrationError.assert(
+                    msg:
+                        "ip bytes should increase, got rx \(String(describing: before.ip.receivedBytes))->\(String(describing: after.ip.receivedBytes)) tx \(String(describing: before.ip.transmittedBytes))->\(String(describing: after.ip.transmittedBytes))"
+                )
+            }
+
+            // A loopback TCP connection exchanges at least a handshake, data and a close in each direction.
+            let tcpServer = try await container.exec("tcp-loopback") { config in
+                config.arguments = ["sh", "-c", "nc -l -p 9100 >/dev/null & sleep 1; echo hello | nc -w 1 127.0.0.1 9100; wait; true"]
+            }
+            try await tcpServer.start()
+            let tcpStatus = try await tcpServer.wait()
+            try await tcpServer.delete()
+            guard tcpStatus.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "tcp loopback exec failed with exit code \(tcpStatus.exitCode)")
+            }
+
+            guard let afterTcp = try await container.statistics(categories: .network).networkProtocols else {
+                throw IntegrationError.assert(msg: "expected networkProtocols to be present after tcp traffic")
+            }
+
+            let tcpSegments: UInt64 = 3
+            let tcpRx = afterTcp.tcp.receivedPackets - after.tcp.receivedPackets
+            let tcpTx = afterTcp.tcp.transmittedPackets - after.tcp.transmittedPackets
+            guard tcpRx >= tcpSegments, tcpTx >= tcpSegments else {
+                throw IntegrationError.assert(msg: "expected tcp rx/tx >= \(tcpSegments), got rx=\(tcpRx) tx=\(tcpTx)")
+            }
+
+            // The kernel keeps no per-protocol byte counter for TCP, but does count its drops and receive errors.
+            guard afterTcp.tcp.receivedBytes == nil, afterTcp.tcp.transmittedBytes == nil else {
+                throw IntegrationError.assert(msg: "tcp bytes should be unset, got \(afterTcp.tcp)")
+            }
+            guard afterTcp.tcp.receivedDrops != nil, afterTcp.tcp.receivedErrors != nil else {
+                throw IntegrationError.assert(msg: "tcp receivedDrops/receivedErrors should be set, got \(afterTcp.tcp)")
+            }
+            guard afterTcp.tcp.transmittedDrops == nil, afterTcp.tcp.transmittedErrors == nil else {
+                throw IntegrationError.assert(msg: "tcp transmittedDrops/transmittedErrors should be unset, got \(afterTcp.tcp)")
+            }
+
+            // Datagrams to a closed loopback port have no socket to land on, which
+            // the kernel counts as a UDP receive drop (Udp NoPorts).
+            let datagrams: UInt64 = 3
+            let send = try await container.exec("udp-closed-port") { config in
+                config.arguments = ["sh", "-c", "for i in $(seq \(datagrams)); do echo x | nc -u -w 1 127.0.0.1 9; done; true"]
+            }
+            try await send.start()
+            let sendStatus = try await send.wait()
+            try await send.delete()
+            guard sendStatus.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "udp send failed with exit code \(sendStatus.exitCode)")
+            }
+
+            guard let last = try await container.statistics(categories: .network).networkProtocols else {
+                throw IntegrationError.assert(msg: "expected networkProtocols to be present after udp traffic")
+            }
+
+            guard let udpDropsAfter = after.udp.receivedDrops, let udpDropsLast = last.udp.receivedDrops, udpDropsLast - udpDropsAfter >= datagrams else {
+                throw IntegrationError.assert(
+                    msg:
+                        "expected udp receivedDrops to grow by >= \(datagrams), got \(String(describing: after.udp.receivedDrops)) -> \(String(describing: last.udp.receivedDrops))"
+                )
+            }
+
+            // Drop and error counters are cumulative, so none may go backwards.
+            let pairs: [(String, ContainerStatistics.NetworkProtocolCounters, ContainerStatistics.NetworkProtocolCounters)] = [
+                ("tcp", before.tcp, last.tcp), ("udp", before.udp, last.udp), ("icmp", before.icmp, last.icmp), ("ip", before.ip, last.ip),
+            ]
+            for (name, old, new) in pairs {
+                // Unsupported counters are nil on both sides; a counter must not flip between nil and a value.
+                func monotonic(_ old: UInt64?, _ new: UInt64?) -> Bool {
+                    switch (old, new) {
+                    case (nil, nil): true
+                    case (let o?, let n?): n >= o
+                    default: false
+                    }
+                }
+                guard
+                    monotonic(old.receivedDrops, new.receivedDrops), monotonic(old.transmittedDrops, new.transmittedDrops),
+                    monotonic(old.receivedErrors, new.receivedErrors), monotonic(old.transmittedErrors, new.transmittedErrors)
+                else {
+                    throw IntegrationError.assert(msg: "\(name) drop/error counters decreased: \(old) -> \(new)")
+                }
+            }
+
+            // IPv6 traffic lands in udp6/icmp6/ip6 and must not touch the IPv4 counters. The guest brings
+            // lo up, which gives it ::1. TCP has no IPv6 counterpart: the kernel's tcp counters cover both families.
+            guard last.udp6 != nil, last.icmp6 != nil, last.ip6 != nil else {
+                throw IntegrationError.assert(msg: "expected udp6/icmp6/ip6 to be present in a guest with IPv6, got \(last)")
+            }
+
+            func runInGuest(_ name: String, _ arguments: [String]) async throws {
+                let exec = try await container.exec(name) { config in
+                    config.arguments = arguments
+                }
+                try await exec.start()
+                let status = try await exec.wait()
+                try await exec.delete()
+                guard status.exitCode == 0 else {
+                    throw IntegrationError.assert(msg: "\(name) failed with exit code \(status.exitCode)")
+                }
+            }
+
+            try await runInGuest("ping6-loopback", ["ping", "-6", "-c", "\(pings)", "::1"])
+            try await runInGuest("udp6-closed-port", ["sh", "-c", "for i in $(seq \(datagrams)); do echo x | nc -u -w 1 ::1 9; done; true"])
+            try await runInGuest("tcp6-loopback", ["sh", "-c", "nc -l -p 9101 -s ::1 >/dev/null & sleep 1; echo hello | nc -w 1 ::1 9101; wait; true"])
+
+            guard let v6 = try await container.statistics(categories: .network).networkProtocols,
+                let oldUDP6 = last.udp6, let oldICMP6 = last.icmp6, let oldIP6 = last.ip6,
+                let udp6 = v6.udp6, let icmp6 = v6.icmp6, let ip6 = v6.ip6
+            else {
+                throw IntegrationError.assert(msg: "expected udp6/icmp6/ip6 to be present after ipv6 traffic")
+            }
+
+            // Each ping6 sends an echo request and receives a reply on loopback. The guest may also send
+            // neighbor discovery and MLD messages, so these are lower bounds.
+            let icmp6Rx = icmp6.receivedPackets - oldICMP6.receivedPackets
+            let icmp6Tx = icmp6.transmittedPackets - oldICMP6.transmittedPackets
+            guard icmp6Rx >= pings, icmp6Tx >= pings else {
+                throw IntegrationError.assert(msg: "expected icmp6 rx/tx >= \(pings), got rx=\(icmp6Rx) tx=\(icmp6Tx)")
+            }
+
+            let udp6Tx = udp6.transmittedPackets - oldUDP6.transmittedPackets
+            guard udp6Tx >= datagrams else {
+                throw IntegrationError.assert(msg: "expected udp6 tx >= \(datagrams), got \(udp6Tx)")
+            }
+            // As for IPv4, a datagram to a closed port counts as a receive drop (Udp6 NoPorts).
+            guard let udp6Drops = udp6.receivedDrops, let oldUDP6Drops = oldUDP6.receivedDrops, udp6Drops - oldUDP6Drops >= datagrams else {
+                throw IntegrationError.assert(
+                    msg: "expected udp6 receivedDrops to grow by >= \(datagrams), got \(String(describing: oldUDP6.receivedDrops)) -> \(String(describing: udp6.receivedDrops))")
+            }
+
+            // ip6 covers the ping6, the datagrams and the tcp6 connection, and counts bytes.
+            let ip6Rx = ip6.receivedPackets - oldIP6.receivedPackets
+            let ip6Tx = ip6.transmittedPackets - oldIP6.transmittedPackets
+            guard ip6Rx >= icmp6Rx + datagrams, ip6Tx >= icmp6Tx + udp6Tx else {
+                throw IntegrationError.assert(
+                    msg: "ip6 packets should cover icmp6 and udp6, got ip6 rx=\(ip6Rx) tx=\(ip6Tx), icmp6 rx=\(icmp6Rx) tx=\(icmp6Tx), udp6 tx=\(udp6Tx)")
+            }
+            guard let ip6RxBytes = ip6.receivedBytes, let ip6TxBytes = ip6.transmittedBytes,
+                let oldRxBytes = oldIP6.receivedBytes, let oldTxBytes = oldIP6.transmittedBytes,
+                ip6RxBytes > oldRxBytes, ip6TxBytes > oldTxBytes
+            else {
+                throw IntegrationError.assert(msg: "ip6 bytes should increase, got \(oldIP6) -> \(ip6)")
+            }
+
+            // The TCP connection over ::1 shows up in the shared tcp counters, which cover both families.
+            let tcp6Rx = v6.tcp.receivedPackets - last.tcp.receivedPackets
+            let tcp6Tx = v6.tcp.transmittedPackets - last.tcp.transmittedPackets
+            guard tcp6Rx >= tcpSegments, tcp6Tx >= tcpSegments else {
+                throw IntegrationError.assert(msg: "expected tcp rx/tx >= \(tcpSegments) over ipv6, got rx=\(tcp6Rx) tx=\(tcp6Tx)")
+            }
+
+            // None of that is IPv4 traffic: the loopback ping6 and udp6 datagrams must not move the IPv4 counters.
+            guard v6.icmp.receivedPackets == last.icmp.receivedPackets, v6.icmp.transmittedPackets == last.icmp.transmittedPackets else {
+                throw IntegrationError.assert(msg: "icmp (ipv4) changed after ipv6 traffic: \(last.icmp) -> \(v6.icmp)")
+            }
+            guard v6.udp.transmittedPackets == last.udp.transmittedPackets, v6.udp.receivedDrops == last.udp.receivedDrops else {
+                throw IntegrationError.assert(msg: "udp (ipv4) changed after ipv6 traffic: \(last.udp) -> \(v6.udp)")
+            }
+
+            // The IPv6 counters have the same unsupported fields as their IPv4 counterparts.
+            guard udp6.receivedBytes == nil, udp6.transmittedErrors == nil, icmp6.receivedBytes == nil, icmp6.receivedDrops == nil, icmp6.transmittedDrops == nil else {
+                throw IntegrationError.assert(msg: "expected unsupported udp6/icmp6 counters to be unset, got udp6=\(udp6) icmp6=\(icmp6)")
+            }
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testCgroupLimits() async throws {
+        let id = "test-cgroup-limits"
+
+        let bs = try await bootstrap(id)
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm, vm: VMResources(cpus: 3, memoryInBytes: 640.mib())) { config in
+            config.process.arguments = ["sleep", "infinity"]
+            config.cpus = 2
+            config.memoryInBytes = 512.mib()
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            // Start an exec with sleep infinity
+            let sleepExec = try await container.exec("sleep-exec") { config in
+                config.arguments = ["sleep", "infinity"]
+            }
+            try await sleepExec.start()
+
+            // Verify we have 3 PIDs in cgroup.procs: init, exec sleep, and cat itself
+            let procsBuffer = BufferWriter()
+            let procsExec = try await container.exec("check-procs") { config in
+                config.arguments = ["cat", "/sys/fs/cgroup/cgroup.procs"]
+                config.stdout = procsBuffer
+            }
+            try await procsExec.start()
+            var status = try await procsExec.wait()
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "check-procs status \(status) != 0")
+            }
+            try await procsExec.delete()
+
+            guard let procsContent = String(data: procsBuffer.data, encoding: .utf8) else {
+                throw IntegrationError.assert(msg: "failed to parse cgroup.procs")
+            }
+            let pids = procsContent.split(separator: "\n").filter { !$0.isEmpty }
+            guard pids.count == 3 else {
+                throw IntegrationError.assert(msg: "expected 3 PIDs in cgroup.procs, got \(pids.count): \(procsContent)")
+            }
+
+            // Verify memory limit
+            let memoryBuffer = BufferWriter()
+            let memoryExec = try await container.exec("check-memory") { config in
+                config.arguments = ["cat", "/sys/fs/cgroup/memory.max"]
+                config.stdout = memoryBuffer
+            }
+            try await memoryExec.start()
+            status = try await memoryExec.wait()
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "check-memory status \(status) != 0")
+            }
+            try await memoryExec.delete()
+
+            guard let memoryLimit = String(data: memoryBuffer.data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) else {
+                throw IntegrationError.assert(msg: "failed to parse memory.max")
+            }
+            let expectedMemory = "\(512.mib())"
+            guard memoryLimit == expectedMemory else {
+                throw IntegrationError.assert(msg: "memory.max \(memoryLimit) != expected \(expectedMemory)")
+            }
+
+            // Verify CPU limit
+            let cpuBuffer = BufferWriter()
+            let cpuExec = try await container.exec("check-cpu") { config in
+                config.arguments = ["cat", "/sys/fs/cgroup/cpu.max"]
+                config.stdout = cpuBuffer
+            }
+            try await cpuExec.start()
+            status = try await cpuExec.wait()
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "check-cpu status \(status) != 0")
+            }
+            try await cpuExec.delete()
+
+            guard let cpuLimit = String(data: cpuBuffer.data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) else {
+                throw IntegrationError.assert(msg: "failed to parse cpu.max")
+            }
+            let expectedCpu = "200000 100000"  // 2 CPUs: quota=200000, period=100000
+            guard cpuLimit == expectedCpu else {
+                throw IntegrationError.assert(msg: "cpu.max '\(cpuLimit)' != expected '\(expectedCpu)'")
+            }
+
+            try await sleepExec.delete()
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testMemoryEventsOOMKill() async throws {
+        let id = "test-memory-events-oom-kill"
+
+        let bs = try await bootstrap(id)
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["sleep", "infinity"]
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            // Run a process that will exceed the memory limit and get OOM-killed
+            let exec = try await container.exec("oom-trigger") { config in
+                // First set a 2MB memory limit on the container's cgroup, then allocate more
+                config.arguments = [
+                    "sh",
+                    "-c",
+                    "echo 2097152 > /sys/fs/cgroup/memory.max && dd if=/dev/zero of=/dev/null bs=100M",
+                ]
+            }
+
+            try await exec.start()
+            let status = try await exec.wait()
+            if status.exitCode == 0 {
+                throw IntegrationError.assert(msg: "expected exit code > 0")
+            }
+            try await exec.delete()
+
+            let stats = try await container.statistics(categories: .memoryEvents)
+
+            guard let events = stats.memoryEvents else {
+                throw IntegrationError.assert(msg: "expected memoryEvents to be present")
+            }
+
+            print("Memory events for container \(id):")
+            print("  low: \(events.low)")
+            print("  high: \(events.high)")
+            print("  max: \(events.max)")
+            print("  oom: \(events.oom)")
+            print("  oomKill: \(events.oomKill)")
+
+            guard events.oomKill > 0 else {
+                throw IntegrationError.assert(msg: "expected oomKill > 0, got \(events.oomKill)")
+            }
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testNoSerialConsole() async throws {
+        let id = "test-no-serial-console"
+
+        let bs = try await bootstrap(id)
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["/bin/true"]
+        }
+
+        try await container.create()
+        try await container.start()
+
+        let status = try await container.wait()
+        try await container.stop()
+
+        guard status.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "process status \(status) != 0")
+        }
+    }
+
+    func testUnixSocketIntoGuest() async throws {
+        let id = "test-unixsocket-into-guest"
+
+        let bs = try await bootstrap(id)
+
+        let hostSocketPath = try createHostUnixSocket()
+
+        let buffer = BufferWriter()
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["sleep", "100"]
+            config.sockets = [
+                UnixSocketConfiguration(
+                    source: URL(filePath: hostSocketPath),
+                    destination: URL(filePath: "/tmp/test.sock"),
+                    direction: .into
+                )
+            ]
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            // Execute ls -l to check the socket exists and is indeed a socket
+            let lsExec = try await container.exec("ls-socket") { config in
+                config.arguments = ["ls", "-l", "/tmp/test.sock"]
+                config.stdout = buffer
+            }
+
+            try await lsExec.start()
+            let status = try await lsExec.wait()
+            try await lsExec.delete()
+
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "ls command failed with status \(status)")
+            }
+
+            guard let output = String(data: buffer.data, encoding: .utf8) else {
+                throw IntegrationError.assert(msg: "failed to convert ls output to UTF8")
+            }
+
+            // Socket files in ls -l output start with 's'
+            guard output.hasPrefix("s") else {
+                throw IntegrationError.assert(
+                    msg: "expected socket file (starting with 's'), got: \(output)")
+            }
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testUnixSocketIntoGuestParallelTraffic() async throws {
+        let id = "test-unixsocket-parallel-traffic"
+        let bs = try await bootstrap(id)
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["sleep", "infinity"]
+            config.bootLog = bs.bootLog
+        }
+        var connections: [FileHandle] = []
+        var listener: VsockListener?
+
+        func closeConnections() {
+            for connection in connections {
+                try? connection.close()
+            }
+            connections.removeAll()
+        }
+
+        func read(from connection: FileHandle, context: String) throws -> Data {
+            var event = pollfd(fd: connection.fileDescriptor, events: Int16(POLLIN), revents: 0)
+            let ready = Syscall.retrying { poll(&event, 1, 2_000) }
+            guard ready > 0 else {
+                throw IntegrationError.assert(msg: "forwarded socket timed out waiting for \(context)")
+            }
+            return try connection.read(upToCount: 1) ?? Data()
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+            let vm = try await container.withVirtualMachineInstance { $0 }
+            let hostPort: UInt32 = 2000
+            let guestPort: UInt32 = 2001
+            let hostListener = try vm.listen(hostPort)
+            listener = hostListener
+            defer { try? hostListener.finish() }
+            let vminitd = try await Vminitd(connection: container.dialVsock(port: Vminitd.port), group: Self.eventLoop)
+            let path = URL(filePath: "/run/test-relay.sock")
+            // Route host clients through both guest relays and back to the host listener.
+            try await vminitd.relaySocket(port: hostPort, configuration: .init(source: path, destination: path, direction: .into))
+            try await vminitd.relaySocket(port: guestPort, configuration: .init(source: path, destination: path, direction: .outOf))
+            var accepted = hostListener.makeAsyncIterator()
+
+            for round in 0..<100 {
+                let silentServer = round.isMultiple(of: 10)
+                let acceptDeadline = Task {
+                    try await Task.sleep(for: .seconds(20))
+                    try hostListener.finish()
+                }
+                defer { acceptDeadline.cancel() }
+                var clients: [FileHandle] = []
+                for _ in 0..<16 {
+                    let client = try await vm.dial(guestPort)
+                    connections.append(client)
+                    clients.append(client)
+                }
+                var peers: [FileHandle] = []
+                for _ in clients {
+                    guard let peer = await accepted.next() else {
+                        throw IntegrationError.assert(msg: "guest did not connect to the host listener")
+                    }
+                    connections.append(peer)
+                    peers.append(peer)
+                }
+                acceptDeadline.cancel()
+                // Allow initial writable events to fire while both peers are idle.
+                try await Task.sleep(for: .milliseconds(10))
+                for (index, client) in clients.enumerated() {
+                    try client.write(contentsOf: Data([UInt8(index)]))
+                    if !round.isMultiple(of: 2) {
+                        guard shutdown(client.fileDescriptor, Int32(SHUT_WR)) == 0 else { throw POSIXError.fromErrno() }
+                    }
+                }
+                for peer in peers {
+                    let request = try read(from: peer, context: "request in round \(round)")
+                    if !round.isMultiple(of: 2) {
+                        guard try read(from: peer, context: "request EOF in round \(round)").isEmpty else { throw IntegrationError.assert(msg: "expected request EOF") }
+                    }
+                    if silentServer {
+                        try peer.close()
+                    } else {
+                        try peer.write(contentsOf: request)
+                        if round.isMultiple(of: 2) { try peer.close() }
+                    }
+                }
+                for (index, client) in clients.enumerated() {
+                    let expected = silentServer ? Data() : Data([UInt8(index)])
+                    guard try read(from: client, context: "reply in round \(round)") == expected else {
+                        throw IntegrationError.assert(msg: "forwarded socket reply did not match its request")
+                    }
+                }
+                if !round.isMultiple(of: 2) {
+                    for peer in peers {
+                        guard shutdown(peer.fileDescriptor, Int32(SHUT_WR)) == 0 else { throw POSIXError.fromErrno() }
+                    }
+                }
+                for client in clients {
+                    guard try read(from: client, context: "reply EOF in round \(round)").isEmpty else { throw IntegrationError.assert(msg: "expected reply EOF") }
+                }
+                closeConnections()
+            }
+
+            try await vminitd.close()
+            try await container.stop()
+        } catch {
+            // Release any guest relay blocked on a host peer before stopping the VM.
+            if let listener {
+                try? listener.finish()
+                for await peer in listener { try? peer.close() }
+            }
+            closeConnections()
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    // NOTE: Once upon a time our guest agent created any proxied unix sockets at
+    // a path that contained the container ID in it. The problem here is if the container
+    // ID is comically long we exceed the max length of a unix domain socket path.
+    func testUnixSocketIntoGuestLongContainerID() async throws {
+        let id = "test-unixsocket-long-id-" + String(repeating: "a", count: 40)
+
+        let bs = try await bootstrap(id)
+
+        let hostSocketPath = try createHostUnixSocket()
+
+        let buffer = BufferWriter()
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["sleep", "100"]
+            config.sockets = [
+                UnixSocketConfiguration(
+                    source: URL(filePath: hostSocketPath),
+                    destination: URL(filePath: "/tmp/test.sock"),
+                    direction: .into
+                )
+            ]
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            let lsExec = try await container.exec("ls-socket") { config in
+                config.arguments = ["ls", "-l", "/tmp/test.sock"]
+                config.stdout = buffer
+            }
+
+            try await lsExec.start()
+            let status = try await lsExec.wait()
+            try await lsExec.delete()
+
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "ls command failed with status \(status)")
+            }
+
+            guard let output = String(data: buffer.data, encoding: .utf8) else {
+                throw IntegrationError.assert(msg: "failed to convert ls output to UTF8")
+            }
+
+            guard output.hasPrefix("s") else {
+                throw IntegrationError.assert(
+                    msg: "expected socket file (starting with 's'), got: \(output)")
+            }
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testNonClosureConstructor() async throws {
+        let id = "test-container-non-closure-constructor"
+
+        let bs = try await bootstrap(id)
+        let config = LinuxContainer.Configuration(
+            process: LinuxProcessConfiguration(arguments: ["/bin/true"])
+        )
+        let container = try LinuxContainer(
+            id,
+            rootfs: bs.rootfs,
+            vmm: bs.vmm,
+            configuration: config
+        )
+
+        try await container.create()
+        try await container.start()
+
+        let status = try await container.wait()
+        try await container.stop()
+
+        guard status.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "process status \(status) != 0")
+        }
+    }
+
+    private func createHostUnixSocket() throws -> String {
+        let dir = FileManager.default.uniqueTemporaryDirectory(create: true)
+        let socketPath = dir.appendingPathComponent("test.sock").path
+
+        let socket = try Socket(type: UnixType(path: socketPath))
+        try socket.listen()
+
+        return socketPath
+    }
+
+    private func createMountDirectory() throws -> URL {
+        let dir = FileManager.default.uniqueTemporaryDirectory(create: true)
+        try "hello".write(to: dir.appendingPathComponent("hi.txt"), atomically: true, encoding: .utf8)
+        return dir
+    }
+
+    func testUnixSocketIntoGuestSymlink() async throws {
+        let id = "test-unixsocket-into-guest-symlink"
+
+        let bs = try await bootstrap(id)
+
+        let hostSocketPath = try createHostUnixSocket()
+
+        let buffer = BufferWriter()
+        // Use /var/run/test.sock. Alpine has /var/run -> /run symlink
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["sleep", "100"]
+            config.sockets = [
+                UnixSocketConfiguration(
+                    source: URL(filePath: hostSocketPath),
+                    destination: URL(filePath: "/var/run/test.sock"),
+                    direction: .into
+                )
+            ]
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            let lsExec = try await container.exec("ls-socket") { config in
+                config.arguments = ["ls", "-l", "/var/run/test.sock"]
+                config.stdout = buffer
+            }
+
+            try await lsExec.start()
+            let status = try await lsExec.wait()
+            try await lsExec.delete()
+
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "ls command failed with status \(status)")
+            }
+
+            guard let output = String(data: buffer.data, encoding: .utf8) else {
+                throw IntegrationError.assert(msg: "failed to convert ls output to UTF8")
+            }
+
+            // Socket files in ls -l output start with 's'
+            guard output.hasPrefix("s") else {
+                throw IntegrationError.assert(
+                    msg: "expected socket file (starting with 's'), got: \(output)")
+            }
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testBootLogFileHandle() async throws {
+        let id = "test-bootlog-filehandle"
+
+        let bs = try await bootstrap(id)
+
+        // Create a pipe to capture boot log data
+        let pipe = Pipe()
+        let bootLog = BootLog.fileHandle(pipe.fileHandleForWriting)
+
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["/bin/echo", "test complete"]
+            config.bootLog = bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            let status = try await container.wait()
+            try await container.stop()
+
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "process status \(status) != 0")
+            }
+
+            try pipe.fileHandleForWriting.close()
+            let bootLogData = try pipe.fileHandleForReading.readToEnd()
+            guard let bootLogData = bootLogData, bootLogData.count > 0 else {
+                throw IntegrationError.assert(
+                    msg: "expected to receive boot log data from pipe, but got no data")
+            }
+
+            guard let bootLogString = String(data: bootLogData, encoding: .utf8) else {
+                throw IntegrationError.assert(
+                    msg: "failed to convert boot log data to UTF8 string")
+            }
+
+            guard bootLogString.count > 100 else {
+                throw IntegrationError.assert(
+                    msg: "boot log output smaller than expected: got \(bootLogString.count)")
+            }
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testLargeStdioOutput() async throws {
+        let id = "test-large-stdout-stderr-output"
+
+        let bs = try await bootstrap(id)
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["/bin/sleep", "1000"]
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            let stdoutBuffer = DiscardingWriter()
+            let stderrBuffer = DiscardingWriter()
+
+            let exec = try await container.exec("large-output") { config in
+                config.arguments = [
+                    "sh",
+                    "-c",
+                    """
+                    dd if=/dev/zero bs=1M count=250 status=none && \
+                    dd if=/dev/zero bs=1M count=250 status=none >&2
+                    """,
+                ]
+                config.stdout = stdoutBuffer
+                config.stderr = stderrBuffer
+            }
+
+            let started = Date().timeIntervalSinceReferenceDate
+
+            try await exec.start()
+            let status = try await exec.wait()
+
+            let lasted = Date().timeIntervalSinceReferenceDate - started
+            print("Test \(id) finished process ingesting stdio in \(lasted)")
+
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "exec process status \(status) != 0")
+            }
+
+            try await exec.delete()
+
+            let expectedSize = 250 * 1024 * 1024
+            guard stdoutBuffer.count == expectedSize else {
+                throw IntegrationError.assert(
+                    msg: "stdout size \(stdoutBuffer.count) != expected \(expectedSize)")
+            }
+
+            guard stderrBuffer.count == expectedSize else {
+                throw IntegrationError.assert(
+                    msg: "stderr size \(stderrBuffer.count) != expected \(expectedSize)")
+            }
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testProcessDeleteIdempotency() async throws {
+        let id = "test-process-delete-idempotency"
+
+        let bs = try await bootstrap(id)
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["/bin/sleep", "1000"]
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            // Create an exec process
+            let exec = try await container.exec("test-exec") { config in
+                config.arguments = ["/bin/true"]
+            }
+
+            try await exec.start()
+            let status = try await exec.wait()
+
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "exec process status \(status) != 0")
+            }
+
+            // Call delete twice to verify idempotency
+            try await exec.delete()
+            try await exec.delete()  // Should be a no-op
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testMultipleExecsWithoutDelete() async throws {
+        let id = "test-multiple-execs-without-delete"
+
+        let bs = try await bootstrap(id)
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["/bin/sleep", "1000"]
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            // Create 3 exec processes without deleting them
+            let exec1 = try await container.exec("exec-1") { config in
+                config.arguments = ["/bin/true"]
+            }
+            try await exec1.start()
+            let status1 = try await exec1.wait()
+            guard status1.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "exec1 process status \(status1) != 0")
+            }
+
+            let exec2 = try await container.exec("exec-2") { config in
+                config.arguments = ["/bin/true"]
+            }
+            try await exec2.start()
+            let status2 = try await exec2.wait()
+            guard status2.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "exec2 process status \(status2) != 0")
+            }
+
+            let exec3 = try await container.exec("exec-3") { config in
+                config.arguments = ["/bin/true"]
+            }
+            try await exec3.start()
+            let status3 = try await exec3.wait()
+            guard status3.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "exec3 process status \(status3) != 0")
+            }
+
+            // Stop should handle cleanup of all exec processes gracefully
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    /// Sequential `exec`s with stdio must not run a VM out of vsock ports.
+    ///
+    /// The cloud-hypervisor backend pre-binds a fixed pool of host stdio
+    /// sockets (it has to: the VMM can't see socket files created after it
+    /// forked). While host port numbers were handed out by a fetch-add that
+    /// never reused one, and a finished stream destroyed its pool entry, that
+    /// pool was a *lifetime* budget for the VM rather than a concurrency one —
+    /// a one-container pod accepted exactly four sequential execs and the
+    /// fifth failed with "vsock port … was not pre-bound". An `exec` liveness
+    /// probe every 10s therefore bricked a pod in well under a minute.
+    ///
+    /// 40 execs at two stdio ports each is 80 allocations, comfortably past
+    /// the pre-bound pool, so this only passes if ports and pool entries are
+    /// both recycled. Each exec also checks its *own* output, which is what
+    /// catches the failure mode recycling introduces: a straggling dial for a
+    /// finished stream getting delivered to whichever process reused the port.
+    func testSequentialExecsReuseStdioPorts() async throws {
+        let id = "test-sequential-execs-reuse-stdio-ports"
+
+        let bs = try await bootstrap(id)
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["/bin/sleep", "1000"]
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            for index in 0..<40 {
+                let expected = "exec-\(index)"
+                let stdout = BufferWriter()
+                let stderr = BufferWriter()
+                let exec = try await container.exec("seq-\(index)") { config in
+                    config.arguments = ["/bin/echo", expected]
+                    config.stdout = stdout
+                    config.stderr = stderr
+                }
+                try await exec.start()
+                let status = try await exec.wait()
+                try await exec.delete()
+
+                guard status.exitCode == 0 else {
+                    throw IntegrationError.assert(msg: "exec \(index) status \(status) != 0")
+                }
+                let got = String(data: stdout.data, encoding: .utf8) ?? ""
+                guard got == "\(expected)\n" else {
+                    throw IntegrationError.assert(
+                        msg: "exec \(index) stdout '\(got)' != '\(expected)\\n' — a recycled port may be cross-wired")
+                }
+                let err = String(data: stderr.data, encoding: .utf8) ?? ""
+                guard err.isEmpty else {
+                    throw IntegrationError.assert(msg: "exec \(index) stderr should be empty, got '\(err)'")
+                }
+            }
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testNonExistentBinary() async throws {
+        let id = "test-non-existent-binary"
+
+        let bs = try await bootstrap(id)
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["foo-bar-baz"]
+            config.bootLog = bs.bootLog
+        }
+
+        try await container.create()
+        do {
+            try await container.start()
+        } catch {
+            return
+        }
+        try await container.stop()
+        throw IntegrationError.assert(msg: "container start should have failed")
+    }
+
+    // MARK: - Capability Tests
+
+    func testCapabilitiesSysAdmin() async throws {
+        let id = "test-capabilities-sysadmin"
+
+        let bs = try await bootstrap(id)
+
+        // First test: without CAP_SYS_ADMIN (should be denied)
+        let bufferDenied = BufferWriter()
+        let containerWithoutSysAdmin = try LinuxContainer("\(id)-denied", rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.capabilities = LinuxCapabilities()
+            config.process.arguments = ["/bin/sh", "-c", "mount -t tmpfs tmpfs /tmp || echo 'mount failed as expected'"]
+            config.process.stdout = bufferDenied
+            config.bootLog = bs.bootLog
+        }
+
+        try await containerWithoutSysAdmin.create()
+        try await containerWithoutSysAdmin.start()
+
+        var status = try await containerWithoutSysAdmin.wait()
+        try await containerWithoutSysAdmin.stop()
+
+        guard status.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "container should have run successfully, got exit code \(status.exitCode)")
+        }
+
+        guard let outputDenied = String(data: bufferDenied.data, encoding: .utf8) else {
+            throw IntegrationError.assert(msg: "failed to convert stdout to UTF8")
+        }
+
+        guard outputDenied.contains("mount failed as expected") else {
+            throw IntegrationError.assert(msg: "expected mount failure message, got: \(outputDenied)")
+        }
+
+        // Second test: with CAP_SYS_ADMIN (should succeed)
+        let containerWithSysAdmin = try LinuxContainer("\(id)-allowed", rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.capabilities = LinuxCapabilities(capabilities: [.sysAdmin])
+            config.process.arguments = ["/bin/sh", "-c", "mount -t tmpfs tmpfs /tmp"]
+            config.bootLog = bs.bootLog
+        }
+
+        try await containerWithSysAdmin.create()
+        try await containerWithSysAdmin.start()
+
+        status = try await containerWithSysAdmin.wait()
+        try await containerWithSysAdmin.stop()
+
+        guard status.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "container with CAP_SYS_ADMIN should mount successfully, got exit code \(status.exitCode)")
+        }
+    }
+
+    func testCapabilitiesNetAdmin() async throws {
+        let id = "test-capabilities-netadmin"
+
+        let bs = try await bootstrap(id)
+
+        // First test: without CAP_NET_ADMIN (should be denied)
+        let bufferDenied = BufferWriter()
+        let containerWithoutNetAdmin = try LinuxContainer("\(id)-denied", rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.capabilities = LinuxCapabilities()
+            config.process.arguments = ["/bin/sh", "-c", "ip link set lo down 2>/dev/null || echo 'network operation denied as expected'"]
+            config.process.stdout = bufferDenied
+            config.bootLog = bs.bootLog
+        }
+
+        try await containerWithoutNetAdmin.create()
+        try await containerWithoutNetAdmin.start()
+
+        var status = try await containerWithoutNetAdmin.wait()
+        try await containerWithoutNetAdmin.stop()
+
+        guard status.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "container should handle network denial gracefully, got exit code \(status.exitCode)")
+        }
+
+        guard let outputDenied = String(data: bufferDenied.data, encoding: .utf8) else {
+            throw IntegrationError.assert(msg: "failed to convert stdout to UTF8")
+        }
+
+        guard outputDenied.contains("network operation denied as expected") else {
+            throw IntegrationError.assert(msg: "expected network denial message, got: \(outputDenied)")
+        }
+
+        // Second test: with CAP_NET_ADMIN (should succeed)
+        let bufferAllowed = BufferWriter()
+        let containerWithNetAdmin = try LinuxContainer("\(id)-allowed", rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.capabilities = LinuxCapabilities(capabilities: [.netAdmin])
+            config.process.arguments = ["/bin/sh", "-c", "ip link set lo down && ip link set lo up"]
+            config.process.stdout = bufferAllowed
+            config.bootLog = bs.bootLog
+        }
+
+        try await containerWithNetAdmin.create()
+        try await containerWithNetAdmin.start()
+
+        status = try await containerWithNetAdmin.wait()
+        try await containerWithNetAdmin.stop()
+
+        guard status.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "container with CAP_NET_ADMIN should perform network operations, got exit code \(status.exitCode)")
+        }
+    }
+
+    func testCapabilitiesOCIDefault() async throws {
+        let id = "test-capabilities-OCI-default"
+
+        let bs = try await bootstrap(id)
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            // Use default capability set
+            config.process.capabilities = .defaultOCICapabilities
+            config.process.arguments = ["/bin/sh", "-c", "echo 'Running with OCI default capabilities'"]
+            config.bootLog = bs.bootLog
+        }
+
+        try await container.create()
+        try await container.start()
+
+        let status = try await container.wait()
+        try await container.stop()
+
+        guard status.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "container with OCI default capabilities should run, got exit code \(status.exitCode)")
+        }
+    }
+
+    func testCapabilitiesAllCapabilities() async throws {
+        let id = "test-capabilities-all"
+
+        let bs = try await bootstrap(id)
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.capabilities = .allCapabilities
+            config.process.arguments = ["/bin/sh", "-c", "mount -t tmpfs tmpfs /tmp && ip link set lo down"]
+            config.bootLog = bs.bootLog
+        }
+
+        try await container.create()
+        try await container.start()
+
+        let status = try await container.wait()
+        try await container.stop()
+
+        guard status.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "container with all capabilities should perform all operations, got exit code \(status.exitCode)")
+        }
+    }
+
+    func testCapabilitiesFileOwnership() async throws {
+        let id = "test-capabilities-chown"
+
+        let bs = try await bootstrap(id)
+
+        // First test: without CAP_CHOWN
+        let bufferDenied = BufferWriter()
+        let containerWithoutChown = try LinuxContainer("\(id)-denied", rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.capabilities = LinuxCapabilities()
+            config.process.arguments = ["/bin/sh", "-c", "touch /tmp/testfile && chown 1000:1000 /tmp/testfile 2>/dev/null || echo 'chown denied as expected'"]
+            config.process.stdout = bufferDenied
+            config.bootLog = bs.bootLog
+        }
+
+        try await containerWithoutChown.create()
+        try await containerWithoutChown.start()
+
+        var status = try await containerWithoutChown.wait()
+        try await containerWithoutChown.stop()
+
+        guard status.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "container should handle chown denial gracefully, got exit code \(status.exitCode)")
+        }
+
+        guard let outputDenied = String(data: bufferDenied.data, encoding: .utf8) else {
+            throw IntegrationError.assert(msg: "failed to convert stdout to UTF8")
+        }
+
+        guard outputDenied.contains("chown denied as expected") else {
+            throw IntegrationError.assert(msg: "expected chown denial message, got: \(outputDenied)")
+        }
+
+        // Second test: with CAP_CHOWN
+        let bufferAllowed = BufferWriter()
+        let containerWithChown = try LinuxContainer("\(id)-allowed", rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.capabilities = LinuxCapabilities(capabilities: [.chown])
+            config.process.arguments = ["/bin/sh", "-c", "touch /tmp/testfile && chown 1000:1000 /tmp/testfile"]
+            config.process.stdout = bufferAllowed
+            config.bootLog = bs.bootLog
+        }
+
+        try await containerWithChown.create()
+        try await containerWithChown.start()
+
+        status = try await containerWithChown.wait()
+        try await containerWithChown.stop()
+
+        guard status.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "container with CAP_CHOWN should succeed, got exit code \(status.exitCode)")
+        }
+    }
+
+    func testDefaultMaskedAndReadonlyPaths() async throws {
+        let id = "test-masked-readonly-defaults"
+
+        // A default container (default capabilities + default masked/readonly
+        // paths) must have the OCI standard set enforced by vmexec without any
+        // opt-in. Probe from inside the guest:
+        //   1. readonlyPaths: writing under /proc/sys fails with EROFS. EROFS
+        //      (not EPERM) proves the read-only remount rather than a mere
+        //      capability denial — the default (restricted) caps already lack
+        //      CAP_SYS_ADMIN, so a writable /proc/sys would fail with EPERM.
+        //      The write is wrapped in a brace group so the shell's redirection
+        //      failure ("can't create ...: Read-only file system") is captured:
+        //      a trailing `2>&1` on the command misses it, because the failing
+        //      `>` redirection aborts before `2>&1` is applied.
+        //   2. maskedPaths: at least one default-masked path is mounted over
+        //      (visible in /proc/self/mountinfo). Checked via mountinfo rather
+        //      than reading the target, since some masked paths (e.g.
+        //      /proc/kcore) require CAP_SYS_RAWIO to read and would appear empty
+        //      even if masking were broken, yielding a false pass.
+        let probe = """
+            set -u
+            rerr=$( { echo x > /proc/sys/kernel/hostname; } 2>&1 )
+            case "$rerr" in
+                *"Read-only file system"*) ;;
+                *) echo "RO-FAIL: writing /proc/sys expected EROFS, got: ${rerr:-<write succeeded>}"; exit 1 ;;
+            esac
+            masked=0
+            for p in /proc/kcore /proc/keys /proc/scsi /proc/sched_debug /sys/firmware /sys/devices/virtual/powercap; do
+                grep -q " $p " /proc/self/mountinfo && masked=$((masked + 1))
+            done
+            if [ "$masked" -eq 0 ]; then
+                echo "MASK-FAIL: no default masked path mounted"
+                cat /proc/self/mountinfo
+                exit 1
+            fi
+            echo "MASKED-RO-OK masked=$masked"
+            """
+
+        let bs = try await bootstrap(id)
+        let buffer = BufferWriter()
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            // Intentionally leave config.maskedPaths / readonlyPaths /
+            // process.capabilities untouched — the point is that the defaults
+            // are secure out of the box.
+            config.process.arguments = ["/bin/sh", "-c", probe]
+            config.process.stdout = buffer
+            config.bootLog = bs.bootLog
+        }
+
+        try await container.create()
+        try await container.start()
+
+        let status = try await container.wait()
+        try await container.stop()
+
+        let output = String(data: buffer.data, encoding: .utf8) ?? "<non-utf8 output>"
+        guard status.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "default masked/readonly enforcement failed (exit \(status.exitCode)): \(output)")
+        }
+        guard output.contains("MASKED-RO-OK") else {
+            throw IntegrationError.assert(msg: "expected MASKED-RO-OK sentinel, got: \(output)")
+        }
+    }
+
+    func testStat() async throws {
+        let id = "test-stat"
+
+        let bs = try await bootstrap(id)
+
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["sleep", "100"]
+            config.bootLog = bs.bootLog
+        }
+
+        func assertExec(_ container: LinuxContainer, id: String, cmd: String) async throws {
+            let exec = try await container.exec(id) { config in
+                config.arguments = ["sh", "-c", cmd]
+            }
+            try await exec.start()
+            let status = try await exec.wait()
+            try await exec.delete()
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "\(id) failed with exit code \(status.exitCode)")
+            }
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            // regular file: "regular file" is exactly 12 bytes
+            try await assertExec(container, id: "create-regular-file", cmd: "echo -n 'regular file' > /tmp/regular-file.txt")
+            // directory
+            try await assertExec(container, id: "create-dir", cmd: "mkdir /tmp/test-dir")
+            // relative symlink so stat() resolves the target within the same directory
+            try await assertExec(container, id: "create-symlink", cmd: "ln -s regular-file.txt /tmp/test-link")
+            // FIFO
+            try await assertExec(container, id: "create-fifo", cmd: "mkfifo /tmp/test-fifo")
+
+            let vsock = try await container.dialVsock(port: 1024)
+            let vminitd = try await Vminitd(connection: vsock, group: Self.eventLoop)
+
+            // --- regular file ---
+            let regularStat = try await vminitd.stat(root: container.root, path: "tmp/regular-file.txt")
+            guard (regularStat.mode & UInt32(S_IFMT)) == S_IFREG else {
+                throw IntegrationError.assert(msg: "regular file: expected S_IFREG, got mode 0x\(String(regularStat.mode, radix: 16))")
+            }
+            guard regularStat.size == 12 else {
+                throw IntegrationError.assert(msg: "regular file: expected size 12, got \(regularStat.size)")
+            }
+            guard regularStat.ino > 0 else {
+                throw IntegrationError.assert(msg: "regular file: expected non-zero inode, got \(regularStat.ino)")
+            }
+            guard regularStat.nlink >= 1 else {
+                throw IntegrationError.assert(msg: "regular file: expected nlink >= 1, got \(regularStat.nlink)")
+            }
+
+            // --- directory ---
+            let dirStat = try await vminitd.stat(root: container.root, path: "tmp/test-dir")
+            guard (dirStat.mode & UInt32(S_IFMT)) == S_IFDIR else {
+                throw IntegrationError.assert(msg: "directory: expected S_IFDIR, got mode 0x\(String(dirStat.mode, radix: 16))")
+            }
+            // A directory always has at least 2 hard links (. and its entry in the parent)
+            guard dirStat.nlink >= 2 else {
+                throw IntegrationError.assert(msg: "directory: expected nlink >= 2, got \(dirStat.nlink)")
+            }
+
+            // --- symlink ---
+            // stat follows symlinks (confined to the rootfs), so the result reflects the target regular file
+            let symlinkStat = try await vminitd.stat(root: container.root, path: "tmp/test-link")
+            guard (symlinkStat.mode & UInt32(S_IFMT)) == S_IFREG else {
+                throw IntegrationError.assert(msg: "symlink (followed): expected S_IFREG, got mode 0x\(String(symlinkStat.mode, radix: 16))")
+            }
+            guard symlinkStat.size == regularStat.size else {
+                throw IntegrationError.assert(msg: "symlink (followed): expected size \(regularStat.size), got \(symlinkStat.size)")
+            }
+
+            // --- FIFO ---
+            let fifoStat = try await vminitd.stat(root: container.root, path: "tmp/test-fifo")
+            guard (fifoStat.mode & UInt32(S_IFMT)) == S_IFIFO else {
+                throw IntegrationError.assert(msg: "FIFO: expected S_IFIFO, got mode 0x\(String(fifoStat.mode, radix: 16))")
+            }
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testCopyIn() async throws {
+        let id = "test-copy-in"
+
+        let bs = try await bootstrap(id)
+
+        // Create a temp file on the host with known content
+        let testContent = "Hello from the host! This is a copyIn test."
+        let hostFile = FileManager.default.uniqueTemporaryDirectory(create: true)
+            .appendingPathComponent("test-input.txt")
+        try testContent.write(to: hostFile, atomically: true, encoding: .utf8)
+
+        let buffer = BufferWriter()
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["sleep", "100"]
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            // Copy the file into the container
+            try await container.copyIn(
+                from: hostFile,
+                to: URL(filePath: "/tmp/copied-file.txt")
+            )
+
+            // Verify the file exists and has correct content
+            let exec = try await container.exec("verify-copy") { config in
+                config.arguments = ["cat", "/tmp/copied-file.txt"]
+                config.stdout = buffer
+            }
+
+            try await exec.start()
+            let status = try await exec.wait()
+            try await exec.delete()
+
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "cat command failed with status \(status)")
+            }
+
+            guard let output = String(data: buffer.data, encoding: .utf8) else {
+                throw IntegrationError.assert(msg: "failed to convert output to UTF8")
+            }
+
+            guard output == testContent else {
+                throw IntegrationError.assert(
+                    msg: "copied file content mismatch: expected '\(testContent)', got '\(output)'")
+            }
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testCopyInDoesNotEscapeRootfsViaSymlink() async throws {
+        let id = "test-copy-in-symlink-escape"
+
+        let bs = try await bootstrap(id)
+
+        let hostFile = FileManager.default.uniqueTemporaryDirectory(create: true)
+            .appendingPathComponent("payload.txt")
+        try "HACKED".write(to: hostFile, atomically: true, encoding: .utf8)
+
+        let buffer = BufferWriter()
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["sleep", "100"]
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            // Plant a symlink whose absolute target would, resolved unconfined in
+            // vminitd's namespace, escape the container rootfs.
+            let setup = try await container.exec("plant-symlink") { config in
+                config.arguments = ["sh", "-c", "echo -n ORIGINAL > /target && ln -s /target /tmp/escape"]
+            }
+            try await setup.start()
+            guard try await setup.wait().exitCode == 0 else {
+                throw IntegrationError.assert(msg: "failed to plant symlink")
+            }
+            try await setup.delete()
+
+            // Copy through the symlink: the write must land on the container's own
+            // /target (the confined symlink target), not a same-named VM-root file.
+            try await container.copyIn(from: hostFile, to: URL(filePath: "/tmp/escape"))
+
+            let exec = try await container.exec("verify") { config in
+                config.arguments = ["cat", "/target"]
+                config.stdout = buffer
+            }
+            try await exec.start()
+            let status = try await exec.wait()
+            try await exec.delete()
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "cat /target failed with status \(status)")
+            }
+            let got = String(data: buffer.data, encoding: .utf8) ?? ""
+            guard got == "HACKED" else {
+                throw IntegrationError.assert(msg: "copyIn did not stay within the rootfs: /target = '\(got)'")
+            }
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testCopyOutDoesNotEscapeRootfsViaSymlink() async throws {
+        let id = "test-copy-out-symlink-escape"
+
+        let bs = try await bootstrap(id)
+
+        let hostDestination = FileManager.default.uniqueTemporaryDirectory(create: true)
+            .appendingPathComponent("out.txt")
+
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["sleep", "100"]
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            // A symlink whose absolute target resolves, confined, to the container's
+            // own file. copyOut must read that, never a same-named VM-root file.
+            let setup = try await container.exec("plant-symlink") { config in
+                config.arguments = ["sh", "-c", "echo -n CONTAINED > /target && ln -s /target /tmp/leak"]
+            }
+            try await setup.start()
+            guard try await setup.wait().exitCode == 0 else {
+                throw IntegrationError.assert(msg: "failed to plant symlink")
+            }
+            try await setup.delete()
+
+            try await container.copyOut(from: URL(filePath: "/tmp/leak"), to: hostDestination)
+
+            let copied = try String(contentsOf: hostDestination, encoding: .utf8)
+            guard copied == "CONTAINED" else {
+                throw IntegrationError.assert(msg: "copyOut did not stay within the rootfs: got '\(copied)'")
+            }
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testCopyInFileToExistingDirectory() async throws {
+        let id = "test-copy-in-file-to-dir"
+
+        let bs = try await bootstrap(id)
+
+        let testContent = "copy into an existing guest directory"
+        let hostFile = FileManager.default.uniqueTemporaryDirectory(create: true)
+            .appendingPathComponent("host-file.txt")
+        try testContent.write(to: hostFile, atomically: true, encoding: .utf8)
+
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["sleep", "100"]
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            let mkdir = try await container.exec("create-copy-target") { config in
+                config.arguments = ["mkdir", "-p", "/tmp/copy-target"]
+            }
+            try await mkdir.start()
+            let mkdirStatus = try await mkdir.wait()
+            try await mkdir.delete()
+
+            guard mkdirStatus.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "mkdir failed with status \(mkdirStatus)")
+            }
+
+            try await container.copyIn(
+                from: hostFile,
+                to: URL(filePath: "/tmp/copy-target")
+            )
+
+            let buffer = BufferWriter()
+            let verify = try await container.exec("verify-copy-target") { config in
+                config.arguments = ["cat", "/tmp/copy-target/host-file.txt"]
+                config.stdout = buffer
+            }
+            try await verify.start()
+            let verifyStatus = try await verify.wait()
+            try await verify.delete()
+
+            guard verifyStatus.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "cat copied file failed with status \(verifyStatus)")
+            }
+            guard String(data: buffer.data, encoding: .utf8) == testContent else {
+                throw IntegrationError.assert(msg: "copied file should land under the existing destination directory")
+            }
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testCopyInFileToMissingDirectoryFails() async throws {
+        let id = "test-copy-in-file-missing-dir"
+
+        let bs = try await bootstrap(id)
+
+        let hostFile = FileManager.default.uniqueTemporaryDirectory(create: true)
+            .appendingPathComponent("host-file.txt")
+        try "missing destination directory".write(to: hostFile, atomically: true, encoding: .utf8)
+
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["sleep", "100"]
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            do {
+                try await container.copyIn(
+                    from: hostFile,
+                    to: URL(filePath: "/tmp/missing-copy-target/")
+                )
+                throw IntegrationError.assert(msg: "copyIn should fail when copying a file to a missing destination directory")
+            } catch let error as ContainerizationError where error.code == .invalidArgument {
+                guard error.description.contains("destination directory does not exist") else {
+                    throw IntegrationError.assert(msg: "unexpected copyIn error: \(error)")
+                }
+            }
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testCopyInDirectoryOverExistingFileFails() async throws {
+        let id = "test-copy-in-dir-over-file"
+
+        let bs = try await bootstrap(id)
+
+        let hostDir = FileManager.default.uniqueTemporaryDirectory(create: true)
+            .appendingPathComponent("host-dir")
+        try FileManager.default.createDirectory(at: hostDir, withIntermediateDirectories: true)
+        try "directory content".write(to: hostDir.appendingPathComponent("file.txt"), atomically: true, encoding: .utf8)
+
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["sleep", "100"]
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            let createFile = try await container.exec("create-existing-file") { config in
+                config.arguments = ["sh", "-c", "echo -n existing > /tmp/existing-file"]
+            }
+            try await createFile.start()
+            let createStatus = try await createFile.wait()
+            try await createFile.delete()
+
+            guard createStatus.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "failed to create existing file, status \(createStatus)")
+            }
+
+            do {
+                try await container.copyIn(
+                    from: hostDir,
+                    to: URL(filePath: "/tmp/existing-file")
+                )
+                throw IntegrationError.assert(msg: "copyIn should fail when copying a directory over an existing file")
+            } catch let error as ContainerizationError where error.code == .invalidArgument {
+                guard error.description.contains("cannot copy directory over existing file") else {
+                    throw IntegrationError.assert(msg: "unexpected copyIn error: \(error)")
+                }
+            }
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testCopyOut() async throws {
+        let id = "test-copy-out"
+
+        let bs = try await bootstrap(id)
+
+        let testContent = "Hello from the guest! This is a copyOut test."
+        let hostDestination = FileManager.default.uniqueTemporaryDirectory(create: true)
+            .appendingPathComponent("test-output.txt")
+
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["sleep", "100"]
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            // Create a file inside the container
+            let exec = try await container.exec("create-file") { config in
+                config.arguments = ["sh", "-c", "echo -n '\(testContent)' > /tmp/guest-file.txt"]
+            }
+
+            try await exec.start()
+            let status = try await exec.wait()
+            try await exec.delete()
+
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "failed to create file in guest, status \(status)")
+            }
+
+            // Copy the file out of the container
+            try await container.copyOut(
+                from: URL(filePath: "/tmp/guest-file.txt"),
+                to: hostDestination
+            )
+
+            // Verify the file was copied correctly
+            let copiedContent = try String(contentsOf: hostDestination, encoding: .utf8)
+
+            guard copiedContent == testContent else {
+                throw IntegrationError.assert(
+                    msg: "copied file content mismatch: expected '\(testContent)', got '\(copiedContent)'")
+            }
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testCopyLargeFile() async throws {
+        let id = "test-copy-large-file"
+
+        let bs = try await bootstrap(id)
+
+        // Create a 10MB file on the host with a repeating pattern
+        let fileSize = 10 * 1024 * 1024
+        let hostFile = FileManager.default.uniqueTemporaryDirectory(create: true)
+            .appendingPathComponent("large-file.bin")
+
+        // Generate data with a repeating pattern
+        let pattern = Data("ContainerizationCopyTest".utf8)
+        var testData = Data(capacity: fileSize)
+        while testData.count < fileSize {
+            testData.append(pattern)
+        }
+        testData = testData.prefix(fileSize)
+        try testData.write(to: hostFile)
+
+        let hostDestination = FileManager.default.uniqueTemporaryDirectory(create: true)
+            .appendingPathComponent("large-file-out.bin")
+
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["sleep", "100"]
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            // Copy large file into the container
+            try await container.copyIn(
+                from: hostFile,
+                to: URL(filePath: "/tmp/large-file.bin")
+            )
+
+            // Copy it back out
+            try await container.copyOut(
+                from: URL(filePath: "/tmp/large-file.bin"),
+                to: hostDestination
+            )
+
+            // Verify the content matches
+            let copiedData = try Data(contentsOf: hostDestination)
+
+            guard copiedData.count == testData.count else {
+                throw IntegrationError.assert(
+                    msg: "file size mismatch: expected \(testData.count), got \(copiedData.count)")
+            }
+
+            guard copiedData == testData else {
+                throw IntegrationError.assert(msg: "file content mismatch after round-trip copy")
+            }
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testCopyInDirectory() async throws {
+        let id = "test-copy-in-dir"
+
+        let bs = try await bootstrap(id)
+
+        // Create a temp directory with files, a subdirectory, and a symlink.
+        let hostDir = FileManager.default.uniqueTemporaryDirectory(create: true)
+            .appendingPathComponent("test-dir")
+        try FileManager.default.createDirectory(at: hostDir, withIntermediateDirectories: true)
+        try "file1 content".write(to: hostDir.appendingPathComponent("file1.txt"), atomically: true, encoding: .utf8)
+
+        let subDir = hostDir.appendingPathComponent("subdir")
+        try FileManager.default.createDirectory(at: subDir, withIntermediateDirectories: true)
+        try "file2 content".write(to: subDir.appendingPathComponent("file2.txt"), atomically: true, encoding: .utf8)
+
+        try FileManager.default.createSymbolicLink(
+            at: hostDir.appendingPathComponent("link.txt"),
+            withDestinationURL: hostDir.appendingPathComponent("file1.txt")
+        )
+
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["sleep", "100"]
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            // Copy the directory into the container.
+            try await container.copyIn(
+                from: hostDir,
+                to: URL(filePath: "/tmp/copied-dir")
+            )
+
+            // Verify file1.txt exists with correct content.
+            let buffer1 = BufferWriter()
+            let exec1 = try await container.exec("verify-file1") { config in
+                config.arguments = ["cat", "/tmp/copied-dir/file1.txt"]
+                config.stdout = buffer1
+            }
+            try await exec1.start()
+            let status1 = try await exec1.wait()
+            try await exec1.delete()
+
+            guard status1.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "cat file1.txt failed with status \(status1)")
+            }
+            guard String(data: buffer1.data, encoding: .utf8) == "file1 content" else {
+                throw IntegrationError.assert(msg: "file1.txt content mismatch")
+            }
+
+            // Verify subdir/file2.txt exists with correct content.
+            let buffer2 = BufferWriter()
+            let exec2 = try await container.exec("verify-file2") { config in
+                config.arguments = ["cat", "/tmp/copied-dir/subdir/file2.txt"]
+                config.stdout = buffer2
+            }
+            try await exec2.start()
+            let status2 = try await exec2.wait()
+            try await exec2.delete()
+
+            guard status2.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "cat subdir/file2.txt failed with status \(status2)")
+            }
+            guard String(data: buffer2.data, encoding: .utf8) == "file2 content" else {
+                throw IntegrationError.assert(msg: "subdir/file2.txt content mismatch")
+            }
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testCopyOutDirectory() async throws {
+        let id = "test-copy-out-dir"
+
+        let bs = try await bootstrap(id)
+
+        let hostDestination = FileManager.default.uniqueTemporaryDirectory(create: true)
+            .appendingPathComponent("copied-out-dir")
+
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["sleep", "100"]
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            // Create a directory structure inside the container.
+            let exec = try await container.exec("create-dir") { config in
+                config.arguments = [
+                    "sh", "-c",
+                    "mkdir -p /tmp/guest-dir/subdir && echo -n 'guest file1' > /tmp/guest-dir/file1.txt && echo -n 'guest file2' > /tmp/guest-dir/subdir/file2.txt",
+                ]
+            }
+            try await exec.start()
+            let status = try await exec.wait()
+            try await exec.delete()
+
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "failed to create directory in guest, status \(status)")
+            }
+
+            // Copy the directory out of the container.
+            try await container.copyOut(
+                from: URL(filePath: "/tmp/guest-dir"),
+                to: hostDestination
+            )
+
+            // Verify file1.txt was copied correctly.
+            let file1Content = try String(contentsOf: hostDestination.appendingPathComponent("file1.txt"), encoding: .utf8)
+            guard file1Content == "guest file1" else {
+                throw IntegrationError.assert(
+                    msg: "file1.txt content mismatch: expected 'guest file1', got '\(file1Content)'")
+            }
+
+            // Verify subdir/file2.txt was copied correctly.
+            let file2Content = try String(
+                contentsOf: hostDestination.appendingPathComponent("subdir").appendingPathComponent("file2.txt"),
+                encoding: .utf8
+            )
+            guard file2Content == "guest file2" else {
+                throw IntegrationError.assert(
+                    msg: "subdir/file2.txt content mismatch: expected 'guest file2', got '\(file2Content)'")
+            }
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testCopyEmptyFile() async throws {
+        let id = "test-copy-empty-file"
+
+        let bs = try await bootstrap(id)
+
+        let hostFile = FileManager.default.uniqueTemporaryDirectory(create: true)
+            .appendingPathComponent("empty.txt")
+        try Data().write(to: hostFile)
+
+        let hostDestination = FileManager.default.uniqueTemporaryDirectory(create: true)
+            .appendingPathComponent("empty-out.txt")
+
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["sleep", "100"]
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            // Copy empty file in.
+            try await container.copyIn(
+                from: hostFile,
+                to: URL(filePath: "/tmp/empty.txt")
+            )
+
+            // Verify it exists and is empty in the guest.
+            let buffer = BufferWriter()
+            let exec = try await container.exec("verify-empty") { config in
+                config.arguments = ["stat", "-c", "%s", "/tmp/empty.txt"]
+                config.stdout = buffer
+            }
+            try await exec.start()
+            let status = try await exec.wait()
+            try await exec.delete()
+
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "stat failed with status \(status)")
+            }
+            let sizeStr = String(data: buffer.data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard sizeStr == "0" else {
+                throw IntegrationError.assert(msg: "empty file should have size 0, got '\(sizeStr ?? "nil")'")
+            }
+
+            // Copy it back out.
+            try await container.copyOut(
+                from: URL(filePath: "/tmp/empty.txt"),
+                to: hostDestination
+            )
+
+            let copiedData = try Data(contentsOf: hostDestination)
+            guard copiedData.isEmpty else {
+                throw IntegrationError.assert(msg: "round-tripped empty file should be empty, got \(copiedData.count) bytes")
+            }
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testCopyEmptyDirectory() async throws {
+        let id = "test-copy-empty-dir"
+
+        let bs = try await bootstrap(id)
+
+        let hostDir = FileManager.default.uniqueTemporaryDirectory(create: true)
+            .appendingPathComponent("empty-dir")
+        try FileManager.default.createDirectory(at: hostDir, withIntermediateDirectories: true)
+
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["sleep", "100"]
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            // Copy empty directory in.
+            try await container.copyIn(
+                from: hostDir,
+                to: URL(filePath: "/tmp/empty-dir")
+            )
+
+            // Verify it exists and is a directory.
+            let buffer = BufferWriter()
+            let exec = try await container.exec("verify-empty-dir") { config in
+                config.arguments = ["sh", "-c", "test -d /tmp/empty-dir && ls -a /tmp/empty-dir | wc -l"]
+                config.stdout = buffer
+            }
+            try await exec.start()
+            let status = try await exec.wait()
+            try await exec.delete()
+
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "empty dir check failed with status \(status)")
+            }
+
+            // ls -a shows . and .. so count should be 2 for an empty dir.
+            let countStr = String(data: buffer.data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard countStr == "2" else {
+                throw IntegrationError.assert(msg: "empty dir should have 2 entries (. and ..), got '\(countStr ?? "nil")'")
+            }
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testCopyBinaryFile() async throws {
+        let id = "test-copy-binary"
+
+        let bs = try await bootstrap(id)
+
+        // Create a file with all 256 byte values to test binary safety.
+        let hostFile = FileManager.default.uniqueTemporaryDirectory(create: true)
+            .appendingPathComponent("binary.bin")
+        var binaryData = Data(count: 256 * 64)
+        for i in 0..<binaryData.count {
+            binaryData[i] = UInt8(i % 256)
+        }
+        try binaryData.write(to: hostFile)
+
+        let hostDestination = FileManager.default.uniqueTemporaryDirectory(create: true)
+            .appendingPathComponent("binary-out.bin")
+
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["sleep", "100"]
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            try await container.copyIn(
+                from: hostFile,
+                to: URL(filePath: "/tmp/binary.bin")
+            )
+
+            try await container.copyOut(
+                from: URL(filePath: "/tmp/binary.bin"),
+                to: hostDestination
+            )
+
+            let copiedData = try Data(contentsOf: hostDestination)
+
+            guard copiedData.count == binaryData.count else {
+                throw IntegrationError.assert(
+                    msg: "binary file size mismatch: expected \(binaryData.count), got \(copiedData.count)")
+            }
+            guard copiedData == binaryData else {
+                throw IntegrationError.assert(msg: "binary file content mismatch after round-trip")
+            }
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testCopyMultipleFiles() async throws {
+        let id = "test-copy-multiple"
+
+        let bs = try await bootstrap(id)
+
+        let tmpDir = FileManager.default.uniqueTemporaryDirectory(create: true)
+        let files = (0..<5).map { i in
+            (
+                host: tmpDir.appendingPathComponent("file\(i).txt"),
+                guest: URL(filePath: "/tmp/multi/file\(i).txt"),
+                content: "Content of file \(i) with some padding: \(String(repeating: "x", count: i * 1000))"
+            )
+        }
+
+        for file in files {
+            try file.content.write(to: file.host, atomically: true, encoding: .utf8)
+        }
+
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["sleep", "100"]
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            // Copy all files in sequentially.
+            for file in files {
+                try await container.copyIn(
+                    from: file.host,
+                    to: file.guest,
+                    createParents: true
+                )
+            }
+
+            // Verify each file.
+            for (i, file) in files.enumerated() {
+                let buffer = BufferWriter()
+                let exec = try await container.exec("verify-\(i)") { config in
+                    config.arguments = ["cat", file.guest.path]
+                    config.stdout = buffer
+                }
+                try await exec.start()
+                let status = try await exec.wait()
+                try await exec.delete()
+
+                guard status.exitCode == 0 else {
+                    throw IntegrationError.assert(msg: "cat file\(i).txt failed with status \(status)")
+                }
+                let output = String(data: buffer.data, encoding: .utf8)
+                guard output == file.content else {
+                    throw IntegrationError.assert(msg: "file\(i).txt content mismatch")
+                }
+            }
+
+            // Copy all files back out and verify.
+            for (i, file) in files.enumerated() {
+                let outPath = tmpDir.appendingPathComponent("out-file\(i).txt")
+                try await container.copyOut(
+                    from: file.guest,
+                    to: outPath
+                )
+                let copiedContent = try String(contentsOf: outPath, encoding: .utf8)
+                guard copiedContent == file.content else {
+                    throw IntegrationError.assert(msg: "file\(i).txt round-trip content mismatch")
+                }
+            }
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testCopyDirectoryRoundTrip() async throws {
+        let id = "test-copy-dir-rt"
+
+        let bs = try await bootstrap(id)
+
+        // Create a directory tree with varied content: nested dirs, different sizes, binary data.
+        let hostDir = FileManager.default.uniqueTemporaryDirectory(create: true)
+            .appendingPathComponent("dir-rt")
+        try FileManager.default.createDirectory(at: hostDir, withIntermediateDirectories: true)
+
+        // Top-level files.
+        try "top level".write(to: hostDir.appendingPathComponent("root.txt"), atomically: true, encoding: .utf8)
+        try Data(repeating: 0xAB, count: 4096).write(to: hostDir.appendingPathComponent("binary.bin"))
+
+        // Nested 3 levels deep.
+        let deep = hostDir.appendingPathComponent("a").appendingPathComponent("b").appendingPathComponent("c")
+        try FileManager.default.createDirectory(at: deep, withIntermediateDirectories: true)
+        try "deep file".write(to: deep.appendingPathComponent("deep.txt"), atomically: true, encoding: .utf8)
+
+        // Empty subdirectory.
+        let emptySubdir = hostDir.appendingPathComponent("empty-sub")
+        try FileManager.default.createDirectory(at: emptySubdir, withIntermediateDirectories: true)
+
+        // File with special characters in content (not name).
+        try "line1\nline2\ttab\r\nwindows\0null".write(
+            to: hostDir.appendingPathComponent("special.txt"), atomically: true, encoding: .utf8)
+
+        let hostDestination = FileManager.default.uniqueTemporaryDirectory(create: true)
+            .appendingPathComponent("dir-rt-out")
+
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["sleep", "100"]
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            // Copy in.
+            try await container.copyIn(
+                from: hostDir,
+                to: URL(filePath: "/tmp/dir-rt")
+            )
+
+            // Copy back out.
+            try await container.copyOut(
+                from: URL(filePath: "/tmp/dir-rt"),
+                to: hostDestination
+            )
+
+            // Verify root.txt.
+            let rootContent = try String(contentsOf: hostDestination.appendingPathComponent("root.txt"), encoding: .utf8)
+            guard rootContent == "top level" else {
+                throw IntegrationError.assert(msg: "root.txt mismatch: '\(rootContent)'")
+            }
+
+            // Verify binary.bin.
+            let binaryContent = try Data(contentsOf: hostDestination.appendingPathComponent("binary.bin"))
+            guard binaryContent == Data(repeating: 0xAB, count: 4096) else {
+                throw IntegrationError.assert(msg: "binary.bin mismatch")
+            }
+
+            // Verify deep nested file.
+            let deepOut =
+                hostDestination
+                .appendingPathComponent("a")
+                .appendingPathComponent("b")
+                .appendingPathComponent("c")
+                .appendingPathComponent("deep.txt")
+            let deepContent = try String(contentsOf: deepOut, encoding: .utf8)
+            guard deepContent == "deep file" else {
+                throw IntegrationError.assert(msg: "deep.txt mismatch: '\(deepContent)'")
+            }
+
+            // Verify empty subdirectory exists.
+            var isDir: ObjCBool = false
+            let emptySubdirExists = FileManager.default.fileExists(
+                atPath: hostDestination.appendingPathComponent("empty-sub").path,
+                isDirectory: &isDir
+            )
+            guard emptySubdirExists && isDir.boolValue else {
+                throw IntegrationError.assert(msg: "empty-sub directory should exist after round trip")
+            }
+
+            // Verify special characters file.
+            let specialContent = try String(
+                contentsOf: hostDestination.appendingPathComponent("special.txt"), encoding: .utf8)
+            guard specialContent == "line1\nline2\ttab\r\nwindows\0null" else {
+                throw IntegrationError.assert(msg: "special.txt mismatch")
+            }
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testCopyInCreateParents() async throws {
+        let id = "test-copy-parents"
+
+        let bs = try await bootstrap(id)
+
+        let testContent = "create parents test"
+        let hostFile = FileManager.default.uniqueTemporaryDirectory(create: true)
+            .appendingPathComponent("parents-test.txt")
+        try testContent.write(to: hostFile, atomically: true, encoding: .utf8)
+
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["sleep", "100"]
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            // Copy to a deeply nested path that doesn't exist yet.
+            try await container.copyIn(
+                from: hostFile,
+                to: URL(filePath: "/tmp/a/b/c/d/e/file.txt"),
+                createParents: true
+            )
+
+            // Verify the file got there.
+            let buffer = BufferWriter()
+            let exec = try await container.exec("verify-parents") { config in
+                config.arguments = ["cat", "/tmp/a/b/c/d/e/file.txt"]
+                config.stdout = buffer
+            }
+            try await exec.start()
+            let status = try await exec.wait()
+            try await exec.delete()
+
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "cat failed with status \(status)")
+            }
+            guard String(data: buffer.data, encoding: .utf8) == testContent else {
+                throw IntegrationError.assert(msg: "content mismatch after copy with createParents")
+            }
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testCopyFilePermissions() async throws {
+        let id = "test-copy-perms"
+
+        let bs = try await bootstrap(id)
+
+        let hostFile = FileManager.default.uniqueTemporaryDirectory(create: true)
+            .appendingPathComponent("perms-test.sh")
+        try "#!/bin/sh\necho hello".write(to: hostFile, atomically: true, encoding: .utf8)
+
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["sleep", "100"]
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            // Copy with executable permissions.
+            try await container.copyIn(
+                from: hostFile,
+                to: URL(filePath: "/tmp/perms-test.sh"),
+                mode: 0o755
+            )
+
+            // Verify the file is executable by running it.
+            let buffer = BufferWriter()
+            let exec = try await container.exec("run-script") { config in
+                config.arguments = ["/tmp/perms-test.sh"]
+                config.stdout = buffer
+            }
+            try await exec.start()
+            let status = try await exec.wait()
+            try await exec.delete()
+
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "script execution failed with status \(status)")
+            }
+            let output = String(data: buffer.data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard output == "hello" else {
+                throw IntegrationError.assert(msg: "script output mismatch: '\(output ?? "nil")'")
+            }
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testCopyLargeDirectory() async throws {
+        let id = "test-copy-large-dir"
+
+        let bs = try await bootstrap(id)
+
+        // Create a directory with many files to stress the archive path.
+        let hostDir = FileManager.default.uniqueTemporaryDirectory(create: true)
+            .appendingPathComponent("large-dir")
+        try FileManager.default.createDirectory(at: hostDir, withIntermediateDirectories: true)
+
+        let fileCount = 100
+        for i in 0..<fileCount {
+            let content = "File \(i): \(String(repeating: String(i), count: 512))"
+            try content.write(
+                to: hostDir.appendingPathComponent("file-\(String(format: "%03d", i)).txt"),
+                atomically: true,
+                encoding: .utf8
+            )
+        }
+
+        let hostDestination = FileManager.default.uniqueTemporaryDirectory(create: true)
+            .appendingPathComponent("large-dir-out")
+
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["sleep", "100"]
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            try await container.copyIn(
+                from: hostDir,
+                to: URL(filePath: "/tmp/large-dir")
+            )
+
+            // Verify file count in the guest.
+            let buffer = BufferWriter()
+            let exec = try await container.exec("count-files") { config in
+                config.arguments = ["sh", "-c", "ls /tmp/large-dir/*.txt | wc -l"]
+                config.stdout = buffer
+            }
+            try await exec.start()
+            let status = try await exec.wait()
+            try await exec.delete()
+
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "ls | wc -l failed with status \(status)")
+            }
+            let countStr = String(data: buffer.data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard countStr == "\(fileCount)" else {
+                throw IntegrationError.assert(msg: "expected \(fileCount) files in guest, got '\(countStr ?? "nil")'")
+            }
+
+            // Copy back out.
+            try await container.copyOut(
+                from: URL(filePath: "/tmp/large-dir"),
+                to: hostDestination
+            )
+
+            // Spot-check a few files.
+            for i in [0, fileCount / 2, fileCount - 1] {
+                let expectedContent = "File \(i): \(String(repeating: String(i), count: 512))"
+                let actualContent = try String(
+                    contentsOf: hostDestination.appendingPathComponent("file-\(String(format: "%03d", i)).txt"),
+                    encoding: .utf8
+                )
+                guard actualContent == expectedContent else {
+                    throw IntegrationError.assert(msg: "file-\(String(format: "%03d", i)).txt content mismatch after round trip")
+                }
+            }
+
+            // Verify total file count on host.
+            let outFiles = try FileManager.default.contentsOfDirectory(atPath: hostDestination.path)
+            guard outFiles.count == fileCount else {
+                throw IntegrationError.assert(
+                    msg: "expected \(fileCount) files on host after copyOut, got \(outFiles.count)")
+            }
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testReadOnlyRootfs() async throws {
+        let id = "test-readonly-rootfs"
+
+        let bs = try await bootstrap(id)
+        var rootfs = bs.rootfs
+        rootfs.options.append("ro")
+        let container = try LinuxContainer(id, rootfs: rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["touch", "/testfile"]
+            config.bootLog = bs.bootLog
+        }
+
+        try await container.create()
+        try await container.start()
+
+        let status = try await container.wait()
+        try await container.stop()
+
+        // touch should fail on a read-only rootfs
+        guard status.exitCode != 0 else {
+            throw IntegrationError.assert(msg: "touch should have failed on read-only rootfs")
+        }
+    }
+
+    func testReadOnlyRootfsHostsFileWritten() async throws {
+        let id = "test-readonly-rootfs-hosts"
+
+        let bs = try await bootstrap(id)
+        var rootfs = bs.rootfs
+        rootfs.options.append("ro")
+        let buffer = BufferWriter()
+        let entry = Hosts.Entry.localHostIPV4(comment: "ReadOnlyTest")
+        let container = try LinuxContainer(id, rootfs: rootfs, vmm: bs.vmm) { config in
+            // Verify /etc/hosts was written before rootfs was remounted read-only
+            config.process.arguments = ["cat", "/etc/hosts"]
+            config.process.stdout = buffer
+            config.hosts = Hosts(entries: [entry])
+            config.bootLog = bs.bootLog
+        }
+
+        try await container.create()
+        try await container.start()
+
+        let status = try await container.wait()
+        try await container.stop()
+
+        guard status.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "cat /etc/hosts failed with status \(status)")
+        }
+
+        guard let output = String(data: buffer.data, encoding: .utf8) else {
+            throw IntegrationError.assert(msg: "failed to convert stdout to UTF8")
+        }
+
+        guard output.contains("ReadOnlyTest") else {
+            throw IntegrationError.assert(msg: "expected /etc/hosts to contain our entry, got: \(output)")
+        }
+    }
+
+    func testReadOnlyRootfsDNSConfigured() async throws {
+        let id = "test-readonly-rootfs-dns"
+
+        let bs = try await bootstrap(id)
+        var rootfs = bs.rootfs
+        rootfs.options.append("ro")
+        let buffer = BufferWriter()
+        let container = try LinuxContainer(id, rootfs: rootfs, vmm: bs.vmm) { config in
+            // Verify /etc/resolv.conf was written before rootfs was remounted read-only
+            config.process.arguments = ["cat", "/etc/resolv.conf"]
+            config.process.stdout = buffer
+            config.dns = DNS(nameservers: ["8.8.8.8", "8.8.4.4"])
+            config.bootLog = bs.bootLog
+        }
+
+        try await container.create()
+        try await container.start()
+
+        let status = try await container.wait()
+        try await container.stop()
+
+        guard status.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "cat /etc/resolv.conf failed with status \(status)")
+        }
+
+        guard let output = String(data: buffer.data, encoding: .utf8) else {
+            throw IntegrationError.assert(msg: "failed to convert stdout to UTF8")
+        }
+
+        guard output.contains("8.8.8.8") && output.contains("8.8.4.4") else {
+            throw IntegrationError.assert(msg: "expected /etc/resolv.conf to contain DNS servers, got: \(output)")
+        }
+    }
+
+    func testLargeStdinInput() async throws {
+        let id = "test-large-stdin-input"
+
+        let bs = try await bootstrap(id)
+
+        let inputSize = 128 * 1024
+        let inputData = Data(repeating: 0x41, count: inputSize)  // 'A' repeated
+
+        let buffer = BufferWriter()
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["cat"]
+            config.process.stdin = StdinBuffer(data: inputData)
+            config.process.stdout = buffer
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            let status = try await container.wait()
+            try await container.stop()
+
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "process status \(status) != 0")
+            }
+
+            guard buffer.data.count == inputSize else {
+                throw IntegrationError.assert(
+                    msg: "output size \(buffer.data.count) != input size \(inputSize)")
+            }
+
+            guard buffer.data == inputData else {
+                throw IntegrationError.assert(msg: "output data does not match input data")
+            }
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testExecLargeStdinInput() async throws {
+        let id = "test-exec-large-stdin-input"
+        let bs = try await bootstrap(id)
+
+        let inputSize = 128 * 1024
+        let inputData = Data(repeating: 0x42, count: inputSize)
+
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["sleep", "100"]
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            let buffer = BufferWriter()
+            let exec = try await container.exec("large-stdin-exec") { config in
+                config.arguments = ["cat"]
+                config.stdin = StdinBuffer(data: inputData)
+                config.stdout = buffer
+            }
+
+            try await exec.start()
+            let status = try await exec.wait()
+            try await exec.delete()
+
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "exec status \(status) != 0")
+            }
+
+            guard buffer.data.count == inputSize else {
+                throw IntegrationError.assert(msg: "output size \(buffer.data.count) != \(inputSize)")
+            }
+
+            guard buffer.data == inputData else {
+                throw IntegrationError.assert(msg: "output data mismatch")
+            }
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testExecCustomPathResolution() async throws {
+        let id = "test-exec-custom-path"
+        let bs = try await bootstrap(id)
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["/bin/sleep", "1000"]
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            // Create a script in a non-standard directory
+            let setup = try await container.exec("setup") { config in
+                config.arguments = [
+                    "sh", "-c",
+                    "mkdir -p /tmp/custom-bin && printf '#!/bin/sh\\necho CUSTOM_PATH_OK' > /tmp/custom-bin/mytest && chmod +x /tmp/custom-bin/mytest",
+                ]
+            }
+            try await setup.start()
+            let setupStatus = try await setup.wait()
+            try await setup.delete()
+            guard setupStatus.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "setup failed: \(setupStatus)")
+            }
+
+            // Exec bare command with custom PATH — this exercises ExecCommand.swift
+            let buffer = BufferWriter()
+            let exec = try await container.exec("custom-path") { config in
+                config.arguments = ["mytest"]
+                config.environmentVariables = ["PATH=/tmp/custom-bin"]
+                config.stdout = buffer
+            }
+            try await exec.start()
+            let status = try await exec.wait()
+            try await exec.delete()
+
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "exec with custom PATH failed: \(status)")
+            }
+
+            guard let output = String(data: buffer.data, encoding: .utf8) else {
+                throw IntegrationError.assert(msg: "failed to read output")
+            }
+            guard output.contains("CUSTOM_PATH_OK") else {
+                throw IntegrationError.assert(msg: "expected CUSTOM_PATH_OK, got: \(output)")
+            }
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testStdinExplicitClose() async throws {
+        let id = "test-stdin-explicit-close"
+        let bs = try await bootstrap(id)
+
+        let inputData = "explicit close test\n".data(using: .utf8)!
+        let buffer = BufferWriter()
+
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["sleep", "100"]
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            let exec = try await container.exec("stdin-close-exec") { config in
+                config.arguments = ["head", "-n", "1"]
+                config.stdin = StdinBuffer(data: inputData)
+                config.stdout = buffer
+            }
+
+            try await exec.start()
+            let status = try await exec.wait()
+            try await exec.delete()
+
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "exec status \(status) != 0")
+            }
+
+            guard buffer.data == inputData else {
+                throw IntegrationError.assert(msg: "output mismatch")
+            }
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testStdinBinaryData() async throws {
+        let id = "test-stdin-binary-data"
+        let bs = try await bootstrap(id)
+
+        var inputData = Data()
+        for i: UInt8 in 0...255 {
+            inputData.append(contentsOf: [UInt8](repeating: i, count: 256))
+        }
+
+        let buffer = BufferWriter()
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["cat"]
+            config.process.stdin = StdinBuffer(data: inputData)
+            config.process.stdout = buffer
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            let status = try await container.wait()
+            try await container.stop()
+
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "process status \(status) != 0")
+            }
+
+            guard buffer.data == inputData else {
+                throw IntegrationError.assert(msg: "binary data mismatch")
+            }
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testStdinMultipleChunks() async throws {
+        let id = "test-stdin-multiple-chunks"
+        let bs = try await bootstrap(id)
+
+        let chunks = (0..<10).map { i in
+            Data(repeating: UInt8(0x30 + i), count: 10 * 1024)
+        }
+        let expectedData = chunks.reduce(Data()) { $0 + $1 }
+
+        let buffer = BufferWriter()
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["cat"]
+            config.process.stdin = ChunkedStdinBuffer(chunks: chunks, delayMs: 10)
+            config.process.stdout = buffer
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            let status = try await container.wait()
+            try await container.stop()
+
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "process status \(status) != 0")
+            }
+
+            guard buffer.data == expectedData else {
+                throw IntegrationError.assert(msg: "chunked data mismatch")
+            }
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testStdinVeryLarge() async throws {
+        let id = "test-stdin-very-large"
+        let bs = try await bootstrap(id)
+
+        let inputSize = 10 * 1024 * 1024
+        let inputData = Data(repeating: 0x58, count: inputSize)
+
+        let stdout = DiscardingWriter()
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["wc", "-c"]
+            config.process.stdin = StdinBuffer(data: inputData)
+            config.process.stdout = stdout
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            let status = try await container.wait()
+            try await container.stop()
+
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "process status \(status) != 0")
+            }
+
+            guard stdout.count > 0 else {
+                throw IntegrationError.assert(msg: "no output from wc")
+            }
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    #if os(macOS)
+    @available(macOS 26.0, *)
+    func testInterfaceMTU() async throws {
+        let id = "test-interface-mtu"
+        let bs = try await bootstrap(id)
+
+        let customMTU: UInt32 = 1400
+        var network = try VmnetNetwork()
+        defer {
+            try? network.releaseInterface(id)
+        }
+
+        guard let interface = try network.createInterface(id, mtu: customMTU) else {
+            throw IntegrationError.assert(msg: "failed to create network interface")
+        }
+
+        let buffer = BufferWriter()
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["sleep", "100"]
+            config.interfaces = [interface]
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            // Check the MTU of eth0
+            let exec = try await container.exec("check-mtu") { config in
+                config.arguments = ["ip", "link", "show", "eth0"]
+                config.stdout = buffer
+            }
+
+            try await exec.start()
+            let status = try await exec.wait()
+            try await exec.delete()
+
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "ip link show failed with status \(status)")
+            }
+
+            guard let output = String(data: buffer.data, encoding: .utf8) else {
+                throw IntegrationError.assert(msg: "failed to convert output to UTF8")
+            }
+
+            // Output should contain "mtu 1400"
+            guard output.contains("mtu \(customMTU)") else {
+                throw IntegrationError.assert(
+                    msg: "expected MTU \(customMTU) in output, got: \(output)")
+            }
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    #endif
+
+    func testSingleFileMount() async throws {
+        let id = "test-single-file-mount"
+
+        let bs = try await bootstrap(id)
+
+        // Create a temp file with known content
+        let testContent = "Hello from single file mount!"
+        let hostFile = FileManager.default.uniqueTemporaryDirectory(create: true)
+            .appendingPathComponent("config.txt")
+        try testContent.write(to: hostFile, atomically: true, encoding: .utf8)
+
+        let buffer = BufferWriter()
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["cat", "/etc/myconfig.txt"]
+            // Mount a single file using virtiofs share
+            config.mounts.append(.share(source: hostFile.path, destination: "/etc/myconfig.txt"))
+            config.process.stdout = buffer
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            let status = try await container.wait()
+            try await container.stop()
+
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "process status \(status) != 0")
+            }
+
+            guard let output = String(data: buffer.data, encoding: .utf8) else {
+                throw IntegrationError.assert(msg: "failed to convert output to UTF8")
+            }
+
+            guard output == testContent else {
+                throw IntegrationError.assert(
+                    msg: "expected '\(testContent)', got '\(output)'")
+            }
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testSingleFileMountReadOnly() async throws {
+        let id = "test-single-file-mount-readonly"
+
+        let bs = try await bootstrap(id)
+
+        // Create a temp file with known content
+        let testContent = "Read-only file content"
+        let hostFile = FileManager.default.uniqueTemporaryDirectory(create: true)
+            .appendingPathComponent("readonly.txt")
+        try testContent.write(to: hostFile, atomically: true, encoding: .utf8)
+
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["sleep", "100"]
+            // Mount a single file as read-only
+            config.mounts.append(.share(source: hostFile.path, destination: "/etc/readonly.txt", options: ["ro"]))
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            // First verify we can read the file
+            let readBuffer = BufferWriter()
+            let readExec = try await container.exec("read-file") { config in
+                config.arguments = ["cat", "/etc/readonly.txt"]
+                config.stdout = readBuffer
+            }
+            try await readExec.start()
+            var status = try await readExec.wait()
+            try await readExec.delete()
+
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "read status \(status) != 0")
+            }
+
+            guard String(data: readBuffer.data, encoding: .utf8) == testContent else {
+                throw IntegrationError.assert(msg: "file content mismatch")
+            }
+
+            // Now try to write to the file - should fail
+            let writeExec = try await container.exec("write-file") { config in
+                config.arguments = ["sh", "-c", "echo 'modified' > /etc/readonly.txt"]
+            }
+            try await writeExec.start()
+            status = try await writeExec.wait()
+            try await writeExec.delete()
+
+            // Write should fail on a read-only mount
+            guard status.exitCode != 0 else {
+                throw IntegrationError.assert(msg: "write should have failed on read-only mount")
+            }
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testSingleFileMountWriteBack() async throws {
+        let id = "test-single-file-mount-write-back"
+
+        let bs = try await bootstrap(id)
+
+        // Create a temp file with initial content
+        let initialContent = "initial content"
+        let hostFile = FileManager.default.uniqueTemporaryDirectory(create: true)
+            .appendingPathComponent("writeable.txt")
+        try initialContent.write(to: hostFile, atomically: true, encoding: .utf8)
+
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["sleep", "100"]
+            // Mount a single file (writable by default)
+            config.mounts.append(.share(source: hostFile.path, destination: "/etc/writeable.txt"))
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            // Write new content from inside the container
+            let newContent = "modified from container"
+            let writeExec = try await container.exec("write-file") { config in
+                config.arguments = ["sh", "-c", "echo -n '\(newContent)' > /etc/writeable.txt"]
+            }
+            try await writeExec.start()
+            let status = try await writeExec.wait()
+            try await writeExec.delete()
+
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "write status \(status) != 0")
+            }
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+
+            let hostContent = try String(contentsOf: hostFile, encoding: .utf8)
+            guard hostContent == newContent else {
+                throw IntegrationError.assert(
+                    msg: "expected '\(newContent)' on host, got '\(hostContent)'")
+            }
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testSingleFileMountSymlink() async throws {
+        let id = "test-single-file-mount-symlink"
+
+        let bs = try await bootstrap(id)
+
+        // Create a temp directory with a real file and a symlink to it
+        let tempDir = FileManager.default.uniqueTemporaryDirectory(create: true)
+        let realFile = tempDir.appendingPathComponent("realfile.txt")
+        let symlinkFile = tempDir.appendingPathComponent("symlink.txt")
+
+        let initialContent = "content via symlink"
+        try initialContent.write(to: realFile, atomically: true, encoding: .utf8)
+        try FileManager.default.createSymbolicLink(at: symlinkFile, withDestinationURL: realFile)
+
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["sleep", "100"]
+            // Mount the symlink (should resolve to real file)
+            config.mounts.append(.share(source: symlinkFile.path, destination: "/etc/config.txt"))
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            // Read the file to verify content
+            let readBuffer = BufferWriter()
+            let readExec = try await container.exec("read-file") { config in
+                config.arguments = ["cat", "/etc/config.txt"]
+                config.stdout = readBuffer
+            }
+            try await readExec.start()
+            var status = try await readExec.wait()
+            try await readExec.delete()
+
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "read status \(status) != 0")
+            }
+
+            guard String(data: readBuffer.data, encoding: .utf8) == initialContent else {
+                throw IntegrationError.assert(msg: "content mismatch on read")
+            }
+
+            // Write new content from container
+            let newContent = "modified via symlink mount"
+            let writeExec = try await container.exec("write-file") { config in
+                config.arguments = ["sh", "-c", "echo -n '\(newContent)' > /etc/config.txt"]
+            }
+            try await writeExec.start()
+            status = try await writeExec.wait()
+            try await writeExec.delete()
+
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "write status \(status) != 0")
+            }
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+
+            // Verify the REAL file (not symlink) was modified on the host
+            let hostContent = try String(contentsOf: realFile, encoding: .utf8)
+            guard hostContent == newContent else {
+                throw IntegrationError.assert(
+                    msg: "expected '\(newContent)' in real file, got '\(hostContent)'")
+            }
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testRLimitOpenFiles() async throws {
+        let id = "test-rlimit-open-files"
+
+        let bs = try await bootstrap(id)
+        let buffer = BufferWriter()
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["sh", "-c", "ulimit -n"]
+            config.process.rlimits = [
+                LinuxRLimit(kind: .openFiles, hard: 2048, soft: 1024)
+            ]
+            config.process.stdout = buffer
+            config.bootLog = bs.bootLog
+        }
+
+        try await container.create()
+        try await container.start()
+
+        let status = try await container.wait()
+        try await container.stop()
+
+        guard status.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "process status \(status) != 0")
+        }
+
+        guard let output = String(data: buffer.data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) else {
+            throw IntegrationError.assert(msg: "failed to convert stdout to UTF8")
+        }
+
+        // ulimit -n returns the soft limit
+        guard output == "1024" else {
+            throw IntegrationError.assert(msg: "expected soft limit '1024', got '\(output)'")
+        }
+    }
+
+    func testRLimitMultiple() async throws {
+        let id = "test-rlimit-multiple"
+
+        let bs = try await bootstrap(id)
+        let buffer = BufferWriter()
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            // Read /proc/self/limits to verify multiple rlimits are set
+            config.process.arguments = ["cat", "/proc/self/limits"]
+            config.process.rlimits = [
+                LinuxRLimit(kind: .openFiles, hard: 4096, soft: 2048),
+                LinuxRLimit(kind: .stackSize, hard: 16_777_216, soft: 8_388_608),
+                LinuxRLimit(kind: .coreFileSize, hard: 0, soft: 0),
+            ]
+            config.process.stdout = buffer
+            config.bootLog = bs.bootLog
+        }
+
+        try await container.create()
+        try await container.start()
+
+        let status = try await container.wait()
+        try await container.stop()
+
+        guard status.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "process status \(status) != 0")
+        }
+
+        guard let output = String(data: buffer.data, encoding: .utf8) else {
+            throw IntegrationError.assert(msg: "failed to convert stdout to UTF8")
+        }
+
+        // Parse /proc/self/limits and verify the values
+        // Format: "Limit Name                Soft Limit           Hard Limit           Units"
+        let lines = output.split(separator: "\n")
+
+        // Helper to find and verify a limit line
+        func verifyLimit(name: String, expectedSoft: String, expectedHard: String) throws {
+            guard let line = lines.first(where: { $0.contains(name) }) else {
+                throw IntegrationError.assert(msg: "limit '\(name)' not found in output")
+            }
+            let parts = line.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+            // The line format varies, but soft and hard are typically the last numeric values before units
+            guard parts.contains(expectedSoft) && parts.contains(expectedHard) else {
+                throw IntegrationError.assert(
+                    msg: "limit '\(name)' expected soft=\(expectedSoft) hard=\(expectedHard), got: \(line)")
+            }
+        }
+
+        try verifyLimit(name: "Max open files", expectedSoft: "2048", expectedHard: "4096")
+        try verifyLimit(name: "Max stack size", expectedSoft: "8388608", expectedHard: "16777216")
+        try verifyLimit(name: "Max core file size", expectedSoft: "0", expectedHard: "0")
+    }
+
+    func testRLimitExec() async throws {
+        let id = "test-rlimit-exec"
+
+        let bs = try await bootstrap(id)
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["sleep", "100"]
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            // Exec a process with rlimits set
+            let buffer = BufferWriter()
+            let exec = try await container.exec("rlimit-exec") { config in
+                config.arguments = ["sh", "-c", "ulimit -n"]
+                config.rlimits = [
+                    LinuxRLimit(kind: .openFiles, hard: 512, soft: 256)
+                ]
+                config.stdout = buffer
+            }
+
+            try await exec.start()
+            let status = try await exec.wait()
+            try await exec.delete()
+
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "exec status \(status) != 0")
+            }
+
+            guard let output = String(data: buffer.data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) else {
+                throw IntegrationError.assert(msg: "failed to convert stdout to UTF8")
+            }
+
+            guard output == "256" else {
+                throw IntegrationError.assert(msg: "expected soft limit '256', got '\(output)'")
+            }
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testDuplicateVirtiofsMount() async throws {
+        let id = "test-duplicate-virtiofs-mount"
+
+        let bs = try await bootstrap(id)
+
+        // Create a temp directory with a file
+        let sharedDir = FileManager.default.uniqueTemporaryDirectory(create: true)
+        try "shared content".write(to: sharedDir.appendingPathComponent("data.txt"), atomically: true, encoding: .utf8)
+
+        let buffer1 = BufferWriter()
+        let buffer2 = BufferWriter()
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["sleep", "100"]
+            // Mount the same source directory to two different destinations
+            config.mounts.append(.share(source: sharedDir.path, destination: "/mnt1"))
+            config.mounts.append(.share(source: sharedDir.path, destination: "/mnt2"))
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            // Verify both mounts work. Read from /mnt1, then /mnt2
+            let exec1 = try await container.exec("read-mnt1") { config in
+                config.arguments = ["cat", "/mnt1/data.txt"]
+                config.stdout = buffer1
+            }
+            try await exec1.start()
+            var status = try await exec1.wait()
+            try await exec1.delete()
+
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "read from /mnt1 failed with status \(status)")
+            }
+
+            guard String(data: buffer1.data, encoding: .utf8) == "shared content" else {
+                throw IntegrationError.assert(msg: "unexpected content from /mnt1")
+            }
+
+            let exec2 = try await container.exec("read-mnt2") { config in
+                config.arguments = ["cat", "/mnt2/data.txt"]
+                config.stdout = buffer2
+            }
+            try await exec2.start()
+            status = try await exec2.wait()
+            try await exec2.delete()
+
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "read from /mnt2 failed with status \(status)")
+            }
+
+            guard String(data: buffer2.data, encoding: .utf8) == "shared content" else {
+                throw IntegrationError.assert(msg: "unexpected content from /mnt2")
+            }
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testDuplicateVirtiofsMountViaSymlink() async throws {
+        let id = "test-duplicate-virtiofs-mount-symlink"
+
+        let bs = try await bootstrap(id)
+
+        // Create a temp directory with a file, and a symlink to the same directory
+        let tempDir = FileManager.default.uniqueTemporaryDirectory(create: true)
+        let realDir = tempDir.appendingPathComponent("realdir")
+        let symlinkDir = tempDir.appendingPathComponent("symlinkdir")
+
+        try FileManager.default.createDirectory(at: realDir, withIntermediateDirectories: true)
+        try "symlink test content".write(to: realDir.appendingPathComponent("file.txt"), atomically: true, encoding: .utf8)
+        try FileManager.default.createSymbolicLink(at: symlinkDir, withDestinationURL: realDir)
+
+        let buffer1 = BufferWriter()
+        let buffer2 = BufferWriter()
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["sleep", "100"]
+            config.mounts.append(.share(source: realDir.path, destination: "/mnt1"))
+            config.mounts.append(.share(source: symlinkDir.path, destination: "/mnt2"))
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            // This should succeed as the symlink should resolve to the same directory
+            try await container.create()
+            try await container.start()
+
+            let exec1 = try await container.exec("read-mnt1") { config in
+                config.arguments = ["cat", "/mnt1/file.txt"]
+                config.stdout = buffer1
+            }
+            try await exec1.start()
+            var status = try await exec1.wait()
+            try await exec1.delete()
+
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "read from /mnt1 failed with status \(status)")
+            }
+
+            guard String(data: buffer1.data, encoding: .utf8) == "symlink test content" else {
+                throw IntegrationError.assert(msg: "unexpected content from /mnt1")
+            }
+
+            // Verify mount via symlink works now
+            let exec2 = try await container.exec("read-mnt2") { config in
+                config.arguments = ["cat", "/mnt2/file.txt"]
+                config.stdout = buffer2
+            }
+            try await exec2.start()
+            status = try await exec2.wait()
+            try await exec2.delete()
+
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "read from /mnt2 failed with status \(status)")
+            }
+
+            guard String(data: buffer2.data, encoding: .utf8) == "symlink test content" else {
+                throw IntegrationError.assert(msg: "unexpected content from /mnt2")
+            }
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testWritableLayer() async throws {
+        let id = "test-writable-layer"
+
+        let bs = try await bootstrap(id)
+
+        let writableLayerPath = Self.testDir.appending(component: "\(id)-writable.ext4")
+        try? FileManager.default.removeItem(at: writableLayerPath)
+        let filesystem = try EXT4.Formatter(FilePath(writableLayerPath.absolutePath()), minDiskSize: 512.mib())
+        try filesystem.close()
+        let writableLayer = Mount.block(
+            format: "ext4",
+            source: writableLayerPath.absolutePath(),
+            destination: "/",
+            options: []
+        )
+
+        let buffer = BufferWriter()
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, writableLayer: writableLayer, vmm: bs.vmm) { config in
+            // Write a file, then read it back to verify writes work
+            config.process.arguments = ["/bin/sh", "-c", "echo 'writable layer test' > /tmp/testfile && cat /tmp/testfile"]
+            config.process.stdout = buffer
+            config.bootLog = bs.bootLog
+        }
+
+        try await container.create()
+        try await container.start()
+
+        let status = try await container.wait()
+        try await container.stop()
+
+        guard status.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "process failed with status \(status)")
+        }
+
+        guard let output = String(data: buffer.data, encoding: .utf8) else {
+            throw IntegrationError.assert(msg: "failed to convert stdout to UTF8")
+        }
+
+        guard output.trimmingCharacters(in: .whitespacesAndNewlines) == "writable layer test" else {
+            throw IntegrationError.assert(msg: "unexpected output: \(output)")
+        }
+    }
+
+    // Validates the on-disk structure of a journaled EXT4 image on the host before
+    // attempting a container mount. This catches geometry mismatches (superblock block
+    // count vs. physical file size) and missing journal metadata without requiring
+    // e2fsck to be present in the container image.
+    //
+    // Uses raw values for internal constants because integration tests cannot use
+    // @testable import: CompatFeature.hasJournal = 0x4, EXT4.JournalInode = 8.
+    private func verifyJournalFilesystem(
+        at path: URL,
+        minDiskSize: UInt64,
+        expectedMountOpts: UInt32
+    ) throws {
+        let attrs = try FileManager.default.attributesOfItem(atPath: path.absolutePath())
+        guard let fileSize = attrs[.size] as? UInt64 else {
+            throw IntegrationError.assert(msg: "could not read file size for \(path.lastPathComponent)")
+        }
+        let reader = try EXT4.EXT4Reader(blockDevice: FilePath(path.absolutePath()))
+        let sb = reader.superBlock
+        let blocksCount = UInt64(sb.blocksCountLow) | (UInt64(sb.blocksCountHigh) << 32)
+        let blockSize = UInt64(sb.blockSize)
+        guard fileSize == blocksCount * blockSize else {
+            throw IntegrationError.assert(
+                msg: "geometry mismatch: fileSize=\(fileSize), blocksCount=\(blocksCount), blockSize=\(blockSize)")
+        }
+        guard fileSize > minDiskSize else {
+            throw IntegrationError.assert(
+                msg: "journal did not grow the image: fileSize=\(fileSize), minDiskSize=\(minDiskSize)")
+        }
+        guard sb.featureCompat & 0x4 != 0 else {
+            throw IntegrationError.assert(
+                msg: "COMPAT_HAS_JOURNAL not set in featureCompat (0x\(String(sb.featureCompat, radix: 16)))")
+        }
+        guard sb.journalInum == 8 else {
+            throw IntegrationError.assert(msg: "journalInum=\(sb.journalInum), expected 8")
+        }
+        guard sb.defaultMountOpts == expectedMountOpts else {
+            throw IntegrationError.assert(
+                msg: "defaultMountOpts=0x\(String(sb.defaultMountOpts, radix: 16)), expected 0x\(String(expectedMountOpts, radix: 16)))")
+        }
+    }
+
+    func testWritableLayerJournalWriteback() async throws {
+        let id = "test-writable-layer-journal-writeback"
+        let bs = try await bootstrap(id)
+
+        let writableLayerPath = Self.testDir.appending(component: "\(id)-writable.ext4")
+        try? FileManager.default.removeItem(at: writableLayerPath)
+        let filesystem = try EXT4.Formatter(
+            FilePath(writableLayerPath.absolutePath()),
+            minDiskSize: 512.mib(),
+            journal: .init(defaultMode: .writeback)
+        )
+        try filesystem.close()
+        // 0x0060 = data=writeback | barrier
+        try verifyJournalFilesystem(at: writableLayerPath, minDiskSize: 512.mib(), expectedMountOpts: 0x0060)
+        let writableLayer = Mount.block(
+            format: "ext4",
+            source: writableLayerPath.absolutePath(),
+            destination: "/",
+            options: []
+        )
+
+        let buffer = BufferWriter()
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, writableLayer: writableLayer, vmm: bs.vmm) { config in
+            config.process.arguments = ["/bin/sh", "-c", "echo 'journal writeback' > /tmp/testfile && cat /tmp/testfile"]
+            config.process.stdout = buffer
+            config.bootLog = bs.bootLog
+        }
+
+        try await container.create()
+        try await container.start()
+        let status = try await container.wait()
+        try await container.stop()
+
+        guard status.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "process failed with status \(status)")
+        }
+        guard let output = String(data: buffer.data, encoding: .utf8) else {
+            throw IntegrationError.assert(msg: "failed to convert stdout to UTF8")
+        }
+        guard output.trimmingCharacters(in: .whitespacesAndNewlines) == "journal writeback" else {
+            throw IntegrationError.assert(msg: "unexpected output: \(output)")
+        }
+    }
+
+    func testWritableLayerJournalOrdered() async throws {
+        let id = "test-writable-layer-journal-ordered"
+        let bs = try await bootstrap(id)
+
+        let writableLayerPath = Self.testDir.appending(component: "\(id)-writable.ext4")
+        try? FileManager.default.removeItem(at: writableLayerPath)
+        let filesystem = try EXT4.Formatter(
+            FilePath(writableLayerPath.absolutePath()),
+            minDiskSize: 512.mib(),
+            journal: .init(defaultMode: .ordered)
+        )
+        try filesystem.close()
+        // 0x0040 = data=ordered | barrier
+        try verifyJournalFilesystem(at: writableLayerPath, minDiskSize: 512.mib(), expectedMountOpts: 0x0040)
+        let writableLayer = Mount.block(
+            format: "ext4",
+            source: writableLayerPath.absolutePath(),
+            destination: "/",
+            options: []
+        )
+
+        let buffer = BufferWriter()
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, writableLayer: writableLayer, vmm: bs.vmm) { config in
+            config.process.arguments = ["/bin/sh", "-c", "echo 'journal ordered' > /tmp/testfile && cat /tmp/testfile"]
+            config.process.stdout = buffer
+            config.bootLog = bs.bootLog
+        }
+
+        try await container.create()
+        try await container.start()
+        let status = try await container.wait()
+        try await container.stop()
+
+        guard status.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "process failed with status \(status)")
+        }
+        guard let output = String(data: buffer.data, encoding: .utf8) else {
+            throw IntegrationError.assert(msg: "failed to convert stdout to UTF8")
+        }
+        guard output.trimmingCharacters(in: .whitespacesAndNewlines) == "journal ordered" else {
+            throw IntegrationError.assert(msg: "unexpected output: \(output)")
+        }
+    }
+
+    func testWritableLayerJournalData() async throws {
+        let id = "test-writable-layer-journal-data"
+        let bs = try await bootstrap(id)
+
+        let writableLayerPath = Self.testDir.appending(component: "\(id)-writable.ext4")
+        try? FileManager.default.removeItem(at: writableLayerPath)
+        let filesystem = try EXT4.Formatter(
+            FilePath(writableLayerPath.absolutePath()),
+            minDiskSize: 512.mib(),
+            journal: .init(defaultMode: .journal)
+        )
+        try filesystem.close()
+        // 0x0020 = data=journal | barrier
+        try verifyJournalFilesystem(at: writableLayerPath, minDiskSize: 512.mib(), expectedMountOpts: 0x0020)
+        let writableLayer = Mount.block(
+            format: "ext4",
+            source: writableLayerPath.absolutePath(),
+            destination: "/",
+            options: []
+        )
+
+        let buffer = BufferWriter()
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, writableLayer: writableLayer, vmm: bs.vmm) { config in
+            config.process.arguments = ["/bin/sh", "-c", "echo 'journal data' > /tmp/testfile && cat /tmp/testfile"]
+            config.process.stdout = buffer
+            config.bootLog = bs.bootLog
+        }
+
+        try await container.create()
+        try await container.start()
+        let status = try await container.wait()
+        try await container.stop()
+
+        guard status.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "process failed with status \(status)")
+        }
+        guard let output = String(data: buffer.data, encoding: .utf8) else {
+            throw IntegrationError.assert(msg: "failed to convert stdout to UTF8")
+        }
+        guard output.trimmingCharacters(in: .whitespacesAndNewlines) == "journal data" else {
+            throw IntegrationError.assert(msg: "unexpected output: \(output)")
+        }
+    }
+
+    func testWritableLayerPreservesLowerLayer() async throws {
+        let id = "test-writable-layer-preserves-lower"
+
+        let bs = try await bootstrap(id)
+
+        let writableLayerPath = Self.testDir.appending(component: "\(id)-writable.ext4")
+        try? FileManager.default.removeItem(at: writableLayerPath)
+        let filesystem = try EXT4.Formatter(FilePath(writableLayerPath.absolutePath()), minDiskSize: 512.mib())
+        try filesystem.close()
+        let writableLayer = Mount.block(
+            format: "ext4",
+            source: writableLayerPath.absolutePath(),
+            destination: "/",
+            options: []
+        )
+
+        // Get the size of /bin/sh before any modifications
+        let buffer1 = BufferWriter()
+        let container1 = try LinuxContainer("\(id)-1", rootfs: bs.rootfs, writableLayer: writableLayer, vmm: bs.vmm) { config in
+            // Modify a file in /bin. This should go in the writable layer.
+            config.process.arguments = ["/bin/sh", "-c", "ls -la /bin/sh && echo 'modified' > /bin/test-file"]
+            config.process.stdout = buffer1
+            config.bootLog = bs.bootLog
+        }
+
+        try await container1.create()
+        try await container1.start()
+        let status1 = try await container1.wait()
+        try await container1.stop()
+
+        guard status1.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "first container failed with status \(status1)")
+        }
+
+        // Now run a second container with the SAME rootfs but without the writable layer
+        // The /bin/test-file should NOT exist because it was written to the writable layer
+        let buffer2 = BufferWriter()
+        let container2 = try LinuxContainer("\(id)-2", rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["/bin/sh", "-c", "test -f /bin/test-file && echo 'exists' || echo 'not-exists'"]
+            config.process.stdout = buffer2
+            config.bootLog = bs.bootLog
+        }
+
+        try await container2.create()
+        try await container2.start()
+        let status2 = try await container2.wait()
+        try await container2.stop()
+
+        guard status2.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "second container failed with status \(status2)")
+        }
+
+        guard let output2 = String(data: buffer2.data, encoding: .utf8) else {
+            throw IntegrationError.assert(msg: "failed to convert stdout to UTF8")
+        }
+
+        guard output2.trimmingCharacters(in: .whitespacesAndNewlines) == "not-exists" else {
+            throw IntegrationError.assert(msg: "expected 'not-exists' but got: \(output2)")
+        }
+    }
+
+    func testWritableLayerReadsFromLower() async throws {
+        let id = "test-writable-layer-reads-lower"
+
+        let bs = try await bootstrap(id)
+
+        let writableLayerPath = Self.testDir.appending(component: "\(id)-writable.ext4")
+        try? FileManager.default.removeItem(at: writableLayerPath)
+        let filesystem = try EXT4.Formatter(FilePath(writableLayerPath.absolutePath()), minDiskSize: 512.mib())
+        try filesystem.close()
+        let writableLayer = Mount.block(
+            format: "ext4",
+            source: writableLayerPath.absolutePath(),
+            destination: "/",
+            options: []
+        )
+
+        let buffer = BufferWriter()
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, writableLayer: writableLayer, vmm: bs.vmm) { config in
+            config.process.arguments = ["head", "-1", "/etc/passwd"]
+            config.process.stdout = buffer
+            config.bootLog = bs.bootLog
+        }
+
+        try await container.create()
+        try await container.start()
+
+        let status = try await container.wait()
+        try await container.stop()
+
+        guard status.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "process failed with status \(status)")
+        }
+
+        guard let output = String(data: buffer.data, encoding: .utf8) else {
+            throw IntegrationError.assert(msg: "failed to convert stdout to UTF8")
+        }
+
+        // Alpine's first line of /etc/passwd should be root
+        guard output.hasPrefix("root:") else {
+            throw IntegrationError.assert(msg: "expected /etc/passwd to start with 'root:', got: \(output)")
+        }
+    }
+
+    func testWritableLayerWithReadOnlyLower() async throws {
+        let id = "test-writable-layer-ro-lower"
+
+        let bs = try await bootstrap(id)
+        var rootfs = bs.rootfs
+        rootfs.options.append("ro")
+
+        let writableLayerPath = Self.testDir.appending(component: "\(id)-writable.ext4")
+        try? FileManager.default.removeItem(at: writableLayerPath)
+        let filesystem = try EXT4.Formatter(FilePath(writableLayerPath.absolutePath()), minDiskSize: 512.mib())
+        try filesystem.close()
+        let writableLayer = Mount.block(
+            format: "ext4",
+            source: writableLayerPath.absolutePath(),
+            destination: "/",
+            options: []
+        )
+
+        let buffer = BufferWriter()
+        let container = try LinuxContainer(id, rootfs: rootfs, writableLayer: writableLayer, vmm: bs.vmm) { config in
+            // Even though lower layer is ro, writes should succeed via overlay
+            config.process.arguments = ["/bin/sh", "-c", "echo 'overlay write test' > /tmp/test && cat /tmp/test"]
+            config.process.stdout = buffer
+            config.bootLog = bs.bootLog
+        }
+
+        try await container.create()
+        try await container.start()
+
+        let status = try await container.wait()
+        try await container.stop()
+
+        guard status.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "process failed with status \(status)")
+        }
+
+        guard let output = String(data: buffer.data, encoding: .utf8) else {
+            throw IntegrationError.assert(msg: "failed to convert stdout to UTF8")
+        }
+
+        guard output.trimmingCharacters(in: .whitespacesAndNewlines) == "overlay write test" else {
+            throw IntegrationError.assert(msg: "unexpected output: \(output)")
+        }
+    }
+
+    func testWritableLayerSize() async throws {
+        let id = "test-writable-layer-size"
+
+        let bs = try await bootstrap(id)
+
+        // Create a 1 GiB writable layer
+        let expectedSizeBytes: UInt64 = 1.gib()
+        let writableLayerPath = Self.testDir.appending(component: "\(id)-writable.ext4")
+        try? FileManager.default.removeItem(at: writableLayerPath)
+        let filesystem = try EXT4.Formatter(FilePath(writableLayerPath.absolutePath()), minDiskSize: expectedSizeBytes)
+        try filesystem.close()
+        let writableLayer = Mount.block(
+            format: "ext4",
+            source: writableLayerPath.absolutePath(),
+            destination: "/",
+            options: []
+        )
+
+        let buffer = BufferWriter()
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, writableLayer: writableLayer, vmm: bs.vmm) { config in
+            // Use df to check the available space on the root filesystem
+            // The overlay will report the size of the upper layer's backing store
+            config.process.arguments = ["/bin/sh", "-c", "df -B1 / | tail -1 | awk '{print $2}'"]
+            config.process.stdout = buffer
+            config.bootLog = bs.bootLog
+        }
+
+        try await container.create()
+        try await container.start()
+
+        let status = try await container.wait()
+        try await container.stop()
+
+        guard status.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "process failed with status \(status)")
+        }
+
+        guard let output = String(data: buffer.data, encoding: .utf8) else {
+            throw IntegrationError.assert(msg: "failed to convert stdout to UTF8")
+        }
+
+        guard let reportedSize = UInt64(output.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            throw IntegrationError.assert(msg: "failed to parse df output as UInt64: \(output)")
+        }
+
+        // The reported size should be close to our expected size (within 10%)
+        let minExpected: UInt64 = (expectedSizeBytes * 90) / 100
+        let maxExpected: UInt64 = (expectedSizeBytes * 110) / 100
+
+        guard reportedSize >= minExpected && reportedSize <= maxExpected else {
+            throw IntegrationError.assert(msg: "expected size ~\(expectedSizeBytes) bytes, but df reported \(reportedSize) bytes")
+        }
+    }
+
+    func testWritableLayerWithDNSAndHosts() async throws {
+        let id = "test-writable-layer-dns-hosts"
+
+        let bs = try await bootstrap(id)
+
+        let writableLayerPath = Self.testDir.appending(component: "\(id)-writable.ext4")
+        try? FileManager.default.removeItem(at: writableLayerPath)
+        let filesystem = try EXT4.Formatter(FilePath(writableLayerPath.absolutePath()), minDiskSize: 512.mib())
+        try filesystem.close()
+        let writableLayer = Mount.block(
+            format: "ext4",
+            source: writableLayerPath.absolutePath(),
+            destination: "/",
+            options: []
+        )
+
+        let buffer = BufferWriter()
+        let dnsEntry = "8.8.8.8"
+        let hostsEntry = Hosts.Entry.localHostIPV4(comment: "WritableLayerTest")
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, writableLayer: writableLayer, vmm: bs.vmm) { config in
+            config.process.arguments = ["/bin/sh", "-c", "cat /etc/resolv.conf && echo '---' && cat /etc/hosts"]
+            config.process.stdout = buffer
+            config.dns = DNS(nameservers: [dnsEntry])
+            config.hosts = Hosts(entries: [hostsEntry])
+            config.bootLog = bs.bootLog
+        }
+
+        try await container.create()
+        try await container.start()
+
+        let status = try await container.wait()
+        try await container.stop()
+
+        guard status.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "process failed with status \(status)")
+        }
+
+        guard let output = String(data: buffer.data, encoding: .utf8) else {
+            throw IntegrationError.assert(msg: "failed to convert stdout to UTF8")
+        }
+
+        guard output.contains(dnsEntry) else {
+            throw IntegrationError.assert(msg: "expected /etc/resolv.conf to contain \(dnsEntry), got: \(output)")
+        }
+
+        guard output.contains("WritableLayerTest") else {
+            throw IntegrationError.assert(msg: "expected /etc/hosts to contain our entry, got: \(output)")
+        }
+    }
+
+    func testFrozenExt4Clone() async throws {
+        let id = "test-frozen-ext4-clone"
+        let bs = try await bootstrap(id)
+
+        let diskImageURL = Self.testDir.appending(component: "\(id)-data.ext4")
+        try? FileManager.default.removeItem(at: diskImageURL)
+
+        let filesystem = try EXT4.Formatter(FilePath(diskImageURL.absolutePath()), minDiskSize: 64.mib())
+        try filesystem.close()
+
+        let cloneImageURL = Self.testDir.appending(component: "\(id)-data-clone.ext4")
+        try? FileManager.default.removeItem(at: cloneImageURL)
+
+        let writerContainer = try LinuxContainer("\(id)-writer", rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["/bin/sleep", "1000"]
+            config.mounts.append(
+                Mount.block(
+                    format: "ext4",
+                    source: diskImageURL.absolutePath(),
+                    destination: "/data"
+                ))
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await writerContainer.create()
+            try await writerContainer.start()
+
+            try await writerContainer.filesystemOperation(operation: .freeze, path: "/data")
+
+            let writeExec = try await writerContainer.exec("write-hello") { config in
+                config.arguments = ["/bin/sh", "-c", "echo hello > /data/hello.txt"]
+            }
+            try await writeExec.start()
+
+            do {
+                let status = try await writeExec.wait(timeoutInSeconds: 1)
+                throw IntegrationError.assert(msg: "write unexpectedly completed while filesystem was frozen with status \(status)")
+            } catch let error as ContainerizationError where error.code == .timeout {
+                // The write must remain blocked until the filesystem is thawed.
+            }
+
+            try FileManager.default.copyItem(at: diskImageURL, to: cloneImageURL)
+
+            try await writerContainer.filesystemOperation(operation: .thaw, path: "/data")
+
+            let writeStatus = try await writeExec.wait()
+            try await writeExec.delete()
+            guard writeStatus.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "write exec failed with status \(writeStatus)")
+            }
+
+            try await writerContainer.kill(.kill)
+            _ = try await writerContainer.wait()
+            try await writerContainer.stop()
+        } catch {
+            try? await writerContainer.filesystemOperation(operation: .thaw, path: "/data")
+            try? await writerContainer.stop()
+            throw error
+        }
+
+        let verifyContainer = try LinuxContainer("\(id)-reader", rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.mounts.append(
+                Mount.block(
+                    format: "ext4",
+                    source: cloneImageURL.absolutePath(),
+                    destination: "/data"
+                ))
+            config.process.arguments = ["/bin/sleep", "1000"]
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await verifyContainer.create()
+            try await verifyContainer.start()
+
+            let mountBuffer = BufferWriter()
+            let mountExec = try await verifyContainer.exec("verify-mount") { config in
+                config.arguments = ["/bin/sh", "-c", "grep ' /data ' /proc/mounts"]
+                config.stdout = mountBuffer
+            }
+            try await mountExec.start()
+            var status = try await mountExec.wait()
+            try await mountExec.delete()
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "failed to verify /data mount, status \(status)")
+            }
+
+            let mountOutput = String(decoding: mountBuffer.data, as: UTF8.self)
+            guard mountOutput.contains(" /data ") && mountOutput.contains(" ext4 ") else {
+                throw IntegrationError.assert(msg: "expected ext4 mount at /data, got: \(mountOutput)")
+            }
+
+            let lsBuffer = BufferWriter()
+            let lsExec = try await verifyContainer.exec("verify-no-hello") { config in
+                config.arguments = ["ls", "-1", "/data"]
+                config.stdout = lsBuffer
+            }
+            try await lsExec.start()
+            status = try await lsExec.wait()
+            try await lsExec.delete()
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "ls /data failed with status \(status)")
+            }
+
+            let lsOutput = String(decoding: lsBuffer.data, as: UTF8.self)
+            let listedFiles = Set(lsOutput.split(whereSeparator: \.isNewline).map(String.init))
+            guard !listedFiles.contains("hello.txt") else {
+                throw IntegrationError.assert(msg: "expected cloned /data to not contain hello.txt, got: \(lsOutput)")
+            }
+
+            try await verifyContainer.kill(.kill)
+            _ = try await verifyContainer.wait()
+            try await verifyContainer.stop()
+        } catch {
+            try? await verifyContainer.stop()
+            throw error
+        }
+    }
+
+    func testTrimExt4Clone() async throws {
+        let id = "test-trim-ext4-clone"
+        let bs = try await bootstrap(id)
+
+        let diskImageURL = Self.testDir.appending(component: "\(id)-data.ext4")
+        try? FileManager.default.removeItem(at: diskImageURL)
+
+        let filesystem = try EXT4.Formatter(FilePath(diskImageURL.absolutePath()), minDiskSize: 64.mib())
+        try filesystem.close()
+
+        let cloneImageURL = Self.testDir.appending(component: "\(id)-data-clone.ext4")
+        try? FileManager.default.removeItem(at: cloneImageURL)
+
+        let writerContainer = try LinuxContainer("\(id)-writer", rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["/bin/sleep", "1000"]
+            config.mounts.append(
+                Mount.block(
+                    format: "ext4",
+                    source: diskImageURL.absolutePath(),
+                    destination: "/data"
+                ))
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await writerContainer.create()
+            try await writerContainer.start()
+
+            let writeExec = try await writerContainer.exec("write-temp") { config in
+                config.arguments = [
+                    "/bin/sh",
+                    "-c",
+                    "dd if=/dev/zero of=/data/trim.dat bs=1M count=8 status=none && sync && rm /data/trim.dat && sync",
+                ]
+            }
+            try await writeExec.start()
+            let writeStatus = try await writeExec.wait()
+            try await writeExec.delete()
+            guard writeStatus.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "trim setup exec failed with status \(writeStatus)")
+            }
+
+            try await writerContainer.filesystemOperation(operation: .trim, path: "/data")
+
+            try FileManager.default.copyItem(at: diskImageURL, to: cloneImageURL)
+
+            try await writerContainer.kill(.kill)
+            _ = try await writerContainer.wait()
+            try await writerContainer.stop()
+        } catch {
+            try? await writerContainer.stop()
+            throw error
+        }
+
+        let verifyContainer = try LinuxContainer("\(id)-reader", rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.mounts.append(
+                Mount.block(
+                    format: "ext4",
+                    source: cloneImageURL.absolutePath(),
+                    destination: "/data"
+                ))
+            config.process.arguments = ["/bin/sleep", "1000"]
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await verifyContainer.create()
+            try await verifyContainer.start()
+
+            let mountBuffer = BufferWriter()
+            let mountExec = try await verifyContainer.exec("verify-mount") { config in
+                config.arguments = ["/bin/sh", "-c", "grep ' /data ' /proc/mounts"]
+                config.stdout = mountBuffer
+            }
+            try await mountExec.start()
+            var status = try await mountExec.wait()
+            try await mountExec.delete()
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "failed to verify /data mount, status \(status)")
+            }
+
+            let mountOutput = String(decoding: mountBuffer.data, as: UTF8.self)
+            guard mountOutput.contains(" /data ") && mountOutput.contains(" ext4 ") else {
+                throw IntegrationError.assert(msg: "expected ext4 mount at /data, got: \(mountOutput)")
+            }
+
+            let lsBuffer = BufferWriter()
+            let lsExec = try await verifyContainer.exec("verify-no-hello") { config in
+                config.arguments = ["ls", "-1", "/data"]
+                config.stdout = lsBuffer
+            }
+            try await lsExec.start()
+            status = try await lsExec.wait()
+            try await lsExec.delete()
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "ls /data failed with status \(status)")
+            }
+
+            let lsOutput = String(decoding: lsBuffer.data, as: UTF8.self)
+            let listedFiles = Set(lsOutput.split(whereSeparator: \.isNewline).map(String.init))
+            guard !listedFiles.contains("trim.dat") else {
+                throw IntegrationError.assert(msg: "expected cloned /data to not contain trim.dat, got: \(lsOutput)")
+            }
+
+            try await verifyContainer.kill(.kill)
+            _ = try await verifyContainer.wait()
+            try await verifyContainer.stop()
+        } catch {
+            try? await verifyContainer.stop()
+            throw error
+        }
+    }
+
+    func testUseInitBasic() async throws {
+        let id = "test-use-init-basic"
+
+        let bs = try await bootstrap(id)
+        let buffer = BufferWriter()
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["/bin/echo", "hello from init"]
+            config.process.stdout = buffer
+            config.useInit = true
+            config.bootLog = bs.bootLog
+        }
+
+        try await container.create()
+        try await container.start()
+
+        let status = try await container.wait()
+        try await container.stop()
+
+        guard status.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "process status \(status) != 0")
+        }
+
+        guard String(data: buffer.data, encoding: .utf8) == "hello from init\n" else {
+            throw IntegrationError.assert(
+                msg: "expected 'hello from init', got '\(String(data: buffer.data, encoding: .utf8) ?? "nil")'")
+        }
+    }
+
+    func testUseInitExitCodePropagation() async throws {
+        let id = "test-use-init-exit-code"
+
+        let bs = try await bootstrap(id)
+
+        // Test exit code 0
+        var container = try LinuxContainer("\(id)-success", rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["/bin/true"]
+            config.useInit = true
+            config.bootLog = bs.bootLog
+        }
+
+        try await container.create()
+        try await container.start()
+        var status = try await container.wait()
+        try await container.stop()
+
+        guard status.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "expected exit code 0, got \(status.exitCode)")
+        }
+
+        // Test non-zero exit code
+        container = try LinuxContainer("\(id)-failure", rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["/bin/false"]
+            config.useInit = true
+            config.bootLog = bs.bootLog
+        }
+
+        try await container.create()
+        try await container.start()
+        status = try await container.wait()
+        try await container.stop()
+
+        guard status.exitCode == 1 else {
+            throw IntegrationError.assert(msg: "expected exit code 1, got \(status.exitCode)")
+        }
+
+        // Test custom exit code
+        container = try LinuxContainer("\(id)-custom", rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["sh", "-c", "exit 42"]
+            config.useInit = true
+            config.bootLog = bs.bootLog
+        }
+
+        try await container.create()
+        try await container.start()
+        status = try await container.wait()
+        try await container.stop()
+
+        guard status.exitCode == 42 else {
+            throw IntegrationError.assert(msg: "expected exit code 42, got \(status.exitCode)")
+        }
+    }
+
+    func testUseInitSignalForwarding() async throws {
+        let id = "test-use-init-signal"
+
+        let bs = try await bootstrap(id)
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["sleep", "300"]
+            config.useInit = true
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            try await Task.sleep(for: .milliseconds(100))
+
+            try await container.kill(.term)
+
+            let status = try await container.wait(timeoutInSeconds: 5)
+            try await container.stop()
+
+            // SIGTERM should result in exit code 128 + 15 = 143
+            guard status.exitCode == 143 else {
+                throw IntegrationError.assert(msg: "expected exit code 143 (SIGTERM), got \(status.exitCode)")
+            }
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testUseInitZombieReaping() async throws {
+        let id = "test-use-init-zombie-reaping"
+
+        let bs = try await bootstrap(id)
+        let buffer = BufferWriter()
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            // This script creates an orphaned process that init must reap.
+            // The subshell exits immediately, orphaning the sleep process.
+            // Init should reap it when it exits.
+            config.process.arguments = [
+                "/bin/sh", "-c",
+                """
+                # Create orphans: subshell exits before its children
+                (/bin/sleep 0.1 &)
+                (/bin/sleep 0.1 &)
+                # Wait for orphans to complete
+                /bin/sleep 0.3
+                # Check for zombie processes (Z state)
+                zombies=$(ps -eo stat 2>/dev/null | grep -c '^Z' || echo 0)
+                echo "zombie_count:$zombies"
+                """,
+            ]
+            config.process.stdout = buffer
+            config.useInit = true
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            let status = try await container.wait()
+            try await container.stop()
+
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "process status \(status) != 0")
+            }
+
+            guard let output = String(data: buffer.data, encoding: .utf8) else {
+                throw IntegrationError.assert(msg: "failed to convert output to UTF8")
+            }
+
+            // Should report 0 zombies
+            guard output.contains("zombie_count:0") else {
+                throw IntegrationError.assert(msg: "expected zero zombies, got: \(output)")
+            }
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testUseInitWithTerminal() async throws {
+        let id = "test-use-init-terminal"
+
+        let bs = try await bootstrap(id)
+        let buffer = BufferWriter()
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["/bin/sh", "-c", "tty && echo 'has tty'"]
+            config.process.terminal = true
+            config.process.stdout = buffer
+            config.useInit = true
+            config.bootLog = bs.bootLog
+        }
+
+        try await container.create()
+        try await container.start()
+
+        let status = try await container.wait()
+        try await container.stop()
+
+        guard status.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "process status \(status) != 0")
+        }
+
+        guard let output = String(data: buffer.data, encoding: .utf8) else {
+            throw IntegrationError.assert(msg: "failed to convert output to UTF8")
+        }
+
+        guard output.contains("has tty") else {
+            throw IntegrationError.assert(msg: "expected 'has tty' in output, got: \(output)")
+        }
+    }
+
+    func testUseInitWithStdin() async throws {
+        let id = "test-use-init-stdin"
+
+        let bs = try await bootstrap(id)
+        let buffer = BufferWriter()
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["cat"]
+            config.process.stdin = StdinBuffer(data: "input through init\n".data(using: .utf8)!)
+            config.process.stdout = buffer
+            config.useInit = true
+            config.bootLog = bs.bootLog
+        }
+
+        try await container.create()
+        try await container.start()
+
+        let status = try await container.wait()
+        try await container.stop()
+
+        guard status.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "process status \(status) != 0")
+        }
+
+        guard String(data: buffer.data, encoding: .utf8) == "input through init\n" else {
+            throw IntegrationError.assert(
+                msg: "expected 'input through init', got '\(String(data: buffer.data, encoding: .utf8) ?? "nil")'")
+        }
+    }
+
+    #if os(macOS)
+    @available(macOS 26.0, *)
+    func testNetworkingDisabled() async throws {
+        let id = "test-networking-disabled"
+        let bs = try await bootstrap(id)
+
+        let network = try VmnetNetwork()
+        var manager = try ContainerManager(vmm: bs.vmm, network: network)
+        defer {
+            try? manager.delete(id)
+        }
+
+        let buffer = BufferWriter()
+        let container = try await manager.create(
+            id,
+            image: bs.image,
+            rootfs: bs.rootfs,
+            networking: false
+        ) { config in
+            config.process.arguments = ["ls", "-1", "/sys/class/net/"]
+            config.process.stdout = buffer
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            let status = try await container.wait()
+            try await container.stop()
+
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "ls /sys/class/net/ failed with status \(status)")
+            }
+
+            guard let output = String(data: buffer.data, encoding: .utf8) else {
+                throw IntegrationError.assert(msg: "failed to convert output to UTF8")
+            }
+
+            // With networking disabled check we don't have an eth0.
+            let interfaces = output.trimmingCharacters(in: .whitespacesAndNewlines)
+                .split(separator: "\n")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+
+            guard !interfaces.contains("eth0") else {
+                throw IntegrationError.assert(
+                    msg: "expected no 'eth0' interface")
+            }
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    @available(macOS 26.0, *)
+    func testNetworkingEnabled() async throws {
+        let id = "test-networking-enabled"
+        let bs = try await bootstrap(id)
+
+        let network = try VmnetNetwork()
+        var manager = try ContainerManager(vmm: bs.vmm, network: network)
+        defer {
+            try? manager.delete(id)
+        }
+
+        let buffer = BufferWriter()
+        let container = try await manager.create(
+            id,
+            image: bs.image,
+            rootfs: bs.rootfs
+        ) { config in
+            config.process.arguments = ["ls", "-1", "/sys/class/net/"]
+            config.process.stdout = buffer
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            let status = try await container.wait()
+            try await container.stop()
+
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "ls /sys/class/net/ failed with status \(status)")
+            }
+
+            guard let output = String(data: buffer.data, encoding: .utf8) else {
+                throw IntegrationError.assert(msg: "failed to convert output to UTF8")
+            }
+
+            // With networking enabled (default), eth0 should be present alongside lo
+            let interfaces = Set(
+                output.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .split(separator: "\n")
+                    .map { $0.trimmingCharacters(in: .whitespaces) }
+            )
+            guard interfaces.contains("lo") else {
+                throw IntegrationError.assert(msg: "expected 'lo' interface, got: \(interfaces)")
+            }
+            guard interfaces.contains("eth0") else {
+                throw IntegrationError.assert(msg: "expected 'eth0' interface, got: \(interfaces)")
+            }
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    @available(macOS 26.0, *)
+    func testContainerNetworkInterfaceStatistics() async throws {
+        let id = "test-container-network-interface-statistics"
+        let bs = try await bootstrap(id)
+
+        let network = try VmnetNetwork()
+        var manager = try ContainerManager(vmm: bs.vmm, network: network)
+        defer {
+            try? manager.delete(id)
+        }
+
+        let container = try await manager.create(
+            id,
+            image: bs.image,
+            rootfs: bs.rootfs
+        ) { config in
+            config.process.arguments = ["sleep", "infinity"]
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            func eth0(_ stats: ContainerStatistics) throws -> ContainerStatistics.NetworkStatistics {
+                guard let eth0 = stats.networks?.first(where: { $0.interface == "eth0" }) else {
+                    throw IntegrationError.assert(msg: "expected eth0 in network statistics, got \(stats.networks?.map(\.interface) ?? [])")
+                }
+                return eth0
+            }
+
+            let before = try eth0(try await container.statistics(categories: .network))
+
+            // Generate some traffic across the interface. The gateway may not answer
+            // ping, so the exit code is ignored; the packets still go out eth0.
+            let exec = try await container.exec("ping-gateway") { config in
+                config.arguments = ["sh", "-c", "ping -c 3 -W 1 $(ip route | awk '/default/ {print $3; exit}'); true"]
+            }
+            try await exec.start()
+            _ = try await exec.wait()
+            try await exec.delete()
+
+            let after = try eth0(try await container.statistics(categories: .network))
+
+            guard after.transmittedPackets > before.transmittedPackets else {
+                throw IntegrationError.assert(msg: "expected eth0 transmittedPackets to grow, got \(before.transmittedPackets) -> \(after.transmittedPackets)")
+            }
+
+            // Drop counters are cumulative, so they must never go backwards.
+            guard after.receivedDropped >= before.receivedDropped, after.transmittedDropped >= before.transmittedDropped else {
+                throw IntegrationError.assert(
+                    msg:
+                        "eth0 dropped counters decreased: rx \(before.receivedDropped)->\(after.receivedDropped) tx \(before.transmittedDropped)->\(after.transmittedDropped)"
+                )
+            }
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    @available(macOS 26.0, *)
+    func testNetworkingEnabledIPv6() async throws {
+        let id = "test-networking-enabled-ipv6"
+        let bs = try await bootstrap(id)
+
+        let network = try VmnetNetwork()
+        var manager = try ContainerManager(vmm: bs.vmm, network: network)
+        defer {
+            try? manager.delete(id)
+        }
+
+        let buffer = BufferWriter()
+        let container = try await manager.create(
+            id,
+            image: bs.image,
+            rootfs: bs.rootfs
+        ) { config in
+            config.process.arguments = ["ip", "-6", "addr", "show", "eth0", "scope", "global"]
+            config.process.stdout = buffer
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            let status = try await container.wait()
+            try await container.stop()
+
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "ip -6 addr show failed with status \(status)")
+            }
+
+            guard let output = String(data: buffer.data, encoding: .utf8) else {
+                throw IntegrationError.assert(msg: "failed to convert output to UTF8")
+            }
+
+            guard output.contains("inet6 fd") else {
+                throw IntegrationError.assert(
+                    msg: "expected a global-scope IPv6 address on eth0, got: \(output)")
+            }
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    @available(macOS 26.0, *)
+    func testIPv6AddressAdd() async throws {
+        let id = "test-ipv6-address"
+        let bs = try await bootstrap(id)
+
+        // Pin the v6 prefix so the allocator's first allocation yields fd00::2.
+        var network = try VmnetNetwork(prefixV6: try CIDRv6("fd00::/64"))
+        defer {
+            try? network.releaseInterface(id)
+        }
+
+        guard let interface = try network.createInterface(id) else {
+            throw IntegrationError.assert(msg: "failed to create network interface")
+        }
+
+        let buffer = BufferWriter()
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["sleep", "100"]
+            config.interfaces = [interface]
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            // Check that the IPv6 address was assigned to eth0.
+            let exec = try await container.exec("check-ipv6") { config in
+                config.arguments = ["ip", "-6", "addr", "show", "eth0"]
+                config.stdout = buffer
+            }
+
+            try await exec.start()
+            let status = try await exec.wait()
+            try await exec.delete()
+
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "ip -6 addr show failed with status \(status)")
+            }
+
+            guard let output = String(data: buffer.data, encoding: .utf8) else {
+                throw IntegrationError.assert(msg: "failed to convert output to UTF8")
+            }
+
+            guard output.contains("fd00::2") else {
+                throw IntegrationError.assert(
+                    msg: "expected fd00::2 in output, got: \(output)")
+            }
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    @available(macOS 26.0, *)
+    func testIPv6DefaultRoute() async throws {
+        let id = "test-ipv6-default-route"
+        let bs = try await bootstrap(id)
+
+        // Pin the network's v6 prefix so the gateway is deterministically fd00::1
+        // and the allocator's first allocation yields fd00::2.
+        var network = try VmnetNetwork(prefixV6: try CIDRv6("fd00::/64"))
+        defer {
+            try? network.releaseInterface(id)
+        }
+
+        guard let interface = try network.createInterface(id) else {
+            throw IntegrationError.assert(msg: "failed to create network interface")
+        }
+
+        let buffer = BufferWriter()
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["sleep", "100"]
+            config.interfaces = [interface]
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            // Inspect IPv6 routes inside the container.
+            let exec = try await container.exec("check-v6-route") { config in
+                config.arguments = ["ip", "-6", "route", "show"]
+                config.stdout = buffer
+            }
+
+            try await exec.start()
+            let status = try await exec.wait()
+            try await exec.delete()
+
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "ip -6 route show failed with status \(status)")
+            }
+
+            guard let output = String(data: buffer.data, encoding: .utf8) else {
+                throw IntegrationError.assert(msg: "failed to convert output to UTF8")
+            }
+
+            // The default v6 route must point at the gateway we configured, on eth0.
+            guard output.contains("default via fd00::1 dev eth0") else {
+                throw IntegrationError.assert(
+                    msg: "expected 'default via fd00::1 dev eth0' in v6 routes, got: \(output)")
+            }
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    @available(macOS 26.0, *)
+    func testIPv6GatewayOutsideSubnet() async throws {
+        let id = "test-ipv6-gateway-outside-subnet"
+        let bs = try await bootstrap(id)
+
+        // Address in fd00::/120, gateway in fd01::/120 — subnets don't overlap, so the
+        // LinuxContainer wiring must add a /128 link route to the gateway before the
+        // default route. The two prefixes are independent so we drive this directly
+        // via NATInterface rather than the VmnetNetwork allocator (which always
+        // derives the gateway from the network's own prefix).
+        let interface = NATInterface(
+            ipv4Address: try CIDRv4("192.0.2.2/24"),
+            ipv4Gateway: try IPv4Address("192.0.2.1"),
+            ipv6Address: try CIDRv6("fd00::2/120"),
+            ipv6Gateway: try IPv6Address("fd01::1"))
+
+        let buffer = BufferWriter()
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["sleep", "100"]
+            config.interfaces = [interface]
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            let exec = try await container.exec("check-v6-routes") { config in
+                config.arguments = ["ip", "-6", "route", "show"]
+                config.stdout = buffer
+            }
+
+            try await exec.start()
+            let status = try await exec.wait()
+            try await exec.delete()
+
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "ip -6 route show failed with status \(status)")
+            }
+
+            guard let output = String(data: buffer.data, encoding: .utf8) else {
+                throw IntegrationError.assert(msg: "failed to convert output to UTF8")
+            }
+
+            // Both the link-scoped route to the gateway AND the default via that gateway
+            // must be present. Without the link route, the kernel would refuse the default.
+            // Match the link route on a line that starts with the gateway address (no "via")
+            // so it can't be satisfied by a substring of the default-via line.
+            let lines = output.split(separator: "\n").map(String.init)
+            let hasLinkRoute = lines.contains { $0.hasPrefix("fd01::1 ") && $0.contains("dev eth0") && !$0.contains("via") }
+            guard hasLinkRoute else {
+                throw IntegrationError.assert(
+                    msg: "expected an on-link route 'fd01::1 ... dev eth0' (no 'via') in v6 routes, got: \(output)")
+            }
+            guard output.contains("default via fd01::1 dev eth0") else {
+                throw IntegrationError.assert(
+                    msg: "expected 'default via fd01::1 dev eth0' in v6 routes, got: \(output)")
+            }
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    @available(macOS 26.0, *)
+    func testIPv6OnlyDefaultRoute() async throws {
+        let id = "test-ipv6-only-default-route"
+        let bs = try await bootstrap(id)
+
+        // Construct a NATInterface with a nil IPv4 gateway and a v6 gateway, so
+        // LinuxContainer takes the no-v4-gateway branch in setupInterface. The v4
+        // address comes from TEST-NET-1; nothing in the test traffics over v4.
+        let interface = NATInterface(
+            ipv4Address: try CIDRv4("192.0.2.2/24"),
+            ipv4Gateway: nil,
+            ipv6Address: try CIDRv6("fd00::2/64"),
+            ipv6Gateway: try IPv6Address("fd00::1"))
+
+        let buffer = BufferWriter()
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["sleep", "100"]
+            config.interfaces = [interface]
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            let exec = try await container.exec("check-v6-route") { config in
+                config.arguments = ["ip", "-6", "route", "show"]
+                config.stdout = buffer
+            }
+
+            try await exec.start()
+            let status = try await exec.wait()
+            try await exec.delete()
+
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "ip -6 route show failed with status \(status)")
+            }
+
+            guard let output = String(data: buffer.data, encoding: .utf8) else {
+                throw IntegrationError.assert(msg: "failed to convert output to UTF8")
+            }
+
+            guard output.contains("default via fd00::1 dev eth0") else {
+                throw IntegrationError.assert(
+                    msg: "expected 'default via fd00::1 dev eth0' in v6 routes when ipv4Gateway is nil, got: \(output)")
+            }
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    @available(macOS 26.0, *)
+    func testIPv6OnlyGatewayOutsideSubnet() async throws {
+        let id = "test-ipv6-only-gateway-outside-subnet"
+        let bs = try await bootstrap(id)
+
+        // No v4 gateway AND v6 gateway is outside the v6 subnet. Exercises
+        // setupInterface's "no v4 gateway, but v6 link route required before
+        // v6 default route" branch — the exact bug the helper extraction fixed.
+        let interface = NATInterface(
+            ipv4Address: try CIDRv4("192.0.2.2/24"),
+            ipv4Gateway: nil,
+            ipv6Address: try CIDRv6("fd00::2/120"),
+            ipv6Gateway: try IPv6Address("fd01::1"))
+
+        let buffer = BufferWriter()
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["sleep", "100"]
+            config.interfaces = [interface]
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            let exec = try await container.exec("check-v6-routes") { config in
+                config.arguments = ["ip", "-6", "route", "show"]
+                config.stdout = buffer
+            }
+
+            try await exec.start()
+            let status = try await exec.wait()
+            try await exec.delete()
+
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "ip -6 route show failed with status \(status)")
+            }
+
+            guard let output = String(data: buffer.data, encoding: .utf8) else {
+                throw IntegrationError.assert(msg: "failed to convert output to UTF8")
+            }
+
+            // Both the on-link route to the gateway AND the default via it must be present.
+            // Without the link route the kernel rejects the default — that was the bug.
+            let lines = output.split(separator: "\n").map(String.init)
+            let hasLinkRoute = lines.contains { $0.hasPrefix("fd01::1 ") && $0.contains("dev eth0") && !$0.contains("via") }
+            guard hasLinkRoute else {
+                throw IntegrationError.assert(
+                    msg: "expected an on-link route 'fd01::1 ... dev eth0' (no 'via') in v6 routes, got: \(output)")
+            }
+            guard output.contains("default via fd01::1 dev eth0") else {
+                throw IntegrationError.assert(
+                    msg: "expected 'default via fd01::1 dev eth0' in v6 routes, got: \(output)")
+            }
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    @available(macOS 26.0, *)
+    func testIPv6DualStack() async throws {
+        let id = "test-ipv6-dual-stack"
+        let bs = try await bootstrap(id)
+
+        // Pin the network's v6 prefix so the gateway is deterministically fd00::1
+        // and the allocator's first allocation yields fd00::2.
+        var network = try VmnetNetwork(prefixV6: try CIDRv6("fd00::/64"))
+        defer {
+            try? network.releaseInterface(id)
+        }
+
+        guard let interface = try network.createInterface(id) else {
+            throw IntegrationError.assert(msg: "failed to create network interface")
+        }
+
+        // Capture the v4 address vmnet allocated so we can assert it ends up on eth0.
+        let expectedV4 = interface.ipv4Address.address.description
+
+        let addrBuffer = BufferWriter()
+        let routeBuffer = BufferWriter()
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["sleep", "100"]
+            config.interfaces = [interface]
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            // `ip addr show` (no family flag) lists both v4 and v6.
+            let addrExec = try await container.exec("check-dual-stack-addr") { config in
+                config.arguments = ["ip", "addr", "show", "eth0"]
+                config.stdout = addrBuffer
+            }
+            try await addrExec.start()
+            let addrStatus = try await addrExec.wait()
+            try await addrExec.delete()
+
+            guard addrStatus.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "ip addr show failed with status \(addrStatus)")
+            }
+
+            guard let addrOutput = String(data: addrBuffer.data, encoding: .utf8) else {
+                throw IntegrationError.assert(msg: "failed to convert addr output to UTF8")
+            }
+
+            guard addrOutput.contains(expectedV4) else {
+                throw IntegrationError.assert(
+                    msg: "expected v4 address \(expectedV4) on eth0, got: \(addrOutput)")
+            }
+            guard addrOutput.contains("fd00::2") else {
+                throw IntegrationError.assert(
+                    msg: "expected v6 address fd00::2 on eth0, got: \(addrOutput)")
+            }
+
+            // The dual-stack default routes must both be installed.
+            let routeExec = try await container.exec("check-dual-stack-route") { config in
+                config.arguments = ["ip", "-6", "route", "show"]
+                config.stdout = routeBuffer
+            }
+            try await routeExec.start()
+            let routeStatus = try await routeExec.wait()
+            try await routeExec.delete()
+
+            guard routeStatus.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "ip -6 route show failed with status \(routeStatus)")
+            }
+
+            guard let routeOutput = String(data: routeBuffer.data, encoding: .utf8) else {
+                throw IntegrationError.assert(msg: "failed to convert route output to UTF8")
+            }
+
+            guard routeOutput.contains("default via fd00::1 dev eth0") else {
+                throw IntegrationError.assert(
+                    msg: "expected 'default via fd00::1 dev eth0' in v6 routes, got: \(routeOutput)")
+            }
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    #endif
+
+    func testSysctl() async throws {
+        let id = "test-container-sysctl"
+
+        let bs = try await bootstrap(id)
+        let buffer = BufferWriter()
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.sysctl = [
+                "net.core.somaxconn": "4096"
+            ]
+            config.process.arguments = ["cat", "/proc/sys/net/core/somaxconn"]
+            config.process.stdout = buffer
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            let status = try await container.wait()
+            try await container.stop()
+
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "process status \(status) != 0")
+            }
+
+            let output = String(data: buffer.data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard output == "4096" else {
+                throw IntegrationError.assert(
+                    msg: "sysctl net.core.somaxconn should be '4096', got '\(output ?? "nil")'")
+            }
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testSysctlMultiple() async throws {
+        let id = "test-container-sysctl-multiple"
+
+        let bs = try await bootstrap(id)
+        let buffer = BufferWriter()
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.sysctl = [
+                "net.core.somaxconn": "2048",
+                "net.ipv4.ip_forward": "1",
+            ]
+            config.process.arguments = [
+                "/bin/sh", "-c",
+                "cat /proc/sys/net/core/somaxconn && cat /proc/sys/net/ipv4/ip_forward",
+            ]
+            config.process.stdout = buffer
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            let status = try await container.wait()
+            try await container.stop()
+
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "process status \(status) != 0")
+            }
+
+            let output = String(data: buffer.data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let lines = output?.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+            guard lines == ["2048", "1"] else {
+                throw IntegrationError.assert(
+                    msg: "expected sysctls ['2048', '1'], got '\(output ?? "nil")'")
+            }
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testExecJoinsInitNamespaces() async throws {
+        let id = "test-exec-joins-init-namespaces"
+
+        // An exec must land in exactly the namespaces the container's init
+        // process is in. The namespace identity check (`/proc/self/ns/*` vs
+        // `/proc/1/ns/*`, PID 1 being the container init as seen from inside
+        // its own PID namespace) is the real invariant: it catches any
+        // namespace the exec path forgets, not just the one that regressed.
+        //
+        // `kernel.shm_rmid_forced` is asserted alongside it because it is what
+        // consumers actually observe. IPC-namespaced sysctls are resolved
+        // against the *reading* process's IPC namespace, so an exec left in the
+        // guest's root IPC namespace reads the guest default (0) rather than
+        // the value applied to the container — the shape of the CRI conformance
+        // failure "should support safe sysctls", which reads such a sysctl back
+        // over ExecSync.
+        //
+        // `net` is expected to match too: LinuxContainer declares no network
+        // namespace, so both sides sit in the guest root netns today, and
+        // asserting it guards the exec path if that ever changes.
+        let probe = """
+            exec 2>&1
+            set -u
+            fail=0
+            for ns in ipc uts mnt pid cgroup net; do
+                mine=$(readlink /proc/self/ns/$ns)
+                init=$(readlink /proc/1/ns/$ns)
+                if [ "$mine" != "$init" ]; then
+                    echo "NS-FAIL: $ns exec=$mine init=$init"
+                    fail=1
+                fi
+            done
+            shm=$(cat /proc/sys/kernel/shm_rmid_forced)
+            if [ "$shm" != "1" ]; then
+                echo "SYSCTL-FAIL: kernel.shm_rmid_forced=$shm expected 1"
+                fail=1
+            fi
+            [ "$fail" -eq 0 ] || exit 1
+            echo "NS-OK"
+            """
+
+        let bs = try await bootstrap(id)
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.sysctl = [
+                "kernel.shm_rmid_forced": "1"
+            ]
+            config.process.arguments = ["/bin/sleep", "100"]
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            let buffer = BufferWriter()
+            let exec = try await container.exec("ns-probe") { config in
+                config.arguments = ["/bin/sh", "-c", probe]
+                config.stdout = buffer
+            }
+
+            try await exec.start()
+            let status = try await exec.wait()
+            try await exec.delete()
+
+            let output = String(data: buffer.data, encoding: .utf8) ?? "<non-utf8 output>"
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "exec namespace probe failed (exit \(status.exitCode)): \(output)")
+            }
+            guard output.contains("NS-OK") else {
+                throw IntegrationError.assert(msg: "expected NS-OK sentinel, got: \(output)")
+            }
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testNoNewPrivileges() async throws {
+        let id = "test-no-new-privileges"
+
+        let bs = try await bootstrap(id)
+        let buffer = BufferWriter()
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["cat", "/proc/self/status"]
+            config.process.noNewPrivileges = true
+            config.process.stdout = buffer
+            config.bootLog = bs.bootLog
+        }
+
+        try await container.create()
+        try await container.start()
+
+        let status = try await container.wait()
+        try await container.stop()
+
+        guard status.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "process status \(status) != 0")
+        }
+
+        guard let output = String(data: buffer.data, encoding: .utf8) else {
+            throw IntegrationError.assert(msg: "failed to convert stdout to UTF8")
+        }
+
+        // /proc/self/status contains "NoNewPrivs:\t1" when the bit is set
+        guard output.contains("NoNewPrivs:\t1") else {
+            throw IntegrationError.assert(msg: "expected NoNewPrivs to be 1, got: \(output)")
+        }
+    }
+
+    func testNoNewPrivilegesDisabled() async throws {
+        let id = "test-no-new-privileges-disabled"
+
+        let bs = try await bootstrap(id)
+        let buffer = BufferWriter()
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["cat", "/proc/self/status"]
+            // noNewPrivileges defaults to false
+            config.process.stdout = buffer
+            config.bootLog = bs.bootLog
+        }
+
+        try await container.create()
+        try await container.start()
+
+        let status = try await container.wait()
+        try await container.stop()
+
+        guard status.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "process status \(status) != 0")
+        }
+
+        guard let output = String(data: buffer.data, encoding: .utf8) else {
+            throw IntegrationError.assert(msg: "failed to convert stdout to UTF8")
+        }
+
+        // When noNewPrivileges is not set, NoNewPrivs should be 0
+        guard output.contains("NoNewPrivs:\t0") else {
+            throw IntegrationError.assert(msg: "expected NoNewPrivs to be 0, got: \(output)")
+        }
+    }
+
+    func testWorkingDirCreated() async throws {
+        let id = "test-working-dir-created"
+        let bs = try await bootstrap(id)
+
+        let buffer = BufferWriter()
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["/bin/pwd"]
+            config.process.workingDirectory = "/does/not/exist"
+            config.process.stdout = buffer
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            let status = try await container.wait()
+            try await container.stop()
+
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "process with non-existent workingDir failed: \(status)")
+            }
+
+            guard let output = String(data: buffer.data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) else {
+                throw IntegrationError.assert(msg: "failed to read stdout")
+            }
+
+            guard output == "/does/not/exist" else {
+                throw IntegrationError.assert(msg: "expected cwd '/does/not/exist', got '\(output)'")
+            }
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testWorkingDirExecCreated() async throws {
+        let id = "test-working-dir-exec-created"
+        let bs = try await bootstrap(id)
+
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["/bin/sleep", "1000"]
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            let buffer = BufferWriter()
+            let exec = try await container.exec("cwd-exec") { config in
+                config.arguments = ["/bin/pwd"]
+                config.workingDirectory = "/a/b/c/d"
+                config.stdout = buffer
+            }
+
+            try await exec.start()
+            let status = try await exec.wait()
+            try await exec.delete()
+
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "exec with non-existent workingDir failed: \(status)")
+            }
+
+            guard let output = String(data: buffer.data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) else {
+                throw IntegrationError.assert(msg: "failed to read stdout")
+            }
+
+            guard output == "/a/b/c/d" else {
+                throw IntegrationError.assert(msg: "expected cwd '/a/b/c/d', got '\(output)'")
+            }
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    func testNoNewPrivilegesExec() async throws {
+        let id = "test-no-new-privileges-exec"
+
+        let bs = try await bootstrap(id)
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["sleep", "100"]
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            // Exec a process with noNewPrivileges set
+            let buffer = BufferWriter()
+            let exec = try await container.exec("nnp-exec") { config in
+                config.arguments = ["cat", "/proc/self/status"]
+                config.noNewPrivileges = true
+                config.stdout = buffer
+            }
+
+            try await exec.start()
+            let status = try await exec.wait()
+            try await exec.delete()
+
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "exec status \(status) != 0")
+            }
+
+            guard let output = String(data: buffer.data, encoding: .utf8) else {
+                throw IntegrationError.assert(msg: "failed to convert stdout to UTF8")
+            }
+
+            guard output.contains("NoNewPrivs:\t1") else {
+                throw IntegrationError.assert(msg: "expected NoNewPrivs to be 1 in exec, got: \(output)")
+            }
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    // Verify the VM and the container are sized independently: the sandbox is
+    // exactly the size requested (nothing added on top) while the container's
+    // cgroup limits come solely from the container configuration.
+    func testIndependentVMAndContainerSizing() async throws {
+        let id = "test-independent-sizing"
+
+        let bs = try await bootstrap(id)
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm, vm: VMResources(cpus: 4, memoryInBytes: 1024.mib())) { config in
+            config.process.arguments = ["sleep", "infinity"]
+            config.cpus = 2
+            config.memoryInBytes = 512.mib()
+            config.bootLog = bs.bootLog
+        }
+
+        do {
+            try await container.create()
+            try await container.start()
+
+            // The guest sees exactly the vCPUs asked for. `nproc` reflects the
+            // VM size, not the cgroup quota, so this catches any overhead
+            // silently added to the sandbox.
+            let cpuBuffer = BufferWriter()
+            let cpuExec = try await container.exec("check-nproc") { config in
+                config.arguments = ["nproc"]
+                config.stdout = cpuBuffer
+            }
+            try await cpuExec.start()
+            var status = try await cpuExec.wait()
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "nproc status \(status) != 0")
+            }
+            try await cpuExec.delete()
+
+            guard let cpuStr = String(data: cpuBuffer.data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                let cpuCount = Int(cpuStr)
+            else {
+                throw IntegrationError.assert(msg: "failed to parse nproc output")
+            }
+            let expectedVMCpus = 4
+            guard cpuCount == expectedVMCpus else {
+                throw IntegrationError.assert(msg: "nproc \(cpuCount) != expected \(expectedVMCpus)")
+            }
+
+            // The container is capped at 2 CPUs even though the VM has 4.
+            let cgroupCPUBuffer = BufferWriter()
+            let cgroupCPUExec = try await container.exec("check-cgroup-cpu") { config in
+                config.arguments = ["cat", "/sys/fs/cgroup/cpu.max"]
+                config.stdout = cgroupCPUBuffer
+            }
+            try await cgroupCPUExec.start()
+            status = try await cgroupCPUExec.wait()
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "check-cgroup-cpu status \(status) != 0")
+            }
+            try await cgroupCPUExec.delete()
+
+            guard let cpuLimit = String(data: cgroupCPUBuffer.data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) else {
+                throw IntegrationError.assert(msg: "failed to parse cpu.max")
+            }
+            let expectedCPULimit = "200000 100000"  // 2 CPUs: quota=200000, period=100000
+            guard cpuLimit == expectedCPULimit else {
+                throw IntegrationError.assert(msg: "cpu.max '\(cpuLimit)' != expected '\(expectedCPULimit)'")
+            }
+
+            // The container's memory limit is its own, distinct from the VM's.
+            let memBuffer = BufferWriter()
+            let memExec = try await container.exec("check-cgroup-memory") { config in
+                config.arguments = ["cat", "/sys/fs/cgroup/memory.max"]
+                config.stdout = memBuffer
+            }
+            try await memExec.start()
+            status = try await memExec.wait()
+            guard status.exitCode == 0 else {
+                throw IntegrationError.assert(msg: "check-cgroup-memory status \(status) != 0")
+            }
+            try await memExec.delete()
+
+            guard let memoryLimit = String(data: memBuffer.data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) else {
+                throw IntegrationError.assert(msg: "failed to parse memory.max")
+            }
+            let expectedMemoryLimit = "\(512.mib())"
+            guard memoryLimit == expectedMemoryLimit else {
+                throw IntegrationError.assert(msg: "memory.max \(memoryLimit) != expected \(expectedMemoryLimit)")
+            }
+
+            try await container.kill(.kill)
+            try await container.wait()
+            try await container.stop()
+        } catch {
+            try? await container.stop()
+            throw error
+        }
+    }
+
+    // Verify that mounts are sorted by destination path depth so that a
+    // higher-level mount (e.g. /mnt) doesn't shadow a deeper mount
+    // (e.g. /mnt/deep/nested). Both directories are separate virtiofs
+    // shares; the sort ensures /mnt is mounted first and /mnt/deep/nested
+    // on top of it.
+    func testMountsSortedByDepth() async throws {
+        let id = "test-mount-sort-depth"
+
+        let bs = try await bootstrap(id)
+        let buffer = BufferWriter()
+
+        // Create two separate mount directories with distinct files.
+        let deepDir = FileManager.default.uniqueTemporaryDirectory(create: true)
+        try "deep-content".write(to: deepDir.appendingPathComponent("deep.txt"), atomically: true, encoding: .utf8)
+
+        let shallowDir = FileManager.default.uniqueTemporaryDirectory(create: true)
+        try "shallow-content".write(to: shallowDir.appendingPathComponent("shallow.txt"), atomically: true, encoding: .utf8)
+
+        // Add deeper mount first, then shallower mount. Without sorting the
+        // shallower mount would shadow the deeper one.
+        let container = try LinuxContainer(id, rootfs: bs.rootfs, vmm: bs.vmm) { config in
+            config.process.arguments = ["/bin/cat", "/mnt/deep/nested/deep.txt"]
+            config.mounts.append(.share(source: deepDir.path, destination: "/mnt/deep/nested"))
+            config.mounts.append(.share(source: shallowDir.path, destination: "/mnt"))
+            config.process.stdout = buffer
+            config.bootLog = bs.bootLog
+        }
+
+        try await container.create()
+        try await container.start()
+
+        let status = try await container.wait()
+        try await container.stop()
+
+        guard status.exitCode == 0 else {
+            throw IntegrationError.assert(msg: "process status \(status) != 0")
+        }
+
+        let value = String(data: buffer.data, encoding: .utf8)
+        guard value == "deep-content" else {
+            throw IntegrationError.assert(
+                msg: "expected 'deep-content' but got '\(value ?? "<nil>")'")
+        }
+    }
+}

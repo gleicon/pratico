@@ -1,0 +1,303 @@
+//===----------------------------------------------------------------------===//
+// Copyright © 2025-2026 Apple Inc. and the Containerization project authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//   https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//===----------------------------------------------------------------------===//
+
+import AsyncHTTPClient
+import ContainerizationError
+import ContainerizationExtras
+import Crypto
+import Foundation
+import NIOFoundationCompat
+
+#if os(macOS)
+import _NIOFileSystem
+#endif
+
+extension RegistryClient {
+    /// Resolve sends a HEAD request to the registry to find root manifest descriptor.
+    /// This descriptor serves as an entry point to retrieve resources from the registry.
+    public func resolve(name: String, tag: String) async throws -> Descriptor {
+        var components = base
+
+        // Make HEAD request to retrieve the digest header
+        components.path = "/v2/\(name)/manifests/\(tag)"
+
+        // The client should include an Accept header indicating which manifest content types it supports.
+        let mediaTypes = [
+            MediaTypes.dockerManifest,
+            MediaTypes.dockerManifestList,
+            MediaTypes.imageManifest,
+            MediaTypes.index,
+            "*/*",
+        ]
+
+        let headers = [
+            ("Accept", mediaTypes.joined(separator: ", "))
+        ]
+
+        return try await request(components: components, method: .HEAD, headers: headers) { response in
+            guard response.status == .ok else {
+                let url = components.url?.absoluteString ?? "unknown"
+                let reason = await ErrorResponse.fromResponseBody(response.body)?.jsonString
+                throw Error.invalidStatus(url: url, response.status, reason: reason)
+            }
+
+            guard let header = response.headers.first(name: "Docker-Content-Digest") else {
+                throw ContainerizationError(.invalidArgument, message: "missing required header Docker-Content-Digest")
+            }
+
+            // This digest is registry supplied and goes straight into a
+            // `Descriptor`, from where it becomes a URL path segment on the
+            // follow-up GET and a content store path component once the blob
+            // lands. `Descriptor`'s decoder validates the digests that arrive in
+            // a manifest body; a digest that arrives in a header bypasses it, so
+            // it is checked here instead. The parsed value is used rather than
+            // the raw header so the descriptor cannot carry a spelling the
+            // parser would not itself produce.
+            let digest = try ParsedDigest(parsing: header).description
+
+            guard let type = response.headers.first(name: "Content-Type") else {
+                throw ContainerizationError(.invalidArgument, message: "missing required header Content-Type")
+            }
+
+            guard let sizeStr = response.headers.first(name: "Content-Length") else {
+                throw ContainerizationError(.invalidArgument, message: "missing required header Content-Length")
+            }
+
+            guard let size = Int64(sizeStr), size >= 0 else {
+                throw ContainerizationError(.invalidArgument, message: "invalid Content-Length \(sizeStr)")
+            }
+
+            // `tag` is sometimes actually a caller-pinned digest (see `ImageStore.pull`,
+            // which passes `ref.tag ?? ref.digest`). A registry is untrusted input: if the
+            // caller asked to resolve a specific digest, the registry doesn't get to answer
+            // with a different one. Mutable tags carry no such promise, so they're exempt.
+            if tag.isDigest, digest.lowercased() != tag.lowercased() {
+                throw ContainerizationError(
+                    .internalError,
+                    message: "registry returned digest \(digest) for pinned reference \(tag), refusing to accept substituted content"
+                )
+            }
+
+            return Descriptor(mediaType: type, digest: digest, size: size)
+        }
+    }
+
+    /// Fetch resource (either manifest or blob) to memory with JSON decoding.
+    public func fetch<T: Codable>(name: String, descriptor: Descriptor) async throws -> T {
+        var components = base
+
+        let manifestTypes = [
+            MediaTypes.dockerManifest,
+            MediaTypes.dockerManifestList,
+            MediaTypes.imageManifest,
+            MediaTypes.index,
+        ]
+
+        let isManifest = manifestTypes.contains(where: { $0 == descriptor.mediaType })
+        let resource = isManifest ? "manifests" : "blobs"
+
+        components.path = "/v2/\(name)/\(resource)/\(descriptor.digest)"
+
+        let mediaType = descriptor.mediaType
+        if mediaType.isEmpty {
+            throw ContainerizationError(.invalidArgument, message: "missing media type for descriptor \(descriptor.digest)")
+        }
+
+        let headers = [
+            ("Accept", mediaType)
+        ]
+
+        let data = try await requestData(components: components, headers: headers)
+        try Self.verifyContentDigest(data, matches: descriptor)
+        return try JSONDecoder().decode(T.self, from: data)
+    }
+
+    /// Fetch resource (either manifest or blob) to memory as raw `Data`.
+    public func fetchData(name: String, descriptor: Descriptor) async throws -> Data {
+        var components = base
+
+        let manifestTypes = [
+            MediaTypes.dockerManifest,
+            MediaTypes.dockerManifestList,
+            MediaTypes.imageManifest,
+            MediaTypes.index,
+        ]
+
+        let isManifest = manifestTypes.contains(where: { $0 == descriptor.mediaType })
+        let resource = isManifest ? "manifests" : "blobs"
+
+        components.path = "/v2/\(name)/\(resource)/\(descriptor.digest)"
+
+        let mediaType = descriptor.mediaType
+        if mediaType.isEmpty {
+            throw ContainerizationError(.invalidArgument, message: "missing media type for descriptor \(descriptor.digest)")
+        }
+
+        let headers = [
+            ("Accept", mediaType)
+        ]
+
+        let data = try await requestData(components: components, headers: headers)
+        try Self.verifyContentDigest(data, matches: descriptor)
+        return data
+    }
+
+    /// Verifies that `data`'s SHA-256 hash matches the digest `descriptor` claims to be.
+    /// Every caller of `fetch`/`fetchData`/`fetchBlob` already supplies the digest it expects
+    /// (from a manifest it previously trusted, or from a caller-pinned reference resolved via
+    /// `resolve`), so this is the one place that has to hold for any of those callers to be
+    /// safe against a registry that serves different bytes than the digest it declared.
+    fileprivate static func verifyContentDigest(_ data: Data, matches descriptor: Descriptor) throws {
+        try verifyContentDigest(SHA256.hash(data: data), matches: descriptor)
+    }
+
+    /// Same check as above, for callers that already hashed the content while streaming it
+    /// rather than holding the whole thing in memory as `Data`.
+    fileprivate static func verifyContentDigest(_ digest: SHA256.Digest, matches descriptor: Descriptor) throws {
+        let computed = digest.digestString
+        guard computed.lowercased() == descriptor.digest.lowercased() else {
+            throw ContainerizationError(
+                .internalError,
+                message: "content digest mismatch: expected \(descriptor.digest)"
+            )
+        }
+    }
+
+    /// Fetch a blob from remote registry.
+    /// This method is suitable for streaming data.
+    public func fetchBlob(
+        name: String,
+        descriptor: Descriptor,
+        closure: (Int64, HTTPClientResponse.Body) async throws -> Void
+    ) async throws {
+        var components = base
+        components.path = "/v2/\(name)/blobs/\(descriptor.digest)"
+
+        let mediaType = descriptor.mediaType
+        if mediaType.isEmpty {
+            throw ContainerizationError(.invalidArgument, message: "missing media type for descriptor \(descriptor.digest)")
+        }
+
+        let headers = [
+            ("Accept", mediaType)
+        ]
+
+        try await request(components: components, headers: headers) { response in
+            guard response.status == .ok else {
+                let url = components.url?.absoluteString ?? "unknown"
+                let reason = await ErrorResponse.fromResponseBody(response.body)?.jsonString
+                throw Error.invalidStatus(url: url, response.status, reason: reason)
+            }
+
+            // How many bytes to expect
+            guard let expectedBytes = response.headers.first(name: "Content-Length").flatMap(Int64.init) else {
+                throw ContainerizationError(.invalidArgument, message: "missing required header Content-Length")
+            }
+
+            guard expectedBytes <= descriptor.size else {
+                throw ContainerizationError(
+                    .invalidArgument,
+                    message: "declared blob length \(expectedBytes) exceeds descriptor size \(descriptor.size) for \(descriptor.digest)"
+                )
+            }
+
+            try await closure(expectedBytes, response.body)
+        }
+    }
+
+    private static func validateReceivedSize(_ received: Int64, _ descriptor: Descriptor) throws {
+        guard received <= descriptor.size else {
+            throw ContainerizationError(
+                .invalidArgument,
+                message: "blob download exceeded expected size \(descriptor.size) for \(descriptor.digest)"
+            )
+        }
+    }
+
+    #if os(macOS)
+    /// Fetch a blob from remote registry and write the contents into a file in the provided directory.
+    public func fetchBlob(name: String, descriptor: Descriptor, into file: URL, progress: ProgressHandler?) async throws -> (Int64, SHA256Digest) {
+        var hasher = SHA256()
+        var received: Int64 = 0
+        let fs = _NIOFileSystem.FileSystem.shared
+        let handle = try await fs.openFile(forWritingAt: FilePath(file.absolutePath()), options: .newFile(replaceExisting: true))
+        var writer = handle.bufferedWriter()
+        do {
+            try await self.fetchBlob(name: name, descriptor: descriptor) { (size, body) in
+                var itr = body.makeAsyncIterator()
+                while let buf = try await itr.next() {
+                    let readBytes = Int64(buf.readableBytes)
+                    received += readBytes
+                    try Self.validateReceivedSize(received, descriptor)
+                    let written = try await writer.write(contentsOf: buf)
+                    await progress?([
+                        .addSize(written)
+                    ])
+                    guard written == readBytes else {
+                        throw ContainerizationError(
+                            .internalError,
+                            message: "could not write \(readBytes) bytes to file \(file)"
+                        )
+                    }
+                    hasher.update(data: buf.readableBytesView)
+                }
+            }
+            try await writer.flush()
+            try await handle.close()
+        } catch {
+            do {
+                try await handle.close()
+            } catch {
+                // Use `detachUnsafeFileDescriptor()` as suggested by the error message to prevent a leak detection crash when `close()` fails.
+                _ = try handle.detachUnsafeFileDescriptor()
+            }
+            throw error
+        }
+        let computedDigest = hasher.finalize()
+        try Self.verifyContentDigest(computedDigest, matches: descriptor)
+        return (received, computedDigest)
+    }
+    #else
+    /// Fetch a blob from remote registry and write the contents into a file in the provided directory.
+    public func fetchBlob(name: String, descriptor: Descriptor, into file: URL, progress: ProgressHandler?) async throws -> (Int64, SHA256Digest) {
+        var hasher = SHA256()
+        var received: Int64 = 0
+        guard FileManager.default.createFile(atPath: file.path, contents: nil) else {
+            throw ContainerizationError(.internalError, message: "cannot create file at path \(file.path)")
+        }
+        try await self.fetchBlob(name: name, descriptor: descriptor) { (size, body) in
+            let fd = try FileHandle(forWritingTo: file)
+            defer {
+                try? fd.close()
+            }
+            var itr = body.makeAsyncIterator()
+            while let buf = try await itr.next() {
+                let readBytes = Int64(buf.readableBytes)
+                received += readBytes
+                try Self.validateReceivedSize(received, descriptor)
+                await progress?([
+                    .addSize(readBytes)
+                ])
+                try fd.write(contentsOf: buf.readableBytesView)
+                hasher.update(data: buf.readableBytesView)
+            }
+        }
+        let computedDigest = hasher.finalize()
+        try Self.verifyContentDigest(computedDigest, matches: descriptor)
+        return (received, computedDigest)
+    }
+    #endif
+}

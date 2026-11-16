@@ -1,0 +1,373 @@
+//===----------------------------------------------------------------------===//
+// Copyright © 2025-2026 Apple Inc. and the Containerization project authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//   https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//===----------------------------------------------------------------------===//
+
+/// Statistics for a container.
+public struct ContainerStatistics: Sendable {
+    public var id: String
+    public var process: ProcessStatistics?
+    public var memory: MemoryStatistics?
+    public var cpu: CPUStatistics?
+    public var blockIO: BlockIOStatistics?
+    public var networks: [NetworkStatistics]?
+    public var memoryEvents: MemoryEventStatistics?
+    public var filesystem: [FilesystemStatistics]?
+    /// Per-protocol traffic for the network namespace. `nil` if not requested or not reported by the guest.
+    public var networkProtocols: NetworkProtocolStatistics?
+
+    public init(
+        id: String,
+        process: ProcessStatistics? = nil,
+        memory: MemoryStatistics? = nil,
+        cpu: CPUStatistics? = nil,
+        blockIO: BlockIOStatistics? = nil,
+        networks: [NetworkStatistics]? = nil,
+        memoryEvents: MemoryEventStatistics? = nil,
+        filesystem: [FilesystemStatistics]? = nil,
+        networkProtocols: NetworkProtocolStatistics? = nil
+    ) {
+        self.id = id
+        self.process = process
+        self.memory = memory
+        self.cpu = cpu
+        self.blockIO = blockIO
+        self.networks = networks
+        self.memoryEvents = memoryEvents
+        self.filesystem = filesystem
+        self.networkProtocols = networkProtocols
+    }
+
+    /// Process statistics for a container.
+    public struct ProcessStatistics: Sendable {
+        public var current: UInt64
+        public var limit: UInt64
+
+        public init(current: UInt64, limit: UInt64) {
+            self.current = current
+            self.limit = limit
+        }
+    }
+
+    /// Memory statistics for a container.
+    public struct MemoryStatistics: Sendable {
+        public var usageBytes: UInt64
+        public var limitBytes: UInt64
+        public var swapUsageBytes: UInt64
+        public var swapLimitBytes: UInt64
+        public var cacheBytes: UInt64
+        public var kernelStackBytes: UInt64
+        public var slabBytes: UInt64
+        public var pageFaults: UInt64
+        public var majorPageFaults: UInt64
+        public var inactiveFile: UInt64
+        public var anon: UInt64
+        public var workingsetRefaultAnon: UInt64
+        public var workingsetRefaultFile: UInt64
+        public var pgstealKswapd: UInt64
+        public var pgstealDirect: UInt64
+        public var pgstealKhugepaged: UInt64
+
+        public init(
+            usageBytes: UInt64,
+            limitBytes: UInt64,
+            swapUsageBytes: UInt64,
+            swapLimitBytes: UInt64,
+            cacheBytes: UInt64,
+            kernelStackBytes: UInt64,
+            slabBytes: UInt64,
+            pageFaults: UInt64,
+            majorPageFaults: UInt64,
+            inactiveFile: UInt64,
+            anon: UInt64,
+            workingsetRefaultAnon: UInt64 = 0,
+            workingsetRefaultFile: UInt64 = 0,
+            pgstealKswapd: UInt64 = 0,
+            pgstealDirect: UInt64 = 0,
+            pgstealKhugepaged: UInt64 = 0
+        ) {
+            self.usageBytes = usageBytes
+            self.limitBytes = limitBytes
+            self.swapUsageBytes = swapUsageBytes
+            self.swapLimitBytes = swapLimitBytes
+            self.cacheBytes = cacheBytes
+            self.kernelStackBytes = kernelStackBytes
+            self.slabBytes = slabBytes
+            self.pageFaults = pageFaults
+            self.majorPageFaults = majorPageFaults
+            self.inactiveFile = inactiveFile
+            self.anon = anon
+            self.workingsetRefaultAnon = workingsetRefaultAnon
+            self.workingsetRefaultFile = workingsetRefaultFile
+            self.pgstealKswapd = pgstealKswapd
+            self.pgstealDirect = pgstealDirect
+            self.pgstealKhugepaged = pgstealKhugepaged
+        }
+    }
+
+    /// CPU statistics for a container.
+    public struct CPUStatistics: Sendable {
+        public var usageUsec: UInt64
+        public var userUsec: UInt64
+        public var systemUsec: UInt64
+        public var throttlingPeriods: UInt64
+        public var throttledPeriods: UInt64
+        public var throttledTimeUsec: UInt64
+
+        public init(
+            usageUsec: UInt64,
+            userUsec: UInt64,
+            systemUsec: UInt64,
+            throttlingPeriods: UInt64,
+            throttledPeriods: UInt64,
+            throttledTimeUsec: UInt64
+        ) {
+            self.usageUsec = usageUsec
+            self.userUsec = userUsec
+            self.systemUsec = systemUsec
+            self.throttlingPeriods = throttlingPeriods
+            self.throttledPeriods = throttledPeriods
+            self.throttledTimeUsec = throttledTimeUsec
+        }
+    }
+
+    /// Block I/O statistics for a container.
+    public struct BlockIOStatistics: Sendable {
+        public var devices: [BlockIODevice]
+
+        public init(devices: [BlockIODevice]) {
+            self.devices = devices
+        }
+    }
+
+    /// Block I/O statistics for a specific device.
+    public struct BlockIODevice: Sendable {
+        public var major: UInt64
+        public var minor: UInt64
+        public var readBytes: UInt64
+        public var writeBytes: UInt64
+        public var readOperations: UInt64
+        public var writeOperations: UInt64
+
+        public init(
+            major: UInt64,
+            minor: UInt64,
+            readBytes: UInt64,
+            writeBytes: UInt64,
+            readOperations: UInt64,
+            writeOperations: UInt64
+        ) {
+            self.major = major
+            self.minor = minor
+            self.readBytes = readBytes
+            self.writeBytes = writeBytes
+            self.readOperations = readOperations
+            self.writeOperations = writeOperations
+        }
+    }
+
+    /// Statistics for a network interface.
+    public struct NetworkStatistics: Sendable {
+        public var interface: String
+        public var receivedPackets: UInt64
+        public var transmittedPackets: UInt64
+        public var receivedBytes: UInt64
+        public var transmittedBytes: UInt64
+        public var receivedErrors: UInt64?
+        public var transmittedErrors: UInt64?
+        /// Packets the device dropped (e.g. full rx ring or tx queue).
+        public var receivedDropped: UInt64
+        public var transmittedDropped: UInt64
+
+        public init(
+            interface: String,
+            receivedPackets: UInt64,
+            transmittedPackets: UInt64,
+            receivedBytes: UInt64,
+            transmittedBytes: UInt64,
+            receivedErrors: UInt64,
+            transmittedErrors: UInt64,
+            receivedDropped: UInt64,
+            transmittedDropped: UInt64
+        ) {
+            self.interface = interface
+            self.receivedPackets = receivedPackets
+            self.transmittedPackets = transmittedPackets
+            self.receivedBytes = receivedBytes
+            self.transmittedBytes = transmittedBytes
+            self.receivedErrors = receivedErrors
+            self.transmittedErrors = transmittedErrors
+            self.receivedDropped = receivedDropped
+            self.transmittedDropped = transmittedDropped
+        }
+    }
+
+    /// Packet and byte counters for one protocol.
+    public struct NetworkProtocolCounters: Sendable {
+        public var receivedPackets: UInt64
+        public var transmittedPackets: UInt64
+        /// `nil` when the protocol has no byte counter (Linux only has one for IP as a whole).
+        public var receivedBytes: UInt64?
+        public var transmittedBytes: UInt64?
+        /// Packets the stack discarded for lack of resources or a destination.
+        ///
+        /// The kernel attributes drops and errors to different causes for each protocol, so
+        /// values are comparable over time for one protocol but not across protocols. `nil`
+        /// when the protocol has no matching counter, which is not the same as zero ("none happened").
+        /// - TCP: listen queue overflow, socket backlog and receive queue drops (receive only).
+        /// - UDP: full socket buffer or no socket on the port (receive); full send buffer (transmit).
+        /// - ICMP: no drop counters.
+        /// - IP: discarded valid packets and missing routes.
+        public var receivedDrops: UInt64?
+        public var transmittedDrops: UInt64?
+        /// Packets that were malformed or failed processing.
+        /// - TCP: bad checksum or header (receive only).
+        /// - UDP: e.g. bad checksum, excluding full-buffer drops (receive only).
+        /// - ICMP: receive and transmit errors.
+        /// - IP: bad header, bad address or unknown protocol (receive); fragmentation failures (transmit).
+        public var receivedErrors: UInt64?
+        public var transmittedErrors: UInt64?
+
+        public init(
+            receivedPackets: UInt64 = 0,
+            transmittedPackets: UInt64 = 0,
+            receivedBytes: UInt64? = nil,
+            transmittedBytes: UInt64? = nil,
+            receivedDrops: UInt64? = nil,
+            transmittedDrops: UInt64? = nil,
+            receivedErrors: UInt64? = nil,
+            transmittedErrors: UInt64? = nil
+        ) {
+            self.receivedPackets = receivedPackets
+            self.transmittedPackets = transmittedPackets
+            self.receivedBytes = receivedBytes
+            self.transmittedBytes = transmittedBytes
+            self.receivedDrops = receivedDrops
+            self.transmittedDrops = transmittedDrops
+            self.receivedErrors = receivedErrors
+            self.transmittedErrors = transmittedErrors
+        }
+    }
+
+    /// Per-protocol traffic for the container's network namespace (not per interface; includes loopback).
+    /// Containers sharing a namespace, as all containers in a VM do by default, report identical values.
+    public struct NetworkProtocolStatistics: Sendable {
+        /// Covers both IPv4 and IPv6: the kernel shares its TCP counters between the two families.
+        public var tcp: NetworkProtocolCounters
+        /// IPv4 only; see `udp6`.
+        public var udp: NetworkProtocolCounters
+        /// IPv4 only; see `icmp6`.
+        public var icmp: NetworkProtocolCounters
+        /// All IPv4 traffic. What is not tcp/udp/icmp (raw IP, other protocols) is the remainder. See `ip6` for IPv6.
+        public var ip: NetworkProtocolCounters
+        /// IPv6 UDP. `nil` when the guest has no IPv6 statistics.
+        public var udp6: NetworkProtocolCounters?
+        /// IPv6 ICMP. `nil` when the guest has no IPv6 statistics.
+        public var icmp6: NetworkProtocolCounters?
+        /// All IPv6 traffic. `nil` when the guest has no IPv6 statistics.
+        public var ip6: NetworkProtocolCounters?
+
+        public init(
+            tcp: NetworkProtocolCounters,
+            udp: NetworkProtocolCounters,
+            icmp: NetworkProtocolCounters,
+            ip: NetworkProtocolCounters,
+            udp6: NetworkProtocolCounters? = nil,
+            icmp6: NetworkProtocolCounters? = nil,
+            ip6: NetworkProtocolCounters? = nil
+        ) {
+            self.tcp = tcp
+            self.udp = udp
+            self.icmp = icmp
+            self.ip = ip
+            self.udp6 = udp6
+            self.icmp6 = icmp6
+            self.ip6 = ip6
+        }
+    }
+
+    /// Memory event counters from cgroup2's memory.events file.
+    public struct MemoryEventStatistics: Sendable {
+        /// Number of times the cgroup was reclaimed due to low memory.
+        public var low: UInt64
+        /// Number of times the cgroup exceeded its high memory limit.
+        public var high: UInt64
+        /// Number of times the cgroup hit its max memory limit.
+        public var max: UInt64
+        /// Number of times the cgroup triggered OOM.
+        public var oom: UInt64
+        /// Number of processes killed by OOM killer.
+        public var oomKill: UInt64
+
+        public init(low: UInt64, high: UInt64, max: UInt64, oom: UInt64, oomKill: UInt64) {
+            self.low = low
+            self.high = high
+            self.max = max
+            self.oom = oom
+            self.oomKill = oomKill
+        }
+    }
+
+    /// Filesystem occupancy for a single mount, from statfs(2).
+    public struct FilesystemStatistics: Sendable {
+        /// The mount point this entry describes.
+        public var mountPoint: String
+        /// f_bsize: block size in bytes; the unit blocks/freeBlocks are counted in.
+        public var blockSize: UInt64
+        /// f_blocks: total blocks in the filesystem.
+        public var blocks: UInt64
+        /// f_bfree: free blocks in the filesystem (includes blocks reserved for root).
+        public var freeBlocks: UInt64
+        /// f_files: total inodes in the filesystem.
+        public var inodes: UInt64
+        /// f_ffree: free inodes in the filesystem.
+        public var freeInodes: UInt64
+
+        public init(mountPoint: String, blockSize: UInt64, blocks: UInt64, freeBlocks: UInt64, inodes: UInt64, freeInodes: UInt64) {
+            self.mountPoint = mountPoint
+            self.blockSize = blockSize
+            self.blocks = blocks
+            self.freeBlocks = freeBlocks
+            self.inodes = inodes
+            self.freeInodes = freeInodes
+        }
+    }
+}
+
+/// Categories of statistics that can be requested.
+public struct StatCategory: OptionSet, Sendable {
+    public let rawValue: Int
+
+    public init(rawValue: Int) {
+        self.rawValue = rawValue
+    }
+
+    /// Process statistics (pids.current, pids.max).
+    public static let process = StatCategory(rawValue: 1 << 0)
+    /// Memory usage statistics.
+    public static let memory = StatCategory(rawValue: 1 << 1)
+    /// CPU usage statistics.
+    public static let cpu = StatCategory(rawValue: 1 << 2)
+    /// Block I/O statistics.
+    public static let blockIO = StatCategory(rawValue: 1 << 3)
+    /// Network interface statistics.
+    public static let network = StatCategory(rawValue: 1 << 4)
+    /// Memory event counters (OOM kills, pressure events, etc.).
+    public static let memoryEvents = StatCategory(rawValue: 1 << 5)
+    /// Filesystem occupancy statistics.
+    public static let filesystem = StatCategory(rawValue: 1 << 6)
+
+    /// All available statistics categories.
+    public static let all: StatCategory = [.process, .memory, .cpu, .blockIO, .network, .memoryEvents, .filesystem]
+}
