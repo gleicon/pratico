@@ -131,7 +131,8 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 - [x] `docker cp` with a stopped container: read from its ext4 rootfs on the Mac; copies in rewrite the rootfs (no VM), and the container cannot start meanwhile
 - [x] `docker save` of several images at once; `docker load` (OCI archives, Docker 25+); request bodies of `cp` in and `load` stream to disk past the 64 MiB in-memory limit
 - [ ] A per-install CA for egress interception (with the egress task)
-- [ ] `docker build` (BuildKit or an equivalent)
+- [x] `docker build` through buildx's docker-container driver: BuildKit in a pratico VM, results loaded (D-50)
+- [ ] `docker build` with no setup: serve BuildKit's daemon API (`/grpc`, `/session`, the image exporter) so buildx's default driver works
 - [x] Hot-connect and uplink e2e checks wait on state (`eventually`, listener and size polls), not time; pass with every core busy (the socket-mount one was a real start-order race, D-34)
 - [x] Volume copy-up: a new empty volume gets the image's files at its mount path, as in Docker; `nocopy` honored
 - [x] `tmpfs` mounts (`--tmpfs`, `--mount type=tmpfs`), Docker's default options, size and mode

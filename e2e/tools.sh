@@ -15,6 +15,9 @@ mkdir -p "$DOCKER_CONFIG" && echo '{}' >"$DOCKER_CONFIG/config.json"
 DAEMON_PID=$!
 cleanup() {
     "$COMPOSE" -p pratico-tools -f "$(dirname "$0")/tools/compose.yaml" down -v >/dev/null 2>&1 || true
+    # Shims outlive the daemon: every VM goes before it does (BuildKit's included).
+    ids=$("$DOCKER" ps -aq 2>/dev/null || true)
+    [ -n "$ids" ] && "$DOCKER" rm -f $ids >/dev/null 2>&1 || true
     kill "$DAEMON_PID" 2>/dev/null && wait "$DAEMON_PID" 2>/dev/null
     rm -rf "$HOME_DIR"
 }
@@ -23,6 +26,17 @@ for _ in $(seq 100); do [ -S "$HOME_DIR/docker.sock" ] && break; sleep 0.1; done
 
 echo "== Testcontainers (Go)"
 (cd "$(dirname "$0")/tools/testcontainers-go" && go test -count=1 ./...)
+
+echo "== docker build through buildx: BuildKit in a pratico VM, results loaded"
+CTX="$HOME_DIR/build-ctx"
+mkdir -p "$CTX"
+printf 'FROM alpine:3.20\nRUN apk add --no-cache curl >/dev/null && echo built > /built\nCOPY msg /msg\nCMD ["cat", "/msg"]\n' >"$CTX/Dockerfile"
+echo "built by buildkit" >"$CTX/msg"
+mkdir -p "$DOCKER_CONFIG" && echo '{"cliPluginsExtraDirs":["/opt/homebrew/lib/docker/cli-plugins"]}' >"$DOCKER_CONFIG/config.json"
+"$DOCKER" buildx create --name pratico-build --driver docker-container --driver-opt default-load=true >/dev/null
+BUILDX_BUILDER=pratico-build "$DOCKER" build -q -t tools-built "$CTX" >/dev/null
+[ "$("$DOCKER" run --rm tools-built)" = "built by buildkit" ] || { echo "FAIL docker build"; exit 1; }
+echo "ok"
 
 echo "== Compose: an app and its database on a private network"
 "$COMPOSE" -p pratico-tools -f "$(dirname "$0")/tools/compose.yaml" up -d --wait

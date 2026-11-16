@@ -183,6 +183,9 @@ public final class Daemon: @unchecked Sendable {
             conn.json(200, try disk.pruneContainers(filters: ContainerService.parseFilters(req.query["filters"])))
             return .keepAlive
         // Nothing to prune yet; answering lets `docker system prune` finish.
+        // The legacy builder (DOCKER_BUILDKIT=0): builds go through buildx and BuildKit (D-50).
+        case ("POST", "build") where parts.count == 1:
+            throw APIError(501, "pratico builds with BuildKit through buildx: docker buildx create --name pratico-build --driver docker-container --driver-opt default-load=true, then export BUILDX_BUILDER=pratico-build")
         case ("POST", "build") where parts.count == 2 && parts[1] == "prune":
             conn.json(200, ["CachesDeleted": [], "SpaceReclaimed": 0])
             return .keepAlive

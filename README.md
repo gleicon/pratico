@@ -73,6 +73,8 @@ vminitd ───────── guest agent: process, exec, cp, stats, healt
   outside every VM. One NIC per VM with an address and a MAC per network, no limit on
   networks, isolation enforced at the switch, DNS at each gateway, published ports bound
   on the Mac.
+- **[Builds](docs/build.md).** `docker build` and `compose build` run BuildKit in its
+  own VM through buildx and load the result; one builder setup line, once.
 - **[Run options](docs/run-options.md).** Every `docker run` option pratico accepts is
   applied (cgroup limits, capabilities, restart policies, `--init`, `--read-only`, …);
   one a VM cannot honor, such as `--device` or `--pid host`, is refused with an error.
@@ -106,7 +108,6 @@ Supported:
 
 Limits:
 
-- `docker build` is not supported; `docker commit` is.
 - Images without an arm64 variant do not run ([CPU](docs/cpu.md)).
 - IPv4 only; a container sees one interface, `eth0`, for all its networks
   ([networking](docs/network.md#limits)).

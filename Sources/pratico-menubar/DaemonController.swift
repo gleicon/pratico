@@ -244,6 +244,10 @@ final class DaemonController {
                 export DOCKER_HOST=unix://\(DefaultSocket.shellTarget)
                 echo 'export DOCKER_HOST=unix://\(DefaultSocket.shellTarget)' >> ~/.zshrc
 
+                # Builds (docker build, once): BuildKit in its own VM, results loaded into Pratico
+                docker buildx create --name pratico-build --driver docker-container --driver-opt default-load=true
+                echo 'export BUILDX_BUILDER=pratico-build' >> ~/.zshrc
+
                 # Check:
                 docker version --format '{{.Server.Version}}'
                 """)
