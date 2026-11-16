@@ -55,10 +55,8 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 - [x] Registry trust you choose and can see: plain HTTP for loopback (as Docker) and listed hosts, extra CAs added to the system's roots, system proxy/PAC; `docker info`, pull/push output and the menubar say so; kept logins removable from the menubar
 - [x] Agent-native pratico, first step (D-48): MCP endpoint with image checks, throwaway runs, kept services, and changes limited to agent-made containers. Next with the own VM's flight recorder: what an agent's containers ran and connected to.
 - [ ] Agent-native pratico, the rest (to discuss with Features): an MCP server and a container manager geared towards agents, so an agent can ask whether an image is safe before using it, run a task in a throwaway isolated VM, and read scan results and SBOMs; a way for developers to use containers for tests, agents, and builds from Claude Code
-- [ ] Local registry: pratico's image store served as an OCI registry on 127.0.0.1 (push and pull without tar files, Apple `container` and other tools pulling from it, images scanned on push), optionally a pull-through cache for Docker Hub (to discuss with Features)
 - [x] Egress visibility and protection (D-51): flows named (DNS, SNI, Host) and recorded, threat feeds (Feodo, SSLBL, Spamhaus DROP; URLhaus and ThreatFox with a key), allowlists
 - [ ] Egress, phase 2: TLS inspection with sandwich-proxy, per-container opt-in with a per-install CA (full URLs, HAR, replay; URL-level feeds such as OpenPhish and URLhaus on shared hosts)
-- [ ] IPv6 on pratico-net: addresses, neighbour discovery, and the uplink (to discuss with Features)
 - [ ] Own VM, self-contained (last in the Features discussion; decided 2026-11-15): pratico stops depending on upstream releases and binaries for what runs in and drives a VM. Containerization (Apache-2.0) is forked whole, host package and guest `vminitd`/`vmexec` at one pinned commit, since both speak one agent protocol; LICENSE, NOTICE, and modified files marked; upstream security fixes merged by us, as for the kernel.
   - [ ] Build VM: pratico boots a Linux VM on the previous release's pinned kernel and init (bootstrap) and builds inside it, from pinned sources only, then rebuilds once with its own output to check the SHA-256s match (reproducible)
   - [ ] Own kernel: the latest Linux LTS (6.18.63 as of 2026-11-15, vs 6.18.56 in Kata 4.3.1) with Kata's configuration plus what the items below need (`virtio_balloon`, seccomp filter); GPL source offer shipped; until then the kernel follows Kata's latest release (D-41)
@@ -128,7 +126,6 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 
 - [x] More than 4 networks per container: one NIC per VM with an address per network (D-43, 2026-11-15)
 - [ ] `--cap-add` / `--cap-drop` are accepted and ignored: processes get the default set (no `NET_ADMIN`). Apply them through `LinuxCapabilities`, or refuse them, instead of silently dropping
-- [ ] IPv6 on pratico-net (moved to the Features discussion)
 - [x] `docker cp` with a stopped container: read from its ext4 rootfs on the Mac; copies in rewrite the rootfs (no VM), and the container cannot start meanwhile
 - [x] `docker save` of several images at once; `docker load` (OCI archives, Docker 25+); request bodies of `cp` in and `load` stream to disk past the 64 MiB in-memory limit
 - [ ] A per-install CA for egress interception (with the egress task)
@@ -154,3 +151,5 @@ containers, agents). These wait until pratico runs as a daemon on Linux hosts.
 - [ ] pratico on Linux hosts: the daemon running VMs as a deployment target
 - [ ] Remote API with authentication
 - [ ] Backup and restore: snapshots that carry volume data, copied consistently from running containers, with retention
+- [ ] IPv6 on pratico-net: addresses, neighbour discovery, the uplink, and egress (IPv6 networks, `--ip6`, and IPv6 port binds are refused until then)
+- [ ] Local registry: pratico's store served as an OCI registry (builds load directly and Apple `container` takes OCI archives, so locally nothing needs it)
