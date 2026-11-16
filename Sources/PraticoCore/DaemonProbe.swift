@@ -14,7 +14,7 @@ public enum DaemonProbe {
     }
 
     /// One bodiless request (`GET`, `DELETE`); nil when the daemon is not answering.
-    public static func request(_ method: String, _ path: String, socket: URL = Pratico.socketPath(), timeout: Int = 1) -> Response? {
+    public static func request(_ method: String, _ path: String, socket: URL = Pratico.socketPath(), timeout: Int = 1, body: Data = Data()) -> Response? {
         let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { return nil }
         defer { close(fd) }
@@ -38,7 +38,7 @@ public enum DaemonProbe {
         }
         guard rc == 0 else { return nil }
 
-        let request = Array("\(method) \(path) HTTP/1.1\r\nHost: pratico\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".utf8)
+        let request = Array("\(method) \(path) HTTP/1.1\r\nHost: pratico\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n".utf8) + Array(body)
         guard write(fd, request, request.count) == request.count else { return nil }
 
         // Up to Content-Length when the reply has one, else until the daemon closes.

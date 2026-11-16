@@ -58,9 +58,12 @@ extension MCPTools {
             code = exit.wait(seconds: 10)
         }
         let lines = containers.logLines(rec.id)
+        // Read before the container (and its record of connections) is removed.
+        let connections = containers.networks.netSwitch.egress.flows(rec.id).suffix(200).map(Daemon.flowJSON)
         return ["exit_code": code.map { .int(Int64($0)) } ?? .null, "timed_out": .bool(timedOut),
                 "seconds": .double((Date().timeIntervalSince(started) * 10).rounded() / 10),
-                "stdout": .string(Self.tail(lines, stream: 1)), "stderr": .string(Self.tail(lines, stream: 2))]
+                "stdout": .string(Self.tail(lines, stream: 1)), "stderr": .string(Self.tail(lines, stream: 2)),
+                "connections": .array(connections)]
     }
 
     func start(_ args: JSON) throws -> JSON {
@@ -97,6 +100,13 @@ extension MCPTools {
             ["id": .string(rec.id), "name": .string(rec.name), "image": .string(rec.image), "state": .string(containers.dockerState(rec)),
              "status": .string(containers.statusText(rec)), "ports": .array(containers.ports(rec)), "mcp": .bool(rec.labels[Self.label] == "true")]
         })
+    }
+
+    func egress(_ args: JSON) throws -> JSON {
+        let rec = try containers.resolve(try Self.required(args, "container"))
+        let flows = containers.networks.netSwitch.egress.flows(rec.id).suffix(500)
+        return ["container": .string(rec.name), "allowlist": rec.labels[Self.egressLabel].map(JSON.string) ?? .null,
+                "flows": .array(flows.map(Daemon.flowJSON))]
     }
 
     func stop(_ args: JSON) throws -> JSON {
@@ -148,7 +158,13 @@ extension MCPTools {
             guard network != "none" else { throw APIError(400, "published ports need a network: set network to bridge") }
             host["PortBindings"] = .object(bindings)
         }
-        var body: [String: JSON] = ["Image": .string(ref), "HostConfig": .object(host), "Labels": [Self.label: "true"]]
+        var labels: [String: JSON] = [Self.label: "true"]
+        if let allow = args["egress"]?.strings {
+            guard network != "none" else { throw APIError(400, "an egress allowlist needs a network: set network to bridge") }
+            guard !allow.isEmpty, allow.allSatisfy({ !$0.isEmpty && !$0.contains(",") }) else { throw APIError(400, "egress lists names, at least one") }
+            labels[Self.egressLabel] = .string(allow.joined(separator: ","))
+        }
+        var body: [String: JSON] = ["Image": .string(ref), "HostConfig": .object(host), "Labels": .object(labels)]
         if let cmd = args["command"]?.strings, !cmd.isEmpty { body["Cmd"] = JSON(cmd) }
         if let env = args["env"]?.strings { body["Env"] = JSON(env) }
         if let dir = args["workdir"]?.string { body["WorkingDir"] = .string(dir) }

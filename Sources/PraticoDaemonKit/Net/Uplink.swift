@@ -104,7 +104,9 @@ final class Uplink: @unchecked Sendable {
             return
         }
         if udp[key] == nil {
-            guard admits(port.path), let fd = Self.connected(SOCK_DGRAM, target, d.dstPort) else { return }
+            guard admits(port.path), egressAllows(key, port, target: target, dnsQuery: d.dstPort == 53 ? DNSQuery(d.payload) : nil),
+                let fd = Self.connected(SOCK_DGRAM, target, d.dstPort)
+            else { return }
             let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
             let flow = UDPFlow(fd: fd, source: source)
             source.setEventHandler { [weak self] in
@@ -192,12 +194,34 @@ final class Uplink: @unchecked Sendable {
             return
         }
         guard admits(port.path) else { return }
+        guard egressAllows(key, port, target: target, dnsQuery: nil, tcp: true) else {
+            let rst = TCPSegment(srcPort: seg.dstPort, dstPort: seg.srcPort, seq: 0, ack: seg.seq &+ 1, flags: TCPSegment.rst | TCPSegment.ack, window: 0)
+            sw.deliver(to: port, src: ip.dst, proto: 6, rst.bytes(src: ip.dst, dst: ip.src))
+            return
+        }
         let conn = TCPConn(key: key, port: port, syn: seg, uplink: self)
         tcp[key] = conn
         conn.connect(target)
     }
 
     fileprivate func remove(_ conn: TCPConn) { tcp[conn.key] = nil }
+
+    /// A new flow's destination against the egress guard (D-51): refused ones are recorded
+    /// here; a TCP flow it allows is recorded by its connection, once its first bytes name
+    /// it. A query to an outside DNS server is checked by the name it asks for.
+    private func egressAllows(_ key: FlowKey, _ port: NetPort, target: UInt32, dnsQuery: DNSQuery?, tcp: Bool = false) -> Bool {
+        let guardian = sw.egress
+        let isMac = target == IPv4.parse("127.0.0.1")
+        var verdict = guardian.checkAddress(port.containerId, key.dstIP, port: key.dstPort, isMac: isMac)
+        if verdict == .allow, let q = dnsQuery, !isMac { verdict = guardian.checkName(port.containerId, q.name) }
+        let name = dnsQuery?.name ?? guardian.name(port.containerId, key.dstIP)
+        if case .block(let why) = verdict {
+            guardian.record(port.containerId, .init(time: Date(), proto: tcp ? "tcp" : "udp", ip: key.dstIP, port: key.dstPort, name: name, blocked: true, reason: why))
+            return false
+        }
+        if !tcp { guardian.record(port.containerId, .init(time: Date(), proto: "udp", ip: key.dstIP, port: key.dstPort, name: name, blocked: false, reason: nil)) }
+        return true
+    }
 
     private func tick() {
         let now = Date()
@@ -441,6 +465,9 @@ final class TCPConn {
     private var retries = 0
     private var lastActivity = Date()
     private let started = Date()
+    /// A connection the container opened holds its first bytes until they name it (SNI,
+    /// Host) and the egress guard has its say (D-51); published ports' are not inspected.
+    private var inspecting = true
 
     static let receiveCapacity = 1 << 20
     /// Bytes in flight to the guest, whatever window it advertises.
@@ -472,6 +499,7 @@ final class TCPConn {
         self.port = port
         self.uplink = uplink
         self.fd = fd
+        inspecting = false
         rcvNxt = 0
         sndUna = iss
         sndNxt = iss &+ 1
@@ -599,6 +627,30 @@ final class TCPConn {
         if wasFull { uplink.send(seg(TCPSegment.ack), for: self) }  // window update
     }
 
+    /// The first bytes' verdict: true once they may go on to the host. Until then they
+    /// wait in `toHost`; a refused connection is reset and nothing reaches the host.
+    private func inspect(final: Bool = false) -> Bool {
+        let guardian = uplink.sw.egress
+        let container = port.containerId
+        let resolved = guardian.name(container, key.dstIP)
+        var carried: String?
+        switch FirstBytes.inspect(toHost) {
+        case .needMore where toHost.count < FirstBytes.maxInspect && !final: return false
+        case .name(let n): carried = n
+        default: break
+        }
+        inspecting = false
+        let verdict = carried.map { guardian.checkCarried(container, $0) } ?? .allow
+        if case .block(let why) = verdict {
+            guardian.record(container, .init(time: Date(), proto: "tcp", ip: key.dstIP, port: key.dstPort, name: carried, blocked: true, reason: why))
+            toHost.removeAll()
+            close(reset: true)
+            return false
+        }
+        guardian.record(container, .init(time: Date(), proto: "tcp", ip: key.dstIP, port: key.dstPort, name: carried ?? resolved, blocked: false, reason: nil))
+        return true
+    }
+
     // MARK: Guest side
 
     func segment(_ s: TCPSegment) {
@@ -643,7 +695,8 @@ final class TCPConn {
             if s.seq == rcvNxt && toHost.count + s.payload.count <= Self.receiveCapacity {
                 toHost += s.payload
                 rcvNxt = rcvNxt &+ UInt32(s.payload.count)
-                flushToHost()
+                if !inspecting || inspect() { flushToHost() }
+                if state == .closed { return }
             }
             uplink.send(seg(TCPSegment.ack), for: self)  // ack, or a duplicate ack for out-of-order data
         }
@@ -651,6 +704,11 @@ final class TCPConn {
             rcvNxt = rcvNxt &+ 1
             guestFin = true
             uplink.send(seg(TCPSegment.ack), for: self)
+            // A client that stops before its first bytes name it: decide on what came.
+            if inspecting {
+                guard inspect(final: true) else { return }
+                flushToHost()
+            }
             if toHost.isEmpty { shutdown(fd, SHUT_WR) }
         }
         if guestFin && finSent && sndUna == sndNxt { close(reset: false) }
@@ -700,6 +758,12 @@ final class TCPConn {
 
     func close(reset: Bool) {
         guard state != .closed else { return }
+        if inspecting && state == .established {  // closed before sending anything: still a flow
+            inspecting = false
+            let g = uplink.sw.egress
+            g.record(port.containerId, .init(time: Date(), proto: "tcp", ip: key.dstIP, port: key.dstPort,
+                                              name: g.name(port.containerId, key.dstIP), blocked: false, reason: nil))
+        }
         if reset && state != .connecting && state != .synSent { uplink.send(seg(TCPSegment.rst | TCPSegment.ack), for: self) }
         state = .closed
         if let w = writeSource {

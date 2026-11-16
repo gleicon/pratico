@@ -37,6 +37,9 @@ final class NetSwitch: @unchecked Sendable {
     let socketPath: String
     /// Names → addresses for the asker's networks; nil means "not a container name".
     var resolveName: (@Sendable (NetPort, String) -> [UInt32]?)?
+    /// What containers reach beyond their networks, and whether they may (D-51); the
+    /// daemon sets it up before the switch starts.
+    var egress = EgressGuard(blockThreats: true)
 
     private var fd: Int32 = -1
     private let lock = NSLock()
@@ -229,6 +232,11 @@ final class NetSwitch: @unchecked Sendable {
             respond(nil)
             return
         }
+        if case .block(let why) = egress.checkName(port.containerId, q.name) {
+            egress.record(port.containerId, .init(time: Date(), proto: "dns", ip: 0, port: 53, name: q.name, blocked: true, reason: why))
+            respond(nil)  // no such name, as far as the container can tell
+            return
+        }
         guard q.qtype == 1 else {
             respond([])  // IPv6 and other types: no records yet (no IPv6 routing)
             return
@@ -238,7 +246,9 @@ final class NetSwitch: @unchecked Sendable {
         let name = q.name
         DispatchQueue.global().async { [self] in
             defer { lookups.signal() }
-            respond(Self.hostLookup(name))
+            let found = Self.hostLookup(name)
+            if let found { egress.resolved(port.containerId, name, found) }  // names its connections
+            respond(found)
         }
     }
 

@@ -777,3 +777,38 @@ private func emptyDir() throws -> URL {
                ShimMount(source: "/s.sock", destination: "/s", readOnly: true, socket: true)]
     #expect(try JSONDecoder().decode([ShimMount].self, from: JSONEncoder().encode(all)) == all)
 }
+
+@Test func firstBytesNameTheirDestination() {
+    // A minimal ClientHello carrying SNI example.com.
+    let name = Array("example.com".utf8)
+    var sni: [UInt8] = [0, 0] + [UInt8(0), UInt8(name.count + 5)] + [UInt8(0), UInt8(name.count + 3), 0, 0, UInt8(name.count)] + name
+    sni.removeFirst(0)
+    let ext: [UInt8] = [UInt8(0), UInt8(sni.count)] + sni
+    var hello: [UInt8] = [3, 3] + Array(repeating: 0, count: 32) + [0] + [0, 2, 0x13, 0x01] + [1, 0]
+    hello += ext
+    let handshake: [UInt8] = [1, 0, UInt8(hello.count >> 8), UInt8(hello.count & 0xff)] + hello
+    let record: [UInt8] = [0x16, 3, 1, UInt8(handshake.count >> 8), UInt8(handshake.count & 0xff)] + handshake
+    #expect(FirstBytes.inspect(record) == .name("example.com"))
+    #expect(FirstBytes.inspect(Array(record.prefix(20))) == .needMore)
+    #expect(FirstBytes.inspect(Array("GET / HTTP/1.1\r\nHost: Pypi.org:8080\r\nAccept: */*\r\n\r\n".utf8)) == .name("pypi.org"))
+    #expect(FirstBytes.inspect(Array("GET / HTTP/1.1\r\nHost: x".utf8)) == .needMore)
+    #expect(FirstBytes.inspect([0x53, 0x53, 0x48, 0x2d]) == .none)  // SSH-…
+    #expect(FirstBytes.inspect([0x16, 3, 1, 0xff, 0xff, 1, 0, 0]) == .needMore)  // a claimed 64 KiB record, cut short
+}
+
+@Test func threatSetsMatchNamesAddressesAndRanges() {
+    var s = ThreatSet()
+    s.names["evil.example"] = "test"
+    s.addresses[IPv4.parse("203.0.113.9")!] = "c2"
+    s.addRange("198.51.100.0/24", "drop")
+    s.addRange("10.0.0.0/8", "drop")
+    s.sortRanges()
+    #expect(s.listing(name: "cdn.evil.example") == "test" && s.listing(name: "notevil.example") == nil)
+    #expect(s.listing(ip: IPv4.parse("203.0.113.9")!, port: 443) == "c2")
+    #expect(s.listing(ip: IPv4.parse("198.51.100.77")!, port: 1) == "drop" && s.listing(ip: IPv4.parse("198.51.101.1")!, port: 1) == nil)
+    #expect(s.listing(ip: IPv4.parse("10.200.0.1")!, port: 1) == "drop")
+    #expect(EgressGuard.matches("files.pythonhosted.org", ["pypi.org", "*.pythonhosted.org"]) && !EgressGuard.matches("evil.org", ["pypi.org"]))
+    #expect(EgressFeeds.sharedHost("raw.githubusercontent.com") && !EgressFeeds.sharedHost("evil-github.com"))
+    let rows = EgressFeeds.csv(Data("# c\n\"1\",\"2024\",\"http://bad.example/x\",\"online\"\n".utf8))
+    #expect(rows == [["1", "2024", "http://bad.example/x", "online"]])
+}

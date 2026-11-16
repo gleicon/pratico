@@ -81,6 +81,7 @@ private struct ContainerItems: View {
                 if let url = URL(string: "http://localhost:\(p.PublicPort)") { NSWorkspace.shared.open(url) }
             }
         }
+        Button("Network Activity…") { daemon.showNetworkActivity(c) }
         Button("Stop") { daemon.containerAction(c, "stop") }
         Button("Restart") { daemon.containerAction(c, "restart") }
         Button("Copy ID") {

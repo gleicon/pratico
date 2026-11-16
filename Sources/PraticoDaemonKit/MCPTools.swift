@@ -9,6 +9,9 @@ struct MCPTools: Sendable {
     let scans: ScanService
 
     static let label = "dev.pratico.mcp"
+    /// A container's egress allowlist (D-51): names, `*.example.com` for subdomains; any
+    /// container can carry it, `run` and `start` set it from `egress`.
+    static let egressLabel = "dev.pratico.egress.allow"
     /// Output an agent gets back per stream: the last 64 KiB, as a log tail.
     static let outputBytes = 64 * 1024
     static let maxTimeout = 3600
@@ -16,8 +19,8 @@ struct MCPTools: Sendable {
     static let instructions = """
         pratico runs each container in its own lightweight VM on this Mac and scans every image it pulls. \
         Check an image with image_check before running it; use run for a one-off command in a throwaway VM \
-        (network off unless asked), start for a service that keeps running. exec, stop, and remove act only on \
-        containers made through this server.
+        (network off unless asked; with egress, only the names listed), start for a service that keeps running. \
+        egress shows where a container connected. exec, stop, and remove act only on containers made through this server.
         """
 
     static let catalog: [JSON] = [
@@ -35,6 +38,8 @@ struct MCPTools: Sendable {
         tool("exec", "Run a command in a running container made through this server.",
              ["container": str("Name or ID"), "command": strings("Command and arguments"), "timeout_seconds": int("Default 60, at most 3600")],
              ["container", "command"]),
+        tool("egress", "Where a container's connections went: each destination's name and address, and whether pratico refused it (threat feeds, or the container's egress allowlist).",
+             ["container": str("Name or ID")], ["container"]),
         tool("logs", "The last lines of a container's output.", ["container": str("Name or ID"), "tail": int("Lines, default 200, at most 5000")], ["container"]),
         tool("list", "Containers, running or not, with image, state, ports, and whether this server made them.", ["all": bool("Include stopped ones (default true)")], []),
         tool("stop", "Stop a container made through this server.", ["container": str("Name or ID")], ["container"]),
@@ -52,6 +57,8 @@ struct MCPTools: Sendable {
             "properties": ["host": str("Absolute path on the Mac"), "container": str("Absolute path in the container"),
                            "read_only": bool("Default true")],
         ]]),
+        "egress": .object(["type": "array", "items": ["type": "string"],
+                           "description": "Allowlist: the only names it may reach (pypi.org, *.github.com); with a network, everything else is refused"]),
         "cpus": .object(["type": "number", "description": "vCPUs (default pratico's)"]),
         "memory_mib": int("Memory in MiB (default pratico's)"),
     ]
@@ -75,6 +82,7 @@ struct MCPTools: Sendable {
         case "start": return try start(args)
         case "exec": return try exec(args)
         case "logs": return try logs(args)
+        case "egress": return try egress(args)
         case "list": return list(args)
         case "stop": return try stop(args)
         case "remove": return try remove(args)

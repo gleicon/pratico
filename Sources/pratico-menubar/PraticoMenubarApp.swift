@@ -60,6 +60,7 @@ struct StatusMenu: View {
             Divider()
             DiskMenu(daemon: daemon)
             ScannersMenu(daemon: daemon)
+            EgressMenu(daemon: daemon)
         }
         // ~/.pratico/docker.sock is the default; this path needs root, which pratico never asks for.
         Button("Use with docker…") { daemon.showDockerSetup() }

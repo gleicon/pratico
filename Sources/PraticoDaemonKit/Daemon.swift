@@ -30,6 +30,8 @@ public final class Daemon: @unchecked Sendable {
     let registries: Registries
     let startedAt = Date()
     private var server: HTTPServer?
+    /// Threat feeds for egress protection (D-51).
+    let egressFeeds: EgressFeeds
     /// The MCP endpoint for agents, when `mcp` is on (D-48).
     private var mcp: MCPServer?
 
@@ -72,6 +74,21 @@ public final class Daemon: @unchecked Sendable {
                                          containers: containers, networks: networks, volumes: volumes)
         self.disk = DiskService(home: home, images: images, containers: containers, volumes: volumes)
         containers.startGate = { [scans] rec in scans.blockReason(imageId: rec.imageId) }
+        // Egress (D-51): the switch's guard, its feeds, allowlists from labels, alerts.
+        let guardian = EgressGuard(blockThreats: config.egressBlock)
+        guardian.allowlist = { [containers] id in
+            guard let rec = try? containers.resolve(id), let raw = rec.labels[MCPTools.egressLabel] else { return nil }
+            return raw.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        }
+        guardian.onThreat = { [containers, alerts] id, destination, feed, blocked in
+            let name = (try? containers.resolve(id))?.name ?? String(id.prefix(12))
+            alerts.raise(key: "egress:\(id):\(destination)", level: "serious",
+                         title: "\(name) \(blocked ? "was stopped from reaching" : "reached") \(destination)",
+                         detail: "\(destination) is listed by \(feed). \(blocked ? "The connection was refused." : "egress_block is off, so it went through.")")
+            Pratico.log("pratico-daemon: egress: \(name) -> \(destination): \(feed)\(blocked ? ", refused" : "")")
+        }
+        networks.netSwitch.egress = guardian
+        self.egressFeeds = EgressFeeds(dir: home.appending(path: "scan-db/egress", directoryHint: .isDirectory), guardian: guardian)
         // An image's unpacked copy goes with it.
         _ = events.subscribe(since: nil) { [embedded = containers.embedded] e in
             if e.type == "image" && e.action == "delete" { embedded.dropRootfsCache(imageId: e.id) }
@@ -100,6 +117,7 @@ public final class Daemon: @unchecked Sendable {
         // booting in the background while the API already answers.
         Thread.detachNewThread { [containers] in containers.restarts.daemonStarted() }
         if containers.config.mcp { try startMCP() }
+        egressFeeds.start()
     }
 
     /// A port already taken stops the daemon with the reason, as an unreadable CA does:

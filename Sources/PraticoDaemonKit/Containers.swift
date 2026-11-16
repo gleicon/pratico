@@ -653,6 +653,7 @@ public final class ContainerService: @unchecked Sendable {
         lock.lock()
         guard let rec = records.removeValue(forKey: id) else { lock.unlock(); return }
         restarts.forget(id)
+        networks.netSwitch.egress.forget(id)
         logs[id] = nil
         let waiters = removeWaiters.removeValue(forKey: id) ?? []
         lock.unlock()

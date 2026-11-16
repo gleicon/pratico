@@ -19,6 +19,7 @@ final class DaemonController {
     private(set) var status: Status?
     private(set) var disk: DiskUsage?
     var scanners: ScannerReport?
+    var egress: EgressReport?
     private(set) var scanSummary: ScanSummary?
     private(set) var containers: [RunningContainer] = []
     /// Whether one of the app's menus is open, tracked from AppKit's menu notifications.
@@ -418,7 +419,10 @@ final class DaemonController {
                 // Usage moves without events; the daemon samples it every 4 s.
                 if changed || tick % 2 == 0 { await self.refreshContainers() }
                 // Each check runs every scanner's --version: once a minute is plenty.
-                if tick % 60 == 0 { await self.refreshScanners() }
+                if tick % 60 == 0 {
+                    await self.refreshScanners()
+                    await self.refreshEgress()
+                }
                 // Follows start_at_login as Settings or a hand edit changes it, no restart.
                 if tick % 5 == 0 && self.isRunning { self.agent.startAtLogin(Self.startAtLogin) }
                 tick += 1
@@ -505,9 +509,9 @@ enum Dialogs {
 extension DaemonProbe {
     /// An action on the daemon, off the main actor: the response body on 2xx, else the
     /// daemon's own message (Docker's `{"message": …}`) or that it did not answer.
-    static func send(_ method: String, _ path: String, timeout: Int = 30) async -> Result<Data, DaemonFailure> {
+    static func send(_ method: String, _ path: String, timeout: Int = 30, body: Data = Data()) async -> Result<Data, DaemonFailure> {
         await Task.detached {
-            guard let r = request(method, path, timeout: timeout) else { return .failure(DaemonFailure("the daemon did not answer")) }
+            guard let r = request(method, path, timeout: timeout, body: body) else { return .failure(DaemonFailure("the daemon did not answer")) }
             guard r.status < 300 else {
                 let message = (try? JSONSerialization.jsonObject(with: r.body) as? [String: Any])?["message"] as? String
                 return .failure(DaemonFailure(message ?? String(decoding: r.body, as: UTF8.self)))

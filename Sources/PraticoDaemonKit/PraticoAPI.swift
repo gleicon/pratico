@@ -25,6 +25,17 @@ extension Daemon {
         case ("DELETE", 3, "registries") where p[1] == "logins":
             try registries.logout(p[2].removingPercentEncoding ?? p[2])
             conn.respond(204)
+        case ("GET", 1, "egress"):
+            conn.json(200, try egress(req.query["container"]))
+        case ("GET", 2, "egress") where p[1] == "feeds":
+            conn.json(200, egressFeeds.summary())
+        case ("POST", 2, "egress") where p[1] == "key":
+            guard let key = JSON.parse(req.body)?["key"]?.string else { throw APIError(400, "the body is {\"key\": \"…\"}") }
+            try egressFeeds.setKey(key)
+            conn.respond(204)
+        case ("DELETE", 2, "egress") where p[1] == "key":
+            try egressFeeds.setKey(nil)
+            conn.respond(204)
         case ("GET", 1, "scanners"):
             conn.json(200, scans.doctor())
         case ("GET", 1, "scans"):
@@ -58,6 +69,21 @@ extension Daemon {
             throw APIError(404, "no SBOM for \(img.displayName): install syft (brew install syft) and scan it again")
         }
         conn.respond(200, body: data, contentType: "application/json")
+    }
+
+    /// `GET /pratico/egress?container=`: where a container's connections went, newest last.
+    func egress(_ ref: String?) throws -> JSON {
+        let recs = try ref.map { [try containers.resolve($0)] } ?? containers.all()
+        let guardian = networks.netSwitch.egress
+        return .array(recs.map { rec in
+            ["Id": .string(rec.id), "Name": .string(rec.name), "Flows": .array(guardian.flows(rec.id).map(Self.flowJSON))]
+        })
+    }
+
+    static func flowJSON(_ f: EgressGuard.Flow) -> JSON {
+        ["Time": .string(Timestamp.format(f.time)), "Proto": .string(f.proto), "Address": .string(IPv4.format(f.ip)),
+         "Port": .int(Int64(f.port)), "Name": f.name.map(JSON.string) ?? .null, "Blocked": .bool(f.blocked),
+         "Reason": f.reason.map(JSON.string) ?? .null]
     }
 
     /// `GET /pratico/containers`: the menubar's list of running containers (FR-31, FR-40),

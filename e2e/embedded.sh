@@ -19,6 +19,13 @@ mkdir -p "$DOCKER_CONFIG"
 echo '{"auths":{"pratico.invalid":{}}}' >"$DOCKER_CONFIG/config.json"
 export PRATICO_RUNTIME_ASSETS="$ASSETS"
 export PRATICO_SYFT_BIN=/nonexistent PRATICO_OSV_BIN=/nonexistent PRATICO_GRYPE_BIN=/nonexistent PRATICO_TRIVY_BIN=/nonexistent  # no scanning here
+# Egress feeds (D-51) from files: a TEST-NET address as a botnet C2, a name as a malware host.
+mkdir -p "$HOME_DIR/feeds"
+echo 192.0.2.1 >"$HOME_DIR/feeds/feodo.txt"
+printf '"1","2026","http://blocked.pratico.example/x","online"\n"2","2026","https://raw.githubusercontent.com/a/b/c","online"\n' >"$HOME_DIR/feeds/urlhaus.csv"
+: >"$HOME_DIR/feeds/empty"
+export PRATICO_EGRESS_FEODO_URL="file://$HOME_DIR/feeds/feodo.txt" PRATICO_EGRESS_URLHAUS_URL="file://$HOME_DIR/feeds/urlhaus.csv"
+export PRATICO_EGRESS_SSLBL_URL="file://$HOME_DIR/feeds/empty" PRATICO_EGRESS_SPAMHAUS_DROP_URL="file://$HOME_DIR/feeds/empty" PRATICO_EGRESS_THREATFOX_URL="file://$HOME_DIR/feeds/empty"
 DAEMON_PID=""
 
 pass=0
@@ -794,6 +801,7 @@ expect_eq "run: exit code and both streams" "$($MCP run '{"image":"alpine","comm
 expect_eq "with no network unless asked" "$($MCP run '{"image":"alpine","command":["sh","-c","ip -o link | grep -c eth || true"]}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["stdout"].strip())')" "0"
 expect_eq "a timeout kills it" "$($MCP run '{"image":"alpine","command":["sleep","60"],"timeout_seconds":2}' | python3 -c 'import json,sys; r=json.load(sys.stdin); print(r["timed_out"])')" "True"
 expect_eq "and nothing is left behind" "$(docker ps -aq --filter label=dev.pratico.mcp | wc -l | tr -d ' ')" "0"
+expect_eq "run with an egress allowlist reports its connections" "$($MCP run '{"image":"alpine","network":"bridge","egress":["example.com"],"command":["sh","-c","wget -qT10 -O /dev/null https://example.com; nslookup example.org || true"]}' | python3 -c 'import json,sys; r=json.load(sys.stdin); print(sorted({(c["Name"], c["Blocked"]) for c in r["connections"]}))')" "[('example.com', False), ('example.org', True)]"
 expect_has "image_check reports a verdict" "$($MCP image_check '{"image":"alpine","wait_seconds":5}')" '"Verdict"'
 $MCP start '{"image":"alpine","command":["sleep","300"],"name":"e-agent"}' >/dev/null
 expect_eq "start, then exec in it" "$($MCP exec '{"container":"e-agent","command":["echo","inside"]}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["output"].strip())')" "inside"
@@ -816,7 +824,7 @@ docker run -d --name e-mysql -e MYSQL_ROOT_PASSWORD=x mysql:8.4 >/dev/null
 eventually "redis runs on its default volume" sh -c '[ "$(docker exec e-redis redis-cli ping 2>/dev/null)" = PONG ]'
 for _ in $(seq 60); do docker exec e-pg pg_isready -U postgres >/dev/null 2>&1 && break; sleep 0.5; done
 expect_eq "postgres runs and answers" "$(docker exec e-pg psql -U postgres -tAc 'select 1+1' 2>&1)" "2"
-for _ in $(seq 120); do docker exec e-mysql mysqladmin -uroot -px ping >/dev/null 2>&1 && break; sleep 0.5; done
+for _ in $(seq 360); do docker exec e-mysql mysqladmin -uroot -px ping >/dev/null 2>&1 && break; sleep 0.5; done
 check "mysql runs and answers" docker exec e-mysql mysqladmin -uroot -px ping
 expect_eq "copy-up kept the image's owner on /data" "$(docker exec e-redis stat -c '%U' /data)" "redis"
 docker rm -f -v e-redis e-pg e-mysql >/dev/null
@@ -833,6 +841,22 @@ expect_eq "and is a folder on the Mac" "$(cat "$HOME_DIR/volumes/e-share/_data/f
 expect_has "unknown volume options are refused" "$(docker volume create --opt device=/dev/sda e-bad 2>&1)" "not supported"
 docker rm -f e-s1 >/dev/null
 docker volume rm e-disk e-share >/dev/null
+
+# Egress (D-51): flows named and recorded, feed-listed destinations refused, allowlists.
+flows() { curl -s --unix-socket "$SOCK" "http://d/pratico/egress?container=$1" | python3 -c 'import json,sys; [print(f["Proto"], f["Name"] or f["Address"], f["Port"], "blocked" if f["Blocked"] else "ok", f["Reason"] or "") for f in json.load(sys.stdin)[0]["Flows"]]'; }
+expect_eq "feeds load, an empty one too" "$(curl -s --unix-socket "$SOCK" http://d/pratico/egress/feeds | python3 -c 'import json,sys; print(" ".join("%s=%s:%s" % (f["Name"], f["Entries"], f["Error"] is None) for f in json.load(sys.stdin)["Feeds"]))')" "feodo=1:True sslbl=0:True spamhaus-drop=0:True urlhaus=1:True threatfox=0:True"
+docker run --name e-eg alpine sh -c 'nc -w3 192.0.2.1 80 </dev/null; nslookup blocked.pratico.example; nslookup raw.githubusercontent.com; wget -qT10 -O /dev/null https://example.com' >/dev/null 2>&1
+eg=$(flows e-eg)
+expect_has "a listed address is refused" "$eg" "tcp 192.0.2.1 80 blocked 192.0.2.1 is listed by Feodo Tracker"
+expect_has "a listed name gets no answer" "$eg" "dns blocked.pratico.example 53 blocked"
+expect_eq "a shared host in a URL feed is not blocked" "$(echo "$eg" | grep -c 'githubusercontent.*blocked')" "0"
+expect_has "an HTTPS connection is named by its SNI" "$eg" "tcp example.com 443 ok"
+expect_has "and the refusal raised an alert" "$(cat "$HOME_DIR/alerts.json")" "was stopped from reaching 192.0.2.1"
+docker rm -f e-eg >/dev/null
+docker run --name e-allow --label dev.pratico.egress.allow=example.com alpine sh -c 'wget -qT10 -O /dev/null https://example.com && echo allowed-ok; nslookup example.org >/dev/null 2>&1 || echo name-refused; nc -w3 1.1.1.1 53 </dev/null || echo address-refused' >"$HOME_DIR/allow.out" 2>&1
+expect_eq "an allowlist lets its names through and refuses the rest" "$(grep -E 'allowed-ok|name-refused|address-refused' "$HOME_DIR/allow.out" | tr '\n' ' ')" "allowed-ok name-refused address-refused "
+expect_has "and says why" "$(flows e-allow)" "example.org is not on this container's egress allowlist"
+docker rm -f e-allow >/dev/null
 
 # Many containers stopping together on a fresh daemon (the uplink's first use comes from
 # several threads at once; a lazy var there crashed the daemon).

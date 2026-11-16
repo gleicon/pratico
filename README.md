@@ -78,6 +78,10 @@ vminitd ───────── guest agent: process, exec, cp, stats, healt
 - **[Run options](docs/run-options.md).** Every `docker run` option pratico accepts is
   applied (cgroup limits, capabilities, restart policies, `--init`, `--read-only`, …);
   one a VM cannot honor, such as `--device` or `--pid host`, is refused with an error.
+- **[Egress](docs/egress.md).** Every connection a container makes is named (DNS, TLS
+  SNI, HTTP Host) and recorded on the Mac; destinations threat feeds list (Feodo
+  Tracker, SSL Blacklist, Spamhaus DROP, and URLhaus and ThreatFox with a free abuse.ch
+  key) are refused; a label limits a container to the names it lists.
 - **[Agents](docs/agents.md).** An MCP endpoint on 127.0.0.1 (off until `mcp = true`,
   bearer token): agents check images before using them, run commands in throwaway VMs,
   and start services, and can change only the containers they made.
@@ -195,6 +199,7 @@ keeps comments. Unknown keys stop the daemon with the key and line named.
 | `registry_ca` | `[]` | PEM files added to the trusted roots |
 | `registry_system_roots` | `true` | `false` trusts only `registry_ca` |
 | `volume_size` | `64` | GiB a new disk volume can hold (sparse) |
+| `egress_block` | `true` | refuse destinations threat feeds list; `false` only alerts |
 | `mcp` | `false` | serve MCP for agents on 127.0.0.1 ([agents](docs/agents.md)) |
 | `mcp_port` | `7728` | its port |
 | `registry_keep_logins` | `true` | keep `docker login` credentials in the Keychain for clients that send none |
@@ -244,6 +249,9 @@ Requirements, acceptance criteria, and design decisions: [SPEC.md](SPEC.md).
   (Apache-2.0 with Runtime Library Exception), and ICU data (Unicode License V3).
 - osv-scanner, grype, trivy, and syft are installed separately and are not shipped with
   pratico.
+- Egress threat data, fetched on your Mac and not redistributed: Feodo Tracker, SSL
+  Blacklist, URLhaus, and ThreatFox by [abuse.ch](https://abuse.ch); the DROP list by
+  [The Spamhaus Project](https://www.spamhaus.org/drop/).
 
 `Acknowledgements.txt` in the app and DMG carries every license text and the kernel's
 GPL-2.0 source offer.

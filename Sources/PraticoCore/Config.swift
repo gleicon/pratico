@@ -55,6 +55,8 @@ public struct Config: Equatable, Sendable {
             summary: "PEM files of extra CA certificates trusted for registries, added to the system's trusted roots"),
         Key(name: "registry_system_roots", defaultValue: .bool(true),
             summary: "Trust the system's roots for registries; false trusts only registry_ca"),
+        Key(name: "egress_block", defaultValue: .bool(true),
+            summary: "Refuse connections to destinations threat feeds list (botnet C2, malware hosts); false only alerts"),
         Key(name: "mcp", defaultValue: .bool(false),
             summary: "Serve the MCP endpoint for agents on 127.0.0.1 (bearer token in ~/.pratico/mcp-token)"),
         Key(name: "mcp_port", defaultValue: .int(7728), summary: "Port of the MCP endpoint on 127.0.0.1", range: 1024...65535),
@@ -73,6 +75,7 @@ public struct Config: Equatable, Sendable {
 
     public var startAtLogin: Bool { if case .bool(let v) = value("start_at_login") { v } else { true } }
     public var volumeSizeGiB: Int { if case .int(let v) = value("volume_size") { v } else { 64 } }
+    public var egressBlock: Bool { if case .bool(let v) = value("egress_block") { v } else { true } }
     public var mcp: Bool { if case .bool(let v) = value("mcp") { v } else { false } }
     public var mcpPort: Int { if case .int(let v) = value("mcp_port") { v } else { 7728 } }
     public var defaultCPUs: Int { if case .int(let v) = value("default_cpus") { v } else { 4 } }
