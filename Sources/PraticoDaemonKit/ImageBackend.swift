@@ -106,7 +106,9 @@ final class EmbeddedImageBackend: ImageBackend, @unchecked Sendable {
             let operation = ImageStore.ImportOperation(name: name, contentStore: content, client: client, ingestDir: dir,
                                                        progress: { events in meter.record(events) })
             do {
-                let index = try await operation.import(root: root, matcher: { wanted.os == $0.os && wanted.architecture == $0.architecture && (wanted.variant == nil || wanted.variant == $0.variant) })
+                // Platform's `==`: arm64 without a variant is v8, as OCI says (testcontainers/ryuk
+                // lists it so; an exact variant match imported nothing and stored an empty image).
+                let index = try await operation.import(root: root, matcher: { wanted == $0 })
                 _ = try await content.completeIngestSession(id)
                 return try await store.create(description: Image.Description(reference: reference, descriptor: index))
             } catch {

@@ -58,7 +58,6 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 - [ ] Local registry: pratico's image store served as an OCI registry on 127.0.0.1 (push and pull without tar files, Apple `container` and other tools pulling from it, images scanned on push), optionally a pull-through cache for Docker Hub (to discuss with Features)
 - [ ] Egress intercept: sandwich-proxy engine on container HTTP/HTTPS flows, per-container opt-in, log/replay/HAR/threat feeds
 - [ ] IPv6 on pratico-net: addresses, neighbour discovery, and the uplink (to discuss with Features)
-- [ ] Snapshots that optionally carry volume data (to discuss with Features)
 - [ ] Own VM, self-contained (last in the Features discussion; decided 2026-11-15): pratico stops depending on upstream releases and binaries for what runs in and drives a VM. Containerization (Apache-2.0) is forked whole, host package and guest `vminitd`/`vmexec` at one pinned commit, since both speak one agent protocol; LICENSE, NOTICE, and modified files marked; upstream security fixes merged by us, as for the kernel.
   - [ ] Build VM: pratico boots a Linux VM on the previous release's pinned kernel and init (bootstrap) and builds inside it, from pinned sources only, then rebuilds once with its own output to check the SHA-256s match (reproducible)
   - [ ] Own kernel: the latest Linux LTS (6.18.63 as of 2026-11-15, vs 6.18.56 in Kata 4.3.1) with Kata's configuration plus what the items below need (`virtio_balloon`, seccomp filter); GPL source offer shipped; until then the kernel follows Kata's latest release (D-41)
@@ -104,7 +103,6 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 - [x] Restore recreates containers, networks, volumes, and starts the containers that ran (AC-38)
 - [x] Restore skips and reports existing names (AC-39); the menubar shows a dry run first
 - [x] Restore refuses an unsupported `format_version` and changes nothing (AC-39.a)
-- [ ] Optional volume data in snapshots (moved to the Features discussion)
 
 ## Bounds, performance, compatibility
 
@@ -144,3 +142,13 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 - [x] Image scanners work against pratico unchanged via `docker save` (osv-scanner, grype verified; trivy, snyk use the same path) (D-23)
 - [x] Automatic image scanning: osv-scanner + grype + CISA KEV after each pull and daily; `scan_block` levels; serious findings stop and block the image's containers; menubar alerts and notifications (D-24)
 - [x] Scanning follow-ups: EPSS, syft SBOMs, Allow This Image (D-38..D-40); spotter waits on an all-files hash mode upstream; Artifact Hub undecided
+
+## Production (when pratico runs on servers; decided 2026-11-15, not before)
+
+Local developers come first: every feature above is judged by a daily local use case
+(databases and services for development and tests, Testcontainers, Compose stacks, dev
+containers, agents). These wait until pratico runs as a daemon on Linux hosts.
+
+- [ ] pratico on Linux hosts: the daemon running VMs as a deployment target
+- [ ] Remote API with authentication
+- [ ] Backup and restore: snapshots that carry volume data, copied consistently from running containers, with retention

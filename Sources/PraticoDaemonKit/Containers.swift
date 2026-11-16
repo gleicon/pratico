@@ -279,7 +279,7 @@ public final class ContainerService: @unchecked Sendable {
     /// host folders `-v` asks for, and copy-up into new volumes.
     private func makeRootfs(_ id: String, host: JSON, imageRef: String) throws {
         // `-v` creates a missing host directory, as Docker does.
-        for m in try mounts(host) where m.createSource {
+        for m in try mounts(host) where m.createSource && !FileManager.default.fileExists(atPath: m.source) {
             do { try FileManager.default.createDirectory(atPath: m.source, withIntermediateDirectories: true) } catch {
                 throw APIError(400, "error while creating mount source path '\(m.source)': \(error.localizedDescription)")
             }

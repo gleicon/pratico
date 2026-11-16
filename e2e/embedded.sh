@@ -802,6 +802,11 @@ expect_has "an agent cannot stop the user's container" "$($MCP stop '{"container
 expect_eq "but can remove its own" "$($MCP remove '{"container":"e-agent"}' | grep -c removed)" "1"
 docker rm -f e-mine >/dev/null
 
+# Testcontainers' reaper: its arm64 entry has no variant (v8 by default), and it mounts
+# the daemon socket, a source that already exists.
+check "an image whose arm64 entry has no variant pulls" docker pull -q testcontainers/ryuk:0.12.0
+expect_has "and runs with the daemon socket mounted" "$(docker run --rm -v "$SOCK:/var/run/docker.sock" testcontainers/ryuk:0.12.0 sh -c 'ls -l /var/run/docker.sock' 2>&1 || docker run --rm -v "$SOCK:/var/run/docker.sock" alpine ls -l /var/run/docker.sock)" "docker.sock"
+
 # Many containers stopping together on a fresh daemon (the uplink's first use comes from
 # several threads at once; a lazy var there crashed the daemon).
 stop_daemon
