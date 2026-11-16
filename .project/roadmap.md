@@ -65,6 +65,12 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
   - [ ] Seccomp: `vmexec` installs the filter before exec (Docker's default profile, already ported in ContainerizationOCI), default on; `--security-opt seccomp=<file>` applied; `unconfined` accepted. No runc in the guest (fewer parts, no runc CVEs)
   - [ ] Live limits: `docker update` writes the container's cgroup in the guest (`cpu.max`, `cpu.weight`, `cpuset.cpus`, `memory.max`, `memory.low`, `memory.swap.max`, `pids.max`) within the VM's size; more vCPUs or memory than the VM booted with still needs a restart (Virtualization.framework has no vCPU hotplug, memory cannot grow past boot size)
   - [ ] Memory balloon: a virtio balloon per VM, so idle VMs give RAM back to the Mac and a lower `--memory` on a running container returns the difference
+  - [ ] eBPF in the guest (decided 2026-11-15): kernel with BPF syscall, JIT, BTF, BPF LSM (`lsm=…,bpf`), `unprivileged_bpf_disabled=1`; probes in restricted C built with clang in the build VM, loaded by `vminitd` (Swift, libbpf through C interop) before the container's process starts; events through a bounded ring buffer over vsock, overflow dropped and counted. Network policy stays in the Mac's switch (it holds if a guest kernel falls); eBPF is for what only the guest sees
+    - [ ] Flight recorder: every exec and exit (argv, uid, parent, code) and the process behind each connection, joined with the switch's flows; in the API, events, the menubar, and the MCP server
+    - [ ] File access audit on chosen paths (LSM `file_open`), and opt-in drift prevention (deny exec of binaries not in the image, deny writes to chosen paths)
+    - [ ] Ask mode for agent containers: seccomp `user_notif` on chosen syscalls, decided by the daemon or the menubar
+    - [ ] Boot trimming: own kernel config cut to what a pratico VM uses, measured with `initcall_debug` and ftrace against today's ≈130 ms kernel boot
+    - [ ] On-demand profiling: CPU and off-CPU stacks per container (`perf_event`)
 - [x] Embedded is the default: the app bundles `pratico-shim`, the kernel and `vminit`; acknowledgements (licenses) in the app and DMG
 - [x] `container` CLI adapter, `/etc/hosts` sync, freezer agent and default-network anchor removed; SPEC and docs updated
 
