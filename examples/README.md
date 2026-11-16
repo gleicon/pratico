@@ -6,7 +6,7 @@ names starting with `pratico-example`, and removes what it creates.
 | Script | Shows |
 |---|---|
 | `01-hello.sh` | a Docker context for pratico, the VM's own kernel, `/pratico/status` |
-| `02-volumes.sh` | named and anonymous volumes, copy-up, `nocopy`, tmpfs |
+| `02-volumes.sh` | postgres on a disk volume, shares, copy-up, `nocopy`, tmpfs |
 | `03-cp-stopped.sh` | `docker cp` into a created container and out of an exited one |
 | `04-apple-container.sh` | moving images to and from Apple's `container` as OCI archives |
 | `05-scanning.sh` | installed scanners, scan summary, findings with EPSS, SBOMs |

@@ -1,11 +1,23 @@
+import ContainerizationArchive
+import ContainerizationEXT4
 import Foundation
+import SystemPackage
 
-/// A Docker volume: a directory pratico owns, shared into each VM that mounts it like a
-/// bind mount (SPEC FR-25, D-32).
+/// A Docker volume (SPEC FR-25, D-32, D-49): by default a journaled ext4 disk image
+/// attached to the VM, so ownership, permissions, and fsync are Linux's (database images
+/// chown their data); with `--opt type=share`, a Mac folder shared over virtiofs, which
+/// several running containers can mount at once.
 struct VolumeRecord: Codable, Sendable {
     var name: String
     var created: Date
     var labels: [String: String]
+    /// nil in records from before D-49, which are folders.
+    var kind: Kind?
+    /// A disk's capacity; the image is sparse, so only what is written takes space.
+    var sizeBytes: Int64?
+
+    enum Kind: String, Codable, Sendable { case disk, share }
+    var storage: Kind { kind ?? .share }
 
     /// Docker's mark for a volume a container made for a bare `-v /path` or an image
     /// `VOLUME`; `rm -v`, `--rm`, and a plain `volume prune` remove only these.
@@ -18,15 +30,19 @@ struct VolumeRecord: Codable, Sendable {
 final class VolumeService: @unchecked Sendable {
     let root: URL
     let events: EventBus
+    /// A new disk volume's capacity unless `--opt size=` says otherwise (`volume_size`).
+    let defaultSizeBytes: Int64
     /// Volume name → IDs of the containers that mount it (set by the daemon).
     var usedBy: @Sendable () -> [String: [String]] = { [:] }
 
     private let lock = NSLock()
     private var records: [String: VolumeRecord] = [:]
 
-    init(root: URL, events: EventBus) {
+    init(root: URL, events: EventBus, defaultSizeBytes: Int64 = 64 << 30) {
+        precondition(defaultSizeBytes >= 1 << 30, "a disk volume below 1 GiB")
         self.root = root
         self.events = events
+        self.defaultSizeBytes = defaultSizeBytes
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         load()
     }
@@ -35,8 +51,39 @@ final class VolumeService: @unchecked Sendable {
 
     private func dir(_ name: String) -> URL { root.appending(path: name, directoryHint: .isDirectory) }
 
-    /// The host directory containers see at the mount point.
+    /// The host directory containers see at the mount point (a share).
     func dataPath(_ name: String) -> String { dir(name).appending(path: "_data").path }
+
+    /// The disk image a disk volume is (made at its first mount).
+    func diskPath(_ name: String) -> String { dir(name).appending(path: "disk.ext4").path }
+
+    /// What a mount of `name` attaches: a disk image, or a folder to share. A volume not
+    /// made yet is a disk, as `ensure` will make it.
+    func source(_ name: String) -> (path: String, disk: Bool) {
+        let rec = lock.withLock { records[name] }
+        return (rec?.storage ?? .disk) == .disk ? (diskPath(name), true) : (dataPath(name), false)
+    }
+
+    /// Makes the disk image, with the files of `content` (a tar whose entries are relative
+    /// to the volume's root) or empty; a disk that exists is left as it is.
+    func formatDisk(_ name: String, content: URL?) throws {
+        let rec = try resolve(name)
+        precondition(rec.storage == .disk, "formatting a folder volume")
+        let dest = diskPath(name)
+        guard !FileManager.default.fileExists(atPath: dest) else { return }
+        let partial = dest + ".partial"
+        defer { try? FileManager.default.removeItem(atPath: partial) }
+        let size = UInt64(rec.sizeBytes ?? defaultSizeBytes)
+        try blocking {
+            let f = try EXT4.Formatter(FilePath(partial), minDiskSize: size, journal: EXT4.JournalConfig(defaultMode: .ordered))
+            if let content { try await f.unpack(reader: try ArchiveReader(file: content)) }
+            // A volume starts as Docker's do: empty. initdb, among others, refuses a data
+            // directory holding the formatter's lost+found; the kernel does not need it.
+            try f.unlink(path: FilePath("/lost+found"))
+            try f.close()
+        }
+        try FileManager.default.moveItem(atPath: partial, toPath: dest)
+    }
 
     private func load() {
         for name in (try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? [] {
@@ -46,26 +93,35 @@ final class VolumeService: @unchecked Sendable {
     }
 
     private func save(_ rec: VolumeRecord) throws {
-        try FileManager.default.createDirectory(atPath: dataPath(rec.name), withIntermediateDirectories: true)
+        let folder = rec.storage == .share ? dataPath(rec.name) : dir(rec.name).path
+        try FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true)
         try Records.write(rec, to: dir(rec.name).appending(path: "volume.json"))
     }
 
     // MARK: Create, inspect, list
 
     /// `POST /volumes/create`. Creating a name that exists returns it, as Docker does.
-    /// Only the `local` driver, without options: pratico has no other storage to offer.
+    /// The `local` driver with pratico's options: `type=disk` (the default) or `type=share`,
+    /// and `size=` for a disk (`64g`); Docker's `device` and `o` name host devices and mount
+    /// options a VM does not have, so they are refused.
     func create(_ body: JSON) throws -> VolumeRecord {
         let driver = body["Driver"]?.string ?? ""
         guard driver.isEmpty || driver == "local" else {
             throw APIError(400, "pratico: volume driver \(driver) is not supported; only local")
         }
-        guard (body["DriverOpts"]?.object ?? [:]).isEmpty else {
-            throw APIError(400, "pratico: local volume options (type, device, o) are not supported")
+        var opts = (body["DriverOpts"]?.object ?? [:]).compactMapValues(\.string)
+        let type = opts.removeValue(forKey: "type") ?? "disk"
+        guard let kind = VolumeRecord.Kind(rawValue: type) else {
+            throw APIError(400, "pratico: volume type \(type) is not supported; disk (the default) or share")
         }
+        let size = try opts.removeValue(forKey: "size").map(RunOptions.bytes)
+        if let size, kind == .share { throw APIError(400, "pratico: size is for disk volumes; a share uses the Mac's disk") }
+        if let size, size < 1 << 30 { throw APIError(400, "pratico: a disk volume holds at least 1 GiB") }
+        if let bad = opts.keys.sorted().first { throw APIError(400, "pratico: volume option \(bad) is not supported; type and size are") }
         let labels = body["Labels"]?.object?.compactMapValues(\.string) ?? [:]
         let name = body["Name"]?.string.flatMap { $0.isEmpty ? nil : $0 } ?? randomHexID()
         try Self.validate(name)
-        return try ensure(name, labels: labels)
+        return try ensure(name, labels: labels, kind: kind, sizeBytes: size)
     }
 
     static func validate(_ name: String) throws {
@@ -75,11 +131,11 @@ final class VolumeService: @unchecked Sendable {
     }
 
     /// The volume a mount names, made if missing (`docker run -v data:/d` creates `data`).
-    func ensure(_ name: String, labels: [String: String] = [:]) throws -> VolumeRecord {
+    func ensure(_ name: String, labels: [String: String] = [:], kind: VolumeRecord.Kind = .disk, sizeBytes: Int64? = nil) throws -> VolumeRecord {
         lock.lock()
         defer { lock.unlock() }
         if let rec = records[name] { return rec }
-        let rec = VolumeRecord(name: name, created: Date(), labels: labels)
+        let rec = VolumeRecord(name: name, created: Date(), labels: labels, kind: kind, sizeBytes: sizeBytes)
         do { try save(rec) } catch {
             try? FileManager.default.removeItem(at: dir(name))
             throw APIError(500, "create \(name): \(error)")
@@ -104,10 +160,13 @@ final class VolumeService: @unchecked Sendable {
 
     /// `GET /volumes/{name}`; with `usage`, the `UsageData` `docker system df -v` shows.
     func json(_ rec: VolumeRecord, usage: (size: Int64, refs: Int)? = nil) -> JSON {
+        var options: [String: JSON] = ["type": .string(rec.storage.rawValue)]
+        if rec.storage == .disk { options["size"] = .string("\(rec.sizeBytes ?? defaultSizeBytes)") }
         var j: JSON = [
-            "Name": .string(rec.name), "Driver": "local", "Mountpoint": .string(dataPath(rec.name)),
+            "Name": .string(rec.name), "Driver": "local",
+            "Mountpoint": .string(rec.storage == .disk ? diskPath(rec.name) : dataPath(rec.name)),
             "CreatedAt": .string(rec.created.ISO8601Format()), "Labels": JSON(rec.labels),
-            "Scope": "local", "Options": [:],
+            "Scope": "local", "Options": .object(options),
         ]
         if let usage { j["UsageData"] = ["Size": .int(usage.size), "RefCount": .int(Int64(usage.refs))] }
         return j

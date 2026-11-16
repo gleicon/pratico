@@ -1,4 +1,5 @@
 import Containerization
+import ContainerizationEXT4
 import ContainerizationOCI
 import Foundation
 
@@ -148,7 +149,10 @@ final class EmbeddedContainers: Sendable {
             defer { try? FileManager.default.removeItem(at: partial) }
             try blocking { [store] in
                 let image = try await store.get(reference: ref)
-                _ = try await EXT4Unpacker(capacityInBytes: 8.gib()).unpack(image, for: .current, at: partial)
+                // Journaled, as disk volumes are (D-49): a VM killed mid-write leaves a
+                // filesystem the guest kernel recovers by replay, not one it fails writes on.
+                _ = try await EXT4Unpacker(capacityInBytes: 8.gib(), journal: EXT4.JournalConfig(defaultMode: .ordered))
+                    .unpack(image, for: .current, at: partial)
             }
             try FileManager.default.moveItem(at: partial, to: cached)
         }

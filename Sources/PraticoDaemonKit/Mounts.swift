@@ -17,6 +17,8 @@ extension ContainerService {
         var tmpfs: [String]? = nil
         /// `nocopy`: a new volume starts empty, without the image's files (copy-up).
         var noCopy = false
+        /// A disk volume: attached to the VM as a block device, not shared (D-49).
+        var disk = false
     }
 
     /// Docker's tmpfs defaults; options the client gives replace a default of the same key.
@@ -40,6 +42,7 @@ extension ContainerService {
     /// shares files but not the connections behind a socket.
     static func shimMount(_ m: Mount, dockerSocket: String) -> ShimMount {
         if let options = m.tmpfs { return ShimMount(source: "tmpfs", destination: m.destination, readOnly: m.readOnly, tmpfs: options) }
+        if m.disk { return ShimMount(source: m.source, destination: m.destination, readOnly: m.readOnly, block: true) }
         let source = dockerSocketPaths.contains(m.source) ? dockerSocket : m.source
         var st = stat()
         let socket = stat(source, &st) == 0 && st.st_mode & S_IFMT == S_IFSOCK
@@ -102,12 +105,14 @@ extension ContainerService {
         return (host, wanted)
     }
 
-    func mounts(_ host: JSON) throws -> [Mount] { try Self.mounts(host, volumeData: volumes.dataPath) }
+    func mounts(_ host: JSON) throws -> [Mount] {
+        try Self.mounts(host, volumeData: { [volumes] in volumes.source($0).path }, diskVolume: { [volumes] in volumes.source($0).disk })
+    }
 
     /// Docker `Binds` (`src:dst[:opts]`, `src` a host path or a volume name) and bind and
     /// volume `Mounts`; `volumeData` maps a volume name to its host directory. Other mount
     /// types (tmpfs) are refused.
-    static func mounts(_ host: JSON, volumeData: (String) -> String) throws -> [Mount] {
+    static func mounts(_ host: JSON, volumeData: (String) -> String, diskVolume: (String) -> Bool = { _ in false }) throws -> [Mount] {
         var out: [Mount] = []
         for bind in host["Binds"]?.strings ?? [] {
             let parts = bind.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
@@ -122,7 +127,7 @@ extension ContainerService {
             } else {
                 try VolumeService.validate(parts[0])
                 out.append(Mount(source: volumeData(parts[0]), destination: parts[1], readOnly: readOnly,
-                                 createSource: false, volume: parts[0], noCopy: opts.contains("nocopy")))
+                                 createSource: false, volume: parts[0], noCopy: opts.contains("nocopy"), disk: diskVolume(parts[0])))
             }
         }
         for m in host["Mounts"]?.array ?? [] {
@@ -146,7 +151,7 @@ extension ContainerService {
                 }
                 try VolumeService.validate(name)
                 out.append(Mount(source: volumeData(name), destination: dst, readOnly: readOnly,
-                                 createSource: false, volume: name, noCopy: m["VolumeOptions"]?["NoCopy"]?.bool ?? false))
+                                 createSource: false, volume: name, noCopy: m["VolumeOptions"]?["NoCopy"]?.bool ?? false, disk: diskVolume(name)))
             case "tmpfs":
                 // `--mount type=tmpfs,tmpfs-size=…,tmpfs-mode=…`
                 var given: [String] = []
@@ -187,13 +192,33 @@ extension ContainerService {
     /// the image's files at the mount path, unless the mount says `nocopy`. A failed copy is
     /// logged; the container still gets its (empty) volume, as a volume without files would.
     func copyUp(_ host: JSON, rootfs: URL) {
-        for m in (try? mounts(host)) ?? [] where m.volume != nil && !m.noCopy {
+        for m in (try? mounts(host)) ?? [] where m.disk {
+            do { try copyUpDisk(m, rootfs: rootfs) } catch {
+                Pratico.log("pratico-daemon: making disk volume \(m.volume!) failed: \(error)")
+            }
+        }
+        for m in (try? mounts(host)) ?? [] where m.volume != nil && !m.noCopy && !m.disk {
             let data = URL(filePath: m.source, directoryHint: .isDirectory)
             guard ((try? FileManager.default.contentsOfDirectory(atPath: data.path)) ?? ["?"]).isEmpty else { continue }
             do { try CopyUp.copy(rootfs: rootfs, path: m.destination, into: data) } catch {
                 Pratico.log("pratico-daemon: copy-up of \(m.destination) into volume \(m.volume!) failed: \(error)")
             }
         }
+    }
+
+    /// A disk volume's first mount makes its disk, with the image's files at the mount path
+    /// (owners, modes, and links kept, as on Docker) unless `nocopy`.
+    func copyUpDisk(_ m: Mount, rootfs: URL) throws {
+        guard let name = m.volume, !FileManager.default.fileExists(atPath: m.source) else { return }
+        guard !m.noCopy, let tree = try? RootfsTree.read(rootfs), tree[m.destination].map({ $0.mode & CopyUp.typeMask == CopyUp.dirType }) == true else {
+            return try volumes.formatDisk(name, content: nil)
+        }
+        let tar = FileManager.default.temporaryDirectory.appending(path: "pratico-copyup-\(UUID().uuidString).tar")
+        defer { try? FileManager.default.removeItem(at: tar) }
+        let under = tree.keys.filter { $0.hasPrefix(m.destination + "/") }.sorted()
+        let entries = [RootfsTree.Change(path: m.destination, kind: 1)] + under.map { RootfsTree.Change(path: $0, kind: 1) }
+        try CommitLayer.write(entries, from: rootfs, to: tar, maxBytes: Tar.unpackLimit(at: tar.deletingLastPathComponent()), root: m.destination)
+        try volumes.formatDisk(name, content: tar)
     }
 
     /// Volume name → IDs of the containers, running or not, that mount it.

@@ -66,7 +66,8 @@ extension ContainerService {
 /// The rootfs is the container's, so its file sizes are not trusted: a sparse file can
 /// claim exabytes, and every byte written counts against `maxBytes` (free disk).
 enum CommitLayer {
-    static func write(_ changes: [RootfsTree.Change], from rootfs: URL, to file: URL, maxBytes: Int64) throws {
+    /// `root` makes entry names relative to it (a volume's copy-up), `.` for itself.
+    static func write(_ changes: [RootfsTree.Change], from rootfs: URL, to file: URL, maxBytes: Int64, root: String = "/") throws {
         guard changes.count <= 2 * RootfsTree.maxEntries else {
             throw APIError(500, "pratico: more than \(2 * RootfsTree.maxEntries) changes to write")
         }
@@ -87,16 +88,23 @@ enum CommitLayer {
                 try w.writeHeader(entry: entry)
                 try w.finish()
             } else {
-                try add(change.path, reader, w, budget: &left)
+                try add(change.path, reader, w, budget: &left, name: Self.name(change.path, under: root))
             }
         }
         try writer.finishEncoding()
     }
 
-    private static func add(_ path: String, _ reader: EXT4.EXT4Reader, _ w: ArchiveWriterTransaction, budget left: inout Int64) throws {
+    /// A path's name in the archive: relative to `root`, which itself is `.`.
+    static func name(_ path: String, under root: String) -> String {
+        if root == "/" { return String(path.dropFirst()) }
+        precondition(path == root || path.hasPrefix(root + "/"), "\(path) is not under \(root)")
+        return path == root ? "." : String(path.dropFirst(root.count + 1))
+    }
+
+    private static func add(_ path: String, _ reader: EXT4.EXT4Reader, _ w: ArchiveWriterTransaction, budget left: inout Int64, name: String) throws {
         let (_, inode) = try reader.stat(FilePath(path), followSymlinks: false)
         let entry = WriteEntry()
-        entry.path = String(path.dropFirst())
+        entry.path = name
         entry.permissions = mode_t(inode.mode & 0o7777)
         entry.owner = uid_t(inode.uidHigh) << 16 | uid_t(inode.uid)
         entry.group = gid_t(inode.gidHigh) << 16 | gid_t(inode.gid)

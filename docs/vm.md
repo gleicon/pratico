@@ -49,10 +49,11 @@ Shims outlive the daemon. A daemon restart, upgrade, or crash reconnects to ever
 running shim; output goes to files the shim writes, and exit codes are kept in
 `exit.json`, so nothing is lost while the daemon is away.
 
-The root filesystem has no journal. A VM killed mid-run (a crash, power loss, `kill -9`)
-can leave it inconsistent, and the guest would then fail writes. pratico checks the
-ext4 superblock's clean flag before each start; when it is not set, it rebuilds the
-image from its own files first (the daemon log says so).
+Root filesystems and disk volumes are journaled ext4: a VM killed mid-run (a crash,
+power loss, `kill -9`) leaves a filesystem the guest kernel recovers by replaying its
+journal at the next start. Containers made before 0.2.8 have unjournaled root
+filesystems; pratico checks their clean flag before each start and, when it is not set,
+rebuilds the image from its own files first (the daemon log says so).
 
 ## Memory
 

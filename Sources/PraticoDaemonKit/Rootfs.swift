@@ -185,7 +185,7 @@ enum RootfsEdit {
         try EXT4.EXT4Reader(blockDevice: FilePath(rootfs.path)).export(archive: FilePath(export.path))
         let capacity = max((try? rootfs.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(UInt64.init) ?? 0, 8 << 30)
         try blocking {
-            let formatter = try EXT4.Formatter(FilePath(fresh.path), minDiskSize: capacity)
+            let formatter = try EXT4.Formatter(FilePath(fresh.path), minDiskSize: capacity, journal: EXT4.JournalConfig(defaultMode: .ordered))
             try await formatter.unpack(reader: try ArchiveReader(file: export))
             if let files { try await formatter.unpack(reader: try ArchiveReader(file: files)) }
             try formatter.close()

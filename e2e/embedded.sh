@@ -27,9 +27,9 @@ ok() { echo "ok   $1"; pass=$((pass + 1)); }
 bad() { echo "FAIL $1${2:+ — $2}"; fail=$((fail + 1)); }
 check() { local name="$1"; shift; if "$@" >/dev/null 2>&1; then ok "$name"; else bad "$name"; fi; }
 expect_has() { if grep -qF -- "$3" <<<"$2"; then ok "$1"; else bad "$1" "want [$3] in [$2]"; fi; }
-# A check on state that settles (a NIC coming up, ARP, a listener): retried for up to 5 s,
-# so it waits on the state, not on a guess at how long it takes.
-eventually() { local name="$1"; shift; for _ in $(seq 25); do "$@" >/dev/null 2>&1 && { ok "$name"; return; }; sleep 0.2; done; bad "$name"; }
+# A check on state that settles (a NIC coming up, ARP, a listener): retried for up to 15 s,
+# so it waits on the state, not on a guess at how long it takes (a loaded Mac is slower).
+eventually() { local name="$1"; shift; for _ in $(seq 75); do "$@" >/dev/null 2>&1 && { ok "$name"; return; }; sleep 0.2; done; bad "$name"; }
 expect_eq() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "want [$3] got [$2]"; fi; }
 
 start_daemon() {
@@ -200,7 +200,7 @@ expect_eq "20 MB download arrives intact" \
 (nc -l 127.0.0.1 18094 >"$HOME_DIR/up.bin" &)
 for _ in $(seq 50); do lsof -nP -iTCP:18094 -sTCP:LISTEN >/dev/null 2>&1 && break; sleep 0.1; done
 docker exec e-c1 sh -c 'nc host.docker.internal 18094 < /tmp/big.bin'
-for _ in $(seq 50); do [ "$(wc -c <"$HOME_DIR/up.bin" | tr -d ' ')" = 20000000 ] && break; sleep 0.1; done
+for _ in $(seq 300); do [ "$(wc -c <"$HOME_DIR/up.bin" | tr -d ' ')" = 20000000 ] && break; sleep 0.1; done
 expect_eq "20 MB upload arrives intact" "$(shasum -a 256 "$HOME_DIR/up.bin" | cut -d' ' -f1)" "$big_sum"
 kill "$WWW_PID" 2>/dev/null
 
@@ -535,7 +535,7 @@ check "AC-28 docker volume create" docker volume create e2e-v
 docker run --rm -v e2e-v:/v alpine sh -c 'echo shared >/v/f' >/dev/null
 expect_eq "AC-28 a second container reads what the first wrote" "$(docker run --rm --mount type=volume,src=e2e-v,dst=/w alpine cat /w/f 2>&1)" "shared"
 expect_has "docker volume ls lists it" "$(docker volume ls --format '{{.Name}} {{.Driver}}')" "e2e-v local"
-expect_eq "inspect gives its host directory" "$(docker volume inspect e2e-v --format '{{.Mountpoint}}')" "$HOME_DIR/volumes/e2e-v/_data"
+expect_eq "inspect gives its disk image" "$(docker volume inspect e2e-v --format '{{.Mountpoint}} {{.Options.type}}')" "$HOME_DIR/volumes/e2e-v/disk.ext4 disk"
 docker run -d --name e2e-vuser -v e2e-v:/v alpine sleep 300 >/dev/null
 expect_eq "inspect reports a volume mount" "$(docker inspect e2e-vuser --format '{{range .Mounts}}{{.Type}} {{.Name}} {{.Destination}}{{end}}')" "volume e2e-v /v"
 expect_has "a volume in use is not removed" "$(docker volume rm e2e-v 2>&1)" "volume is in use"
@@ -806,6 +806,33 @@ docker rm -f e-mine >/dev/null
 # the daemon socket, a source that already exists.
 check "an image whose arm64 entry has no variant pulls" docker pull -q testcontainers/ryuk:0.12.0
 expect_has "and runs with the daemon socket mounted" "$(docker run --rm -v "$SOCK:/var/run/docker.sock" testcontainers/ryuk:0.12.0 sh -c 'ls -l /var/run/docker.sock' 2>&1 || docker run --rm -v "$SOCK:/var/run/docker.sock" alpine ls -l /var/run/docker.sock)" "docker.sock"
+
+# D-49: volumes are ext4 disks, so database images that chown their data run, and a
+# disk serves one running container at a time; a share is a Mac folder many can mount.
+for img in redis:7-alpine postgres:17-alpine mysql:8.4; do docker pull -q "$img" >/dev/null; done
+docker run -d --name e-redis redis:7-alpine >/dev/null
+docker run -d --name e-pg -e POSTGRES_PASSWORD=x postgres:17-alpine >/dev/null
+docker run -d --name e-mysql -e MYSQL_ROOT_PASSWORD=x mysql:8.4 >/dev/null
+eventually "redis runs on its default volume" sh -c '[ "$(docker exec e-redis redis-cli ping 2>/dev/null)" = PONG ]'
+for _ in $(seq 60); do docker exec e-pg pg_isready -U postgres >/dev/null 2>&1 && break; sleep 0.5; done
+expect_eq "postgres runs and answers" "$(docker exec e-pg psql -U postgres -tAc 'select 1+1' 2>&1)" "2"
+for _ in $(seq 120); do docker exec e-mysql mysqladmin -uroot -px ping >/dev/null 2>&1 && break; sleep 0.5; done
+check "mysql runs and answers" docker exec e-mysql mysqladmin -uroot -px ping
+expect_eq "copy-up kept the image's owner on /data" "$(docker exec e-redis stat -c '%U' /data)" "redis"
+docker rm -f -v e-redis e-pg e-mysql >/dev/null
+docker volume create e-disk >/dev/null
+docker run -d --name e-d1 -v e-disk:/d alpine sh -c 'echo kept > /d/f; sync; sleep 300' >/dev/null
+sleep 1
+expect_has "a disk volume serves one running container" "$(docker run --rm -v e-disk:/d alpine true 2>&1)" "serves one container at a time"
+docker rm -f e-d1 >/dev/null
+expect_eq "and keeps its data for the next one" "$(docker run --rm -v e-disk:/d alpine cat /d/f)" "kept"
+check "a share volume" docker volume create --opt type=share e-share
+docker run -d --name e-s1 -v e-share:/s alpine sleep 300 >/dev/null
+expect_eq "is mounted by two running containers" "$(docker run --rm -v e-share:/s alpine sh -c 'echo both > /s/f; cat /s/f')" "both"
+expect_eq "and is a folder on the Mac" "$(cat "$HOME_DIR/volumes/e-share/_data/f")" "both"
+expect_has "unknown volume options are refused" "$(docker volume create --opt device=/dev/sda e-bad 2>&1)" "not supported"
+docker rm -f e-s1 >/dev/null
+docker volume rm e-disk e-share >/dev/null
 
 # Many containers stopping together on a fresh daemon (the uplink's first use comes from
 # several threads at once; a lazy var there crashed the daemon).

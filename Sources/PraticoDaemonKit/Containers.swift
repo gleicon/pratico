@@ -87,6 +87,8 @@ public final class ContainerService: @unchecked Sendable {
     private var reservedNames: Set<String> = []
     /// Containers between `start` and running: a second start waits its turn, not a second VM.
     private var starting: Set<String> = []
+    /// Disk volume → the running container whose VM it is attached to: one at a time (D-49).
+    private var diskHolders: [String: String] = [:]
     private var published: [String: [String: [(ip: String, port: String)]]] = [:]  // bound host ports
     /// Serializes network connect and disconnect, which read, check, and write a
     /// container's endpoints and NIC slots.
@@ -138,6 +140,8 @@ public final class ContainerService: @unchecked Sendable {
                     if let ports = try? networks.publish(rec, spec.nics) { published[id] = ports }
                 }
                 if ShimClient.read(files.state)?["status"]?.string == "paused" { pausedVMs.insert(id) }
+                // Its disks stay attached to its VM across the daemon's restart.
+                for m in (try? mounts(rec.hostConfig)) ?? [] where m.disk { diskHolders[m.volume!] = id }
                 log.tailExternalWriter()
                 track(id, pid: pid, log: log, shim: embedded.shim)
                 health.started(rec)
@@ -371,7 +375,12 @@ public final class ContainerService: @unchecked Sendable {
     /// through the log file the shim writes.
     private func launch(_ rec: ContainerRecord) throws {
         let files = ShimFiles(dir: dir(rec.id))
-        let (nics, options) = try writeSpec(rec, files)
+        try claimDisks(rec)
+        let (nics, options): (NICSlots, RunOptions)
+        do { (nics, options) = try writeSpec(rec, files) } catch {
+            releaseDisks(rec.id)
+            throw error
+        }
         lock.lock()
         let log = LogStore(path: files.log, maxBytes: options.logBytes)
         logs[rec.id] = log
@@ -383,6 +392,7 @@ public final class ContainerService: @unchecked Sendable {
         defer { trace.mark("start returned") }
         do { pid = try embedded.shim.spawn(files) } catch {
             networks.stopped(rec.id)
+            releaseDisks(rec.id)
             throw error
         }
         trace.mark("shim reported created")
@@ -504,6 +514,7 @@ public final class ContainerService: @unchecked Sendable {
         lock.unlock()
 
         log?.finish()
+        releaseDisks(id)
         health.stopped(id)
         networks.unpublish(id)
         networks.stopped(id)
@@ -858,6 +869,27 @@ public final class ContainerService: @unchecked Sendable {
 
     /// Everything the container's log holds.
     func logLines(_ id: String) -> [LogLine] { lock.withLock { logs[id] }?.read() ?? [] }
+
+    /// Attaches the container's disk volumes to it, made if missing: a disk is one ext4
+    /// filesystem and two kernels writing it would corrupt it, so a second running
+    /// container is refused; a share (`--opt type=share`) can be mounted by many.
+    private func claimDisks(_ rec: ContainerRecord) throws {
+        let disks = try mounts(rec.hostConfig).filter(\.disk)
+        for m in disks where !FileManager.default.fileExists(atPath: m.source) { try volumes.formatDisk(m.volume!, content: nil) }
+        try lock.withLock {
+            for m in disks {
+                if let holder = diskHolders[m.volume!], holder != rec.id, records[holder]?.state.running == true || starting.contains(holder) {
+                    let name = records[holder]?.name ?? holder
+                    throw APIError(409, "volume \(m.volume!) is a disk attached to running container \(name); a disk volume serves one container at a time. Stop \(name), or create the volume with --opt type=share to share it")
+                }
+            }
+            for m in disks { diskHolders[m.volume!] = rec.id }
+        }
+    }
+
+    private func releaseDisks(_ id: String) {
+        lock.withLock { diskHolders = diskHolders.filter { $0.value != id } }
+    }
 
     /// Host ports bound for the container's published ports while it runs.
     func boundPorts(_ id: String) -> [String: [(ip: String, port: String)]]? {

@@ -18,31 +18,48 @@ The VM mounts the image as a block device. Writes go to that container's clone o
 `docker rm` deletes it. Deleting an image deletes its cached copy, and the daemon sweeps
 copies of images removed while it was down.
 
-## Volumes and bind mounts
+## Volumes
 
-A volume is a directory, `~/.pratico/volumes/<name>/_data`, shared into each VM that
-mounts it over virtiofs, as a bind mount is. Two containers mounting one volume see the
-same files, live.
+A volume is a journaled ext4 disk image, `~/.pratico/volumes/<name>/disk.ext4`, attached
+to the VM of the container that mounts it. Inside, it is a Linux filesystem: owners,
+modes, and `fsync` behave as on Linux, so database images that `chown` their data
+directory (postgres, mysql, redis, mongo) run on their default volumes, and writes go at
+disk speed. The image is sparse: a volume holds up to `volume_size` (64 GiB) and takes
+only what is written; `--opt size=200g` sets another capacity.
 
+- **One running container at a time.** A disk is one filesystem, and two kernels writing
+  it would corrupt it, so a second running container that mounts it is refused with a
+  message saying which container holds it. Stop that one, or use a share.
+- **Shares.** `docker volume create --opt type=share NAME` makes a folder,
+  `~/.pratico/volumes/<name>/_data`, shared over virtiofs: several running containers
+  can mount it at once and the Mac sees its files, but its files are owned by the Mac
+  user, so an image that `chown`s its data cannot use it. Volumes made before 0.2.8 are
+  shares.
 - `-v name:/path` and `--mount type=volume` create a missing named volume. A bare
   `-v /path`, and each image `VOLUME` no other mount covers, get an anonymous volume.
-- Copy-up: a volume still empty when a container first mounts it gets the image's files
-  at that path (directories, regular files, symlinks, permission bits), read from the
-  rootfs on the Mac before the VM boots. `nocopy` skips it.
+- Copy-up: a new volume's first mount gets the image's files at that path, with their
+  owners, modes, and links, read from the rootfs on the Mac before the VM boots. A
+  disk's root takes the mount point's owner and mode. `nocopy` skips it.
 - `docker rm -v` and `--rm` remove a container's anonymous volumes unless another
   container mounts them. Named volumes stay. A volume any container mounts, running or
   not, is never removed.
 - `volume prune` removes unused anonymous volumes; `-a` adds named ones.
-- Only the `local` driver, without options.
+- The `local` driver, with `type` (`disk` or `share`) and `size`; Docker's `device` and
+  `o` options name host devices and mount options a VM does not have, and are refused.
+- Volumes, both kinds, are in Time Machine backups; the image store and containers are
+  not.
+
+## Bind mounts, tmpfs, sockets
+
+- `-v /Mac/path:/path` shares a Mac folder over virtiofs. Its files are owned by the Mac
+  user: an image that `chown`s a bind-mounted directory fails there, as with a share.
+  Keep database data in a volume.
 - `--tmpfs` mounts live in the VM's memory, with Docker's default options; `size=` is
   enforced.
 - Host Unix sockets, `/var/run/docker.sock` included, are relayed into the VM over
   vsock, so a container can drive pratico through the mounted socket.
 
 `--read-only` mounts the root filesystem read-only; `--shm-size` sizes `/dev/shm`.
-
-Files on volumes and bind mounts are owned by the Mac user. An image that `chown`s its
-data to another uid sees the volume's owner instead.
 
 ## Copying files
 

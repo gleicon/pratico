@@ -55,13 +55,16 @@ struct ShimMount: Codable, Sendable, Equatable {
     var socket = false
     /// A tmpfs in the guest's memory, with these mount options; nothing on the Mac.
     var tmpfs: [String]? = nil
+    /// An ext4 disk image attached as a block device (a disk volume, D-49).
+    var block: Bool? = nil
 
-    init(source: String, destination: String, readOnly: Bool, socket: Bool = false, tmpfs: [String]? = nil) {
+    init(source: String, destination: String, readOnly: Bool, socket: Bool = false, tmpfs: [String]? = nil, block: Bool = false) {
         self.source = source
         self.destination = destination
         self.readOnly = readOnly
         self.socket = socket
         self.tmpfs = tmpfs
+        self.block = block ? true : nil
     }
 
     /// Specs written before socket mounts have no `socket`.
@@ -72,6 +75,7 @@ struct ShimMount: Codable, Sendable, Equatable {
         readOnly = try c.decode(Bool.self, forKey: .readOnly)
         socket = try c.decodeIfPresent(Bool.self, forKey: .socket) ?? false
         tmpfs = try c.decodeIfPresent([String].self, forKey: .tmpfs)
+        block = try c.decodeIfPresent(Bool.self, forKey: .block)
     }
 }
 
@@ -237,6 +241,8 @@ public enum ShimHost {
                 config.sockets.append(UnixSocketConfiguration(source: URL(filePath: m.source), destination: URL(filePath: m.destination), direction: .into))
             } else if let options = m.tmpfs {
                 config.mounts.append(.any(type: "tmpfs", source: "tmpfs", destination: m.destination, options: options))
+            } else if m.block == true {
+                config.mounts.append(.block(format: "ext4", source: m.source, destination: m.destination, options: m.readOnly ? ["ro"] : []))
             } else {
                 config.mounts.append(.share(source: m.source, destination: m.destination, options: m.readOnly ? ["ro"] : []))
             }

@@ -80,7 +80,8 @@ vminitd ───────── guest agent: process, exec, cp, stats, healt
   bearer token): agents check images before using them, run commands in throwaway VMs,
   and start services, and can change only the containers they made.
 - **[Storage](docs/storage.md).** Images unpacked once into ext4 and cloned per
-  container (APFS), so `create` takes milliseconds for any image. Volumes and bind
+  container (APFS), so `create` takes milliseconds for any image. Volumes are journaled
+  ext4 disks, so postgres, mysql, redis, and mongo run on their default volumes; bind
   mounts over virtiofs; `docker cp` on stopped containers; snapshots of definitions.
 
 Design notes: [docs/design/runtime.md](docs/design/runtime.md).
@@ -109,8 +110,8 @@ Limits:
 - Images without an arm64 variant do not run ([CPU](docs/cpu.md)).
 - IPv4 only; a container sees one interface, `eth0`, for all its networks
   ([networking](docs/network.md#limits)).
-- Files on volumes and bind mounts are owned by the Mac user
-  ([storage](docs/storage.md#volumes-and-bind-mounts)).
+- A disk volume serves one running container at a time; files on bind mounts and share
+  volumes are owned by the Mac user ([storage](docs/storage.md#volumes)).
 - Host devices, host namespaces, blkio limits, and seccomp or AppArmor profiles are
   refused ([run options](docs/run-options.md#refused)).
 
@@ -192,6 +193,7 @@ keeps comments. Unknown keys stop the daemon with the key and line named.
 | `registry_http` | `[]` | other registries allowed plain HTTP (`host`, `host:port`, IPv4 CIDR) |
 | `registry_ca` | `[]` | PEM files added to the trusted roots |
 | `registry_system_roots` | `true` | `false` trusts only `registry_ca` |
+| `volume_size` | `64` | GiB a new disk volume can hold (sparse) |
 | `mcp` | `false` | serve MCP for agents on 127.0.0.1 ([agents](docs/agents.md)) |
 | `mcp_port` | `7728` | its port |
 | `registry_keep_logins` | `true` | keep `docker login` credentials in the Keychain for clients that send none |
@@ -216,6 +218,7 @@ make install         # copy to /Applications
 make test            # unit tests
 make e2e             # Docker API against a throwaway daemon, real docker CLI
 make e2e-embedded    # runtime: shims, guest agent, pratico-net, volumes, snapshots
+make e2e-tools       # real tools: Testcontainers (Go), Compose with postgres (needs Go)
 make bench           # AC-44..49: latency, memory, connection limits, CLI versions
 ```
 

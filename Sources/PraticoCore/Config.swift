@@ -38,6 +38,8 @@ public struct Config: Equatable, Sendable {
         Key(name: "start_at_login", defaultValue: .bool(true), summary: "Start the daemon at login"),
         Key(name: "default_cpus", defaultValue: .int(4), summary: "CPUs per container when Docker sets no limit", range: 1...64),
         Key(name: "default_memory", defaultValue: .int(1024), summary: "Memory per container in MiB when Docker sets no limit", range: 64...1_048_576),
+        Key(name: "volume_size", defaultValue: .int(64),
+            summary: "GiB a new disk volume can hold (sparse: only what is written takes space)", range: 1...4096),
         Key(name: "scan", defaultValue: .bool(true), summary: "Scan pulled images for vulnerabilities and malware"),
         Key(name: "scan_block", defaultValue: .string("kev"),
             summary: "Findings that stop and block an image's containers: off, malware, kev (malware + exploited CVEs), critical (kev + CVSS >= 9)",
@@ -70,6 +72,7 @@ public struct Config: Equatable, Sendable {
     }
 
     public var startAtLogin: Bool { if case .bool(let v) = value("start_at_login") { v } else { true } }
+    public var volumeSizeGiB: Int { if case .int(let v) = value("volume_size") { v } else { 64 } }
     public var mcp: Bool { if case .bool(let v) = value("mcp") { v } else { false } }
     public var mcpPort: Int { if case .int(let v) = value("mcp_port") { v } else { 7728 } }
     public var defaultCPUs: Int { if case .int(let v) = value("default_cpus") { v } else { 4 } }

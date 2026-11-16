@@ -770,3 +770,10 @@ private func emptyDir() throws -> URL {
     #expect(throws: APIError.self) { try MCPTools.portBindings(["80/sctp"]) }
     #expect(throws: APIError.self) { try MCPTools.portBindings(["x:80"]) }
 }
+
+@Test func shimMountsRoundTripEveryField() throws {
+    let all = [ShimMount(source: "/v/disk.ext4", destination: "/data", readOnly: false, block: true),
+               ShimMount(source: "tmpfs", destination: "/t", readOnly: false, tmpfs: ["size=1m"]),
+               ShimMount(source: "/s.sock", destination: "/s", readOnly: true, socket: true)]
+    #expect(try JSONDecoder().decode([ShimMount].self, from: JSONEncoder().encode(all)) == all)
+}

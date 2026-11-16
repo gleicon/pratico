@@ -56,7 +56,8 @@ public final class Daemon: @unchecked Sendable {
         let backend = EmbeddedImageBackend(store: store, content: content, registries: registries)
         self.images = ImageService(backend: backend, events: events)
         self.networks = NetworkService(root: home.appending(path: "networks", directoryHint: .isDirectory), events: events)
-        self.volumes = VolumeService(root: home.appending(path: "volumes", directoryHint: .isDirectory), events: events)
+        self.volumes = VolumeService(root: home.appending(path: "volumes", directoryHint: .isDirectory), events: events,
+                                     defaultSizeBytes: Int64(config.volumeSizeGiB) << 30)
         self.containers = ContainerService(
             images: images, root: home.appending(path: "containers", directoryHint: .isDirectory),
             networks: networks, volumes: volumes, config: config, events: events, embedded: embedded, dockerSocket: self.socketPath)

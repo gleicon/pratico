@@ -1,0 +1,16 @@
+# A web app's usual local stack: postgres on a named volume, reached by name.
+services:
+  db:
+    image: postgres:17-alpine
+    environment: { POSTGRES_USER: app, POSTGRES_PASSWORD: app }
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "app"]
+      interval: 1s
+      retries: 60
+  app:
+    image: postgres:17-alpine
+    command: ["sleep", "600"]
+    depends_on: { db: { condition: service_healthy } }
+volumes:
+  pgdata: {}
