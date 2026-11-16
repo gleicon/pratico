@@ -317,6 +317,8 @@ public final class HTTPServer: @unchecked Sendable {
     public typealias Handler = @Sendable (Request, Connection) -> Disposition
 
     let path: String
+    /// Set for a server on 127.0.0.1 (the MCP endpoint, D-48) instead of a Unix socket.
+    let loopbackPort: UInt16?
     let handler: Handler
     /// Routes whose request bodies are streamed to a file (see `Request.bodyFile`).
     let spool: @Sendable (String, String) -> Bool
@@ -325,12 +327,57 @@ public final class HTTPServer: @unchecked Sendable {
 
     public init(path: String, spool: @escaping @Sendable (String, String) -> Bool = { _, _ in false }, handler: @escaping Handler) {
         self.path = path
+        self.loopbackPort = nil
         self.spool = spool
+        self.handler = handler
+    }
+
+    /// A server on 127.0.0.1:`port` only, never another interface.
+    public init(loopbackPort port: UInt16, handler: @escaping Handler) {
+        precondition(port > 0, "port 0 is not a fixed endpoint")
+        self.path = ""
+        self.loopbackPort = port
+        self.spool = { _, _ in false }
         self.handler = handler
     }
 
     public func start() throws {
         signal(SIGPIPE, SIG_IGN)
+        if let port = loopbackPort {
+            listenFD = try Self.listenLoopback(port)
+        } else {
+            listenFD = try listenUnix()
+        }
+        let thread = Thread { [self] in acceptLoop() }
+        thread.name = "pratico.accept"
+        thread.start()
+    }
+
+    private static func listenLoopback(_ port: UInt16) throws -> Int32 {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { throw DaemonError.system("socket", errno) }
+        var on: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, socklen_t(MemoryLayout<Int32>.size))
+        var addr = sockaddr_in()
+        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = port.bigEndian
+        addr.sin_addr.s_addr = UInt32(0x7F00_0001).bigEndian  // 127.0.0.1
+        let rc = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+        }
+        guard rc == 0 else {
+            close(fd)
+            throw DaemonError.system("bind 127.0.0.1:\(port)", errno)
+        }
+        guard listen(fd, 64) == 0 else {
+            close(fd)
+            throw DaemonError.system("listen", errno)
+        }
+        return fd
+    }
+
+    private func listenUnix() throws -> Int32 {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw DaemonError.system("socket", errno) }
 
@@ -358,11 +405,7 @@ public final class HTTPServer: @unchecked Sendable {
         guard rc == 0 else { throw DaemonError.system("bind \(path)", errno) }
         chmod(path, 0o600)  // NFR-9
         guard listen(fd, 128) == 0 else { throw DaemonError.system("listen", errno) }
-        listenFD = fd
-
-        let thread = Thread { [self] in acceptLoop() }
-        thread.name = "pratico.accept"
-        thread.start()
+        return fd
     }
 
     public func stop() {
@@ -370,7 +413,7 @@ public final class HTTPServer: @unchecked Sendable {
             Darwin.close(listenFD)
             listenFD = -1
         }
-        unlink(path)
+        if loopbackPort == nil { unlink(path) }
     }
 
     private func acceptLoop() {

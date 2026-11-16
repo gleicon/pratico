@@ -761,3 +761,12 @@ private func emptyDir() throws -> URL {
     #expect(c["StopSignal"]?.string == "SIGQUIT" && c["OnBuild"]?.strings == ["RUN make"])
     #expect(throws: APIError.self) { try Dockerfile.apply(["RUN make"], to: [:]) }
 }
+
+@Test func mcpTokensCompareWholeAndPortsParse() throws {
+    #expect(MCPServer.same("abc", "abc") && !MCPServer.same("abc", "abd") && !MCPServer.same("abc", "abcd"))
+    let (b, exposed) = try MCPTools.portBindings(["8080:80", "127.0.0.1:5432:5432/tcp", "53/udp"])
+    #expect(Set(exposed) == ["80/tcp", "5432/tcp", "53/udp"])
+    #expect(b["80/tcp"]?.array?[0]["HostPort"]?.string == "8080" && b["5432/tcp"]?.array?[0]["HostIp"]?.string == "127.0.0.1")
+    #expect(throws: APIError.self) { try MCPTools.portBindings(["80/sctp"]) }
+    #expect(throws: APIError.self) { try MCPTools.portBindings(["x:80"]) }
+}

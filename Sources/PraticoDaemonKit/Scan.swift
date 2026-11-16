@@ -330,18 +330,25 @@ final class ScanService: @unchecked Sendable {
         let enc = JSONEncoder()
         enc.dateEncodingStrategy = .iso8601
         return .array(images.localImages().map { img in
-            var out: [String: JSON] = ["Id": .string(img.id), "Name": .string(img.displayName), "Tags": JSON(img.tags), "Scanning": .bool(scanning.contains(img.id))]
-            if let r = report(img.id), let data = try? enc.encode(r), let json = JSON.parse(data) {
-                let (verdict, reasons) = ScanVerdict.judge(r.findings, ran: r.scanners.contains(where: \.ran), block: config.scanBlock)
-                out["Report"] = json
-                out["Verdict"] = .string(verdict.rawValue)
-                out["Reasons"] = JSON(reasons)
-                out["Blocked"] = .bool(blockReason(imageId: img.id) != nil)
-                out["Allowed"] = .bool(isAllowed(img.id))
-                out["SBOM"] = .bool(FileManager.default.fileExists(atPath: sbomFile(img.id, .spdx).path))
-            }
+            var out = verdict(img, scanning: scanning.contains(img.id))
+            if let r = report(img.id), let data = try? enc.encode(r), let json = JSON.parse(data) { out["Report"] = json }
             return .object(out)
         })
+    }
+
+    func isScanning(_ imageId: String) -> Bool { lock.withLock { pending.contains(imageId) } }
+
+    /// One image's verdict under `scan_block`, without its findings.
+    func verdict(_ img: LocalImage, scanning: Bool) -> [String: JSON] {
+        var out: [String: JSON] = ["Id": .string(img.id), "Name": .string(img.displayName), "Tags": JSON(img.tags), "Scanning": .bool(scanning)]
+        guard let r = report(img.id) else { return out }
+        let (verdict, reasons) = ScanVerdict.judge(r.findings, ran: r.scanners.contains(where: \.ran), block: config.scanBlock)
+        out["Verdict"] = .string(verdict.rawValue)
+        out["Reasons"] = JSON(reasons)
+        out["Blocked"] = .bool(blockReason(imageId: img.id) != nil)
+        out["Allowed"] = .bool(isAllowed(img.id))
+        out["SBOM"] = .bool(FileManager.default.fileExists(atPath: sbomFile(img.id, .spdx).path))
+        return out
     }
 
     func enqueue(_ nameOrId: String) {

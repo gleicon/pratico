@@ -30,6 +30,8 @@ public final class Daemon: @unchecked Sendable {
     let registries: Registries
     let startedAt = Date()
     private var server: HTTPServer?
+    /// The MCP endpoint for agents, when `mcp` is on (D-48).
+    private var mcp: MCPServer?
 
     /// Throws `ConfigError` for unreadable `registry_ca` files and impossible trust
     /// settings: the daemon refuses to start (exit 4) rather than trust less, or more, than
@@ -96,9 +98,24 @@ public final class Daemon: @unchecked Sendable {
         // Restart policies: what `always` and `unless-stopped` keep up comes back, VMs
         // booting in the background while the API already answers.
         Thread.detachNewThread { [containers] in containers.restarts.daemonStarted() }
+        if containers.config.mcp { try startMCP() }
     }
 
-    public func stop() { server?.stop() }
+    /// A port already taken stops the daemon with the reason, as an unreadable CA does:
+    /// `mcp = true` must mean the endpoint is there.
+    private func startMCP() throws {
+        let token = try MCPServer.token(home: home)
+        let tools = MCPTools(containers: containers, images: images, scans: scans)
+        let m = MCPServer(port: UInt16(containers.config.mcpPort), token: token, tools: tools)
+        try m.start()
+        mcp = m
+        Pratico.log("pratico-daemon: MCP on http://127.0.0.1:\(m.port)/mcp (token in \(home.appending(path: "mcp-token").path))")
+    }
+
+    public func stop() {
+        server?.stop()
+        mcp?.stop()
+    }
 
     // MARK: Routing
 

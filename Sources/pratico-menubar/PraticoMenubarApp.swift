@@ -63,6 +63,7 @@ struct StatusMenu: View {
         }
         // ~/.pratico/docker.sock is the default; this path needs root, which pratico never asks for.
         Button("Use with docker…") { daemon.showDockerSetup() }
+        Button("Use with agents (MCP)…") { daemon.showAgentSetup() }
         Button("Use \(DefaultSocket.path)…") { daemon.showDefaultSocketHelp() }
         // D-24: one line however many images; the details are in the Scan Results window.
         if daemon.isRunning {

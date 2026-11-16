@@ -76,6 +76,9 @@ vminitd ───────── guest agent: process, exec, cp, stats, healt
 - **[Run options](docs/run-options.md).** Every `docker run` option pratico accepts is
   applied (cgroup limits, capabilities, restart policies, `--init`, `--read-only`, …);
   one a VM cannot honor, such as `--device` or `--pid host`, is refused with an error.
+- **[Agents](docs/agents.md).** An MCP endpoint on 127.0.0.1 (off until `mcp = true`,
+  bearer token): agents check images before using them, run commands in throwaway VMs,
+  and start services, and can change only the containers they made.
 - **[Storage](docs/storage.md).** Images unpacked once into ext4 and cloned per
   container (APFS), so `create` takes milliseconds for any image. Volumes and bind
   mounts over virtiofs; `docker cp` on stopped containers; snapshots of definitions.
@@ -189,6 +192,8 @@ keeps comments. Unknown keys stop the daemon with the key and line named.
 | `registry_http` | `[]` | other registries allowed plain HTTP (`host`, `host:port`, IPv4 CIDR) |
 | `registry_ca` | `[]` | PEM files added to the trusted roots |
 | `registry_system_roots` | `true` | `false` trusts only `registry_ca` |
+| `mcp` | `false` | serve MCP for agents on 127.0.0.1 ([agents](docs/agents.md)) |
+| `mcp_port` | `7728` | its port |
 | `registry_keep_logins` | `true` | keep `docker login` credentials in the Keychain for clients that send none |
 
 ## Files

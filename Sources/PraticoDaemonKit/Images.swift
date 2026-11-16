@@ -326,6 +326,19 @@ public final class ImageService: Sendable {
         emit(["status": .string("Status: \(status)")])
     }
 
+    /// The image, pulled first when it is not here (no client to report progress to).
+    func ensure(_ ref: String) throws -> LocalImage {
+        if let img = resolve(ref)?.image { return img }
+        let full = ImageRef.normalize(ref)
+        do { try backend.pull(full, platform: nil, auth: nil, progress: { _ in }) } catch {
+            throw APIError(404, "pull access denied or manifest unknown for \(ImageRef.familiar(full)): \(error)")
+        }
+        let familiar = ImageRef.familiar(full)
+        events.emit("image", "pull", id: familiar, attributes: ["name": String(familiar.split(separator: ":").first ?? "")])
+        guard let img = resolve(full)?.image else { throw APIError(500, "\(familiar) was pulled but is not in the store") }
+        return img
+    }
+
     /// `POST /images/{name}/push` (SPEC FR-22), ending with the `aux` digest record the
     /// Docker CLI prints.
     func push(_ ref: String, auth: RegistryAuth?, conn: Connection) throws {

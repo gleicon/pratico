@@ -204,7 +204,9 @@ public final class ContainerService: @unchecked Sendable {
         // which the Docker CLI sends as `Volumes`, not in `Binds`.
         let wanted = [imageConfig["Volumes"], body["Volumes"]].flatMap { $0?.object.map { Array($0.keys) } ?? [] }
         let host = try namingVolumes(asked, imageVolumes: Array(Set(wanted)))
-        try makeRootfs(id, host: host, imageRef: imageRef)
+        // Unpacked by a name the store has: the request may name the image by ID.
+        guard let stored = images.resolve(imageRef)?.image.refs.first else { throw APIError(404, "No such image: \(imageRef)") }
+        try makeRootfs(id, host: host, imageRef: stored)
 
         let rec = ContainerRecord(
             id: id, name: name, appleId: String(id.prefix(12)), image: imageRef, imageId: ImageService.id(img),
@@ -285,7 +287,7 @@ public final class ContainerService: @unchecked Sendable {
         let rootfs = dir(id).appending(path: "rootfs.ext4")
         do {
             try FileManager.default.createDirectory(at: dir(id), withIntermediateDirectories: true)
-            try embedded.prepareRootfs(image: ImageRef.normalize(imageRef), at: rootfs)
+            try embedded.prepareRootfs(image: imageRef, at: rootfs)
         } catch {
             try? FileManager.default.removeItem(at: dir(id))
             throw APIError(500, "container create failed: \(error)")
@@ -846,8 +848,38 @@ public final class ContainerService: @unchecked Sendable {
         return try body(rec, files.dir.appending(path: "rootfs.ext4"))
     }
 
+    /// The container's next exit, watched from now: registered before a start, so a process
+    /// that exits at once is not missed.
+    func watchNextExit(_ id: String) -> ExitWatch {
+        let w = ExitWatch()
+        lock.withLock { exitWaiters[id, default: []].append { w.exited($0) } }
+        return w
+    }
+
+    /// Everything the container's log holds.
+    func logLines(_ id: String) -> [LogLine] { lock.withLock { logs[id] }?.read() ?? [] }
+
     /// Host ports bound for the container's published ports while it runs.
     func boundPorts(_ id: String) -> [String: [(ip: String, port: String)]]? {
         lock.withLock { published[id] }
+    }
+}
+
+/// One exit, waited for with a bound.
+final class ExitWatch: @unchecked Sendable {
+    private let done = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private var code: Int?
+
+    fileprivate func exited(_ code: Int) {
+        lock.withLock { self.code = code }
+        done.signal()
+    }
+
+    /// The exit code, or nil if it did not exit within `seconds`.
+    func wait(seconds: Double) -> Int? {
+        precondition(seconds > 0 && seconds <= 3600, "exit wait out of bounds")
+        guard done.wait(timeout: .now() + seconds) == .success else { return nil }
+        return lock.withLock { code }
     }
 }

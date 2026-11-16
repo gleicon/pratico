@@ -776,6 +776,32 @@ check "a container whose VM was killed starts again" docker start e-crash
 expect_eq "and keeps its files (its rootfs is repaired)" "$(docker exec e-crash sh -c 'cat /data; echo w > /new; cat /new' | tr '\n' ' ')" "kept w "
 docker rm -f e-rf e-ra e-rus e-crash >/dev/null
 
+# MCP for agents (D-48): 127.0.0.1 only, a token, nothing a browser can forge.
+stop_daemon
+printf 'mcp = true\nmcp_port = 17729\n' >> "$HOME_DIR/config.toml"
+start_daemon
+for _ in $(seq 50); do [ -f "$HOME_DIR/mcp-token" ] && break; sleep 0.1; done
+TOKEN=$(cat "$HOME_DIR/mcp-token")
+MCP="python3 -I $(dirname "$0")/mcp.py 17729 $TOKEN"
+expect_eq "the token is readable by the user only" "$(stat -f %Lp "$HOME_DIR/mcp-token")" "600"
+code() { curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:17729/mcp "$@" -d '{"jsonrpc":"2.0","id":1,"method":"ping"}'; }
+expect_eq "no token, no answer" "$(code)" "401"
+expect_eq "another Host is refused (DNS rebinding)" "$(code -H 'Host: attacker.example' -H "Authorization: Bearer $TOKEN")" "403"
+expect_eq "a web page's Origin is refused" "$(code -H 'Origin: https://attacker.example' -H "Authorization: Bearer $TOKEN")" "403"
+expect_eq "with the token it answers" "$(code -H "Authorization: Bearer $TOKEN")" "200"
+expect_eq "it listens on loopback only" "$(lsof -nP -iTCP:17729 -sTCP:LISTEN | awk 'NR > 1 {print $9}' | sort -u)" "127.0.0.1:17729"
+expect_eq "run: exit code and both streams" "$($MCP run '{"image":"alpine","command":["sh","-c","echo out; echo err >&2; exit 3"]}' | python3 -c 'import json,sys; r=json.load(sys.stdin); print(r["exit_code"], r["stdout"].strip(), r["stderr"].strip())')" "3 out err"
+expect_eq "with no network unless asked" "$($MCP run '{"image":"alpine","command":["sh","-c","ip -o link | grep -c eth || true"]}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["stdout"].strip())')" "0"
+expect_eq "a timeout kills it" "$($MCP run '{"image":"alpine","command":["sleep","60"],"timeout_seconds":2}' | python3 -c 'import json,sys; r=json.load(sys.stdin); print(r["timed_out"])')" "True"
+expect_eq "and nothing is left behind" "$(docker ps -aq --filter label=dev.pratico.mcp | wc -l | tr -d ' ')" "0"
+expect_has "image_check reports a verdict" "$($MCP image_check '{"image":"alpine","wait_seconds":5}')" '"Verdict"'
+$MCP start '{"image":"alpine","command":["sleep","300"],"name":"e-agent"}' >/dev/null
+expect_eq "start, then exec in it" "$($MCP exec '{"container":"e-agent","command":["echo","inside"]}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["output"].strip())')" "inside"
+docker run -d --name e-mine alpine sleep 300 >/dev/null
+expect_has "an agent cannot stop the user's container" "$($MCP stop '{"container":"e-mine"}')" "ERROR"
+expect_eq "but can remove its own" "$($MCP remove '{"container":"e-agent"}' | grep -c removed)" "1"
+docker rm -f e-mine >/dev/null
+
 # Many containers stopping together on a fresh daemon (the uplink's first use comes from
 # several threads at once; a lazy var there crashed the daemon).
 stop_daemon

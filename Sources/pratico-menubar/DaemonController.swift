@@ -249,6 +249,45 @@ final class DaemonController {
                 """)
     }
 
+    /// Agents through MCP (D-48): how to turn it on, or the command that adds pratico to
+    /// Claude Code, with this Mac's token.
+    func showAgentSetup() {
+        let home = Pratico.home()
+        let config = (try? Config.load(home: home)) ?? Config()
+        let token = (try? String(contentsOf: home.appending(path: "mcp-token"), encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard config.mcp, let token, !token.isEmpty else {
+            showCommands(
+                title: "Use Pratico with agents",
+                text: """
+                    Pratico can serve agents over MCP on 127.0.0.1: they check images before using them, \
+                    run commands in throwaway VMs, and start services, and can change only the containers \
+                    they made. Turn on mcp in Settings…, restart the daemon, then come back here for the \
+                    command that adds it to your agent.
+                    """,
+                commands: """
+                    # or in ~/.pratico/config.toml:
+                    mcp = true
+                    """)
+            return
+        }
+        let url = "http://127.0.0.1:\(config.mcpPort)/mcp"
+        showCommands(
+            title: "Use Pratico with agents",
+            text: """
+                MCP is on at \(url). The token below lets whoever holds it run containers on this \
+                Mac, as the Docker socket does; it is kept in ~/.pratico/mcp-token, readable only by you.
+                """,
+            commands: """
+                # Claude Code:
+                claude mcp add --transport http pratico \(url) --header "Authorization: Bearer \(token)"
+
+                # Any other MCP client (Streamable HTTP):
+                URL:    \(url)
+                Header: Authorization: Bearer \(token)
+                """)
+    }
+
     /// Help for `/var/run/docker.sock`: why it needs root, and the commands to run.
     func showDefaultSocketHelp() {
         showCommands(
