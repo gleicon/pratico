@@ -821,3 +821,21 @@ private func emptyDir() throws -> URL {
     #expect(http("GET / HTTP/1.1\r\nAccept: */*\r\n\r\n") == .unnamed)
     #expect(FirstBytes.inspect([0x16, 0x02, 0, 0, 1, 0]) == .unnamed)  // TLS-looking, wrong version
 }
+
+@Test func httpHeadsNameOrAreUnnamed() {
+    func http(_ s: String) -> FirstBytes.Result { FirstBytes.inspect(Array(s.utf8)) }
+    #expect(FirstBytes.inspect(Array(("GET / HTTP/1.1\r\nX: " + String(repeating: "a", count: 9000)).utf8)) == .unnamed)
+    #expect(http("GET http:/// HTTP/1.1\r\n\r\n") == .unnamed)
+    #expect(http("GET evil.example HTTP/1.1\r\nHost: a.example\r\n\r\n") == .unnamed)
+    #expect(http("CONNECT evil.example:443 HTTP/1.1\r\nHost: evil.example:443\r\n\r\n") == .name("evil.example"))
+    let later = FirstBytes.requestHosts(Array("GET / HTTP/1.1\r\nHost: a.example\r\n\r\nGET http://b.example/ HTTP/1.1\r\nhost: C.example:80\r\n\r\n".utf8))
+    #expect(later == ["a.example", "b.example", "c.example"])
+}
+
+@Test func hostsHideNowhere() {
+    #expect(FirstBytes.requestHosts(Array("GET / HTTP/1.1\nHost: evil.example\n\n".utf8)) == ["evil.example"])
+    #expect(FirstBytes.requestHosts(Array("GET / HTTP/1.1\r\nHost : evil.example\r\n\r\n".utf8)) == ["evil.example"])
+    #expect(FirstBytes.requestHosts(Array("GET / HTTP/1.1\r\nHost: a.example\r\n evil.example\r\n\r\n".utf8)) == ["a.example", ""])
+    #expect(FirstBytes.inspect(Array("GET / HTTP/1.1\r\nHost: a.example\r\n evil\r\n\r\n".utf8)) == .unnamed)
+    #expect(FirstBytes.inspect(Array("GET / HTTP/1.1\r\nHost: a.example\nHost: evil.example\r\n\r\n".utf8)) == .unnamed)
+}

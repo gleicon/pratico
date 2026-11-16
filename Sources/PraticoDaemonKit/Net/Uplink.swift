@@ -477,6 +477,11 @@ final class TCPConn {
     /// A connection the container opened holds its first bytes until they name it (SNI,
     /// Host) and the egress guard has its say (D-51); published ports' are not inspected.
     private var inspecting = true
+    /// Plain HTTP from a container with an allowlist: every later request on the connection
+    /// (keep-alive) is checked as the first was. `tail` holds the end of the last segment,
+    /// so a header split across two is still seen.
+    private var watchHTTP = false
+    private var tail: [UInt8] = []
 
     static let receiveCapacity = 1 << 20
     /// Bytes in flight to the guest, whatever window it advertises.
@@ -665,6 +670,28 @@ final class TCPConn {
             return false
         }
         guardian.record(container, .init(time: Date(), proto: "tcp", ip: key.dstIP, port: key.dstPort, name: carried ?? resolved, blocked: false, reason: nil))
+        watchHTTP = carried != nil && toHost.first != 0x16 && guardian.hasAllowlist(container)
+        // Requests pipelined behind the first, in these same bytes, are checked before any goes.
+        if watchHTTP {
+            tail = []
+            return keepAliveAllowed(toHost)
+        }
+        return true
+    }
+
+    /// A later request's hosts on a plain-HTTP connection with an allowlist; false (and the
+    /// connection reset) when one is not on it.
+    private func keepAliveAllowed(_ payload: [UInt8]) -> Bool {
+        let guardian = uplink.sw.egress
+        let window = tail + payload
+        tail = Array(window.suffix(1024))
+        for host in FirstBytes.requestHosts(window) {
+            guard case .block(let why) = guardian.checkCarried(port.containerId, host.isEmpty ? "(unreadable)" : host) else { continue }
+            guardian.record(port.containerId, .init(time: Date(), proto: "tcp", ip: key.dstIP, port: key.dstPort, name: host, blocked: true, reason: why))
+            toHost.removeAll()
+            close(reset: true)
+            return false
+        }
         return true
     }
 
@@ -712,6 +739,7 @@ final class TCPConn {
             if s.seq == rcvNxt && toHost.count + s.payload.count <= Self.receiveCapacity {
                 toHost += s.payload
                 rcvNxt = rcvNxt &+ UInt32(s.payload.count)
+                if watchHTTP && !keepAliveAllowed(s.payload) { return }
                 if !inspecting || inspect() { flushToHost() }
                 if state == .closed { return }
             }

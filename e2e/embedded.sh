@@ -873,6 +873,26 @@ except Exception: print("no-sni-refused")
 expect_eq "with an allowlist, TLS without a name is refused" "$(tail -1 "$HOME_DIR/nosni.out")" "no-sni-refused"
 expect_has "and says why" "$(flows e-nosni)" "without a name pratico can read"
 docker rm -f e-nosni >/dev/null
+docker run --name e-keepalive --label dev.pratico.egress.allow=example.com python:3.13-slim python3 -c '
+import socket
+s = socket.create_connection(("example.com", 80), timeout=10)
+s.sendall(b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"); s.recv(65536)
+try:
+    s.sendall(b"GET / HTTP/1.1\r\nHost: evil.example\r\n\r\n"); print("second-through" if s.recv(65536) else "second-refused")
+except OSError: print("second-refused")
+' >"$HOME_DIR/keepalive.out" 2>&1
+expect_eq "a later keep-alive request to another host is refused" "$(tail -1 "$HOME_DIR/keepalive.out")" "second-refused"
+expect_has "and recorded" "$(flows e-keepalive)" "evil.example 80 blocked"
+docker rm -f e-keepalive >/dev/null
+docker run --name e-pipeline --label dev.pratico.egress.allow=example.com python:3.13-slim python3 -c '
+import socket
+s = socket.create_connection(("example.com", 80), timeout=10)
+s.sendall(b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\nGET / HTTP/1.1\r\nHost: evil.example\r\n\r\n")
+try: print("pipelined-through" if s.recv(65536) else "pipelined-refused")
+except OSError: print("pipelined-refused")
+' >"$HOME_DIR/pipeline.out" 2>&1
+expect_eq "pipelined requests are checked before any goes" "$(tail -1 "$HOME_DIR/pipeline.out")" "pipelined-refused"
+docker rm -f e-pipeline >/dev/null
 
 # Many containers stopping together on a fresh daemon (the uplink's first use comes from
 # several threads at once; a lazy var there crashed the daemon).

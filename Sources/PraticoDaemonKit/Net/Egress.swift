@@ -192,7 +192,7 @@ enum FirstBytes {
         // and then waits (SSH's banner, SMTP's EHLO) must never be held.
         let start = b.prefix(8)
         let methods = ["GET ", "POST ", "PUT ", "HEAD ", "DELETE ", "OPTIONS ", "PATCH ", "CONNECT "].map { Array($0.utf8) }
-        if methods.contains(where: { $0.starts(with: start) }) { return .needMore }
+        if methods.contains(where: { $0.count > start.count && $0.starts(with: start) }) { return .needMore }
         if methods.contains(where: { start.starts(with: $0) }) { return httpHost(b) }
         return .none
     }
@@ -228,12 +228,27 @@ enum FirstBytes {
 
     static func httpHost(_ b: [UInt8]) -> Result {
         let head = b.prefix(8 * 1024)
-        guard let end = find(Array(head), [13, 10, 13, 10]) else { return b.count >= 8 * 1024 ? .none : .needMore }
+        // A request head that never ends is HTTP all the same: unnamed, not another protocol.
+        guard let end = find(Array(head), [13, 10, 13, 10]) else { return b.count >= 8 * 1024 ? .unnamed : .needMore }
         let text = String(decoding: head[..<end], as: UTF8.self)
         let lines = text.split(separator: "\r\n")
-        // An absolute-form target (`GET http://host/ …`) is where a proxy sends it.
-        let target = lines.first?.split(separator: " ").dropFirst().first.map(String.init) ?? ""
-        let absolute = target.contains("://") ? URL(string: target)?.host.map(EgressGuard.normalized) : nil
+        // A folded header (a line starting with a space) may continue Host: unreadable.
+        if lines.dropFirst().contains(where: { $0.first == " " || $0.first == "\t" }) { return .unnamed }
+        // Bare line endings inside the head could hide a second Host: unreadable too.
+        if text.replacingOccurrences(of: "\r\n", with: "").contains(where: { $0 == "\n" || $0 == "\r" }) { return .unnamed }
+        // An absolute-form target (`GET http://host/ …`) or CONNECT's `host:port` is where a
+        // proxy sends it; one that cannot be read names nothing.
+        let request = lines.first?.split(separator: " ").map(String.init) ?? []
+        let target = request.count > 1 ? request[1] : ""
+        var absolute: String?
+        if request.first == "CONNECT" {
+            let (host, _) = target.splitOnce(":")
+            guard !host.isEmpty else { return .unnamed }
+            absolute = EgressGuard.normalized(host)
+        } else if !target.hasPrefix("/") && target != "*" {
+            guard target.contains("://"), let host = URL(string: target)?.host, !host.isEmpty else { return .unnamed }
+            absolute = EgressGuard.normalized(host)
+        }
         let hosts = lines.dropFirst().compactMap { line -> String? in
             let (key, value) = String(line).splitOnce(":")
             guard key.trimmingCharacters(in: .whitespaces).lowercased() == "host", let value else { return nil }
@@ -245,6 +260,36 @@ enum FirstBytes {
         if let absolute, let host = hosts.first, host != absolute { return .unnamed }
         guard let name = absolute ?? hosts.first, !name.isEmpty else { return .unnamed }
         return .name(name)
+    }
+
+    /// Every host a stretch of plain-HTTP client bytes names: `Host:` headers and absolute
+    /// or CONNECT targets on request lines. Requests after a connection's first one
+    /// (keep-alive) are checked with it; a body that happens to hold such a line is
+    /// checked too, which errs toward refusing.
+    static func requestHosts(_ b: [UInt8]) -> [String] {
+        let text = String(decoding: b, as: UTF8.self)
+        var hosts: [String] = []
+        var afterHost = false
+        // Any line ending, as lenient servers read them; `Host :` and a folded Host line
+        // count too, the folded one as unreadable (refused under an allowlist).
+        // `\r\n` is one Character in Swift: isNewline covers it, `\n`, and `\r` alike.
+        for raw in text.split(whereSeparator: \.isNewline).prefix(4096) {
+            let l = String(raw)
+            if afterHost, l.first == " " || l.first == "\t" { hosts.append(""); continue }
+            afterHost = false
+            let (name, value) = l.splitOnce(":")
+            if name.trimmingCharacters(in: .whitespaces).lowercased() == "host", let value {
+                var host = value.trimmingCharacters(in: .whitespaces)
+                if let colon = host.lastIndex(of: ":"), !host.contains("]") { host = String(host[..<colon]) }
+                hosts.append(EgressGuard.normalized(host))
+                afterHost = true
+            } else if let method = ["GET ", "POST ", "PUT ", "HEAD ", "DELETE ", "OPTIONS ", "PATCH ", "CONNECT "].first(where: l.hasPrefix) {
+                let target = l.dropFirst(method.count).split(separator: " ").first.map(String.init) ?? ""
+                if method == "CONNECT " { hosts.append(EgressGuard.normalized(target.splitOnce(":").0)) }
+                else if target.contains("://") { hosts.append(URL(string: target)?.host.map(EgressGuard.normalized) ?? "") }
+            }
+        }
+        return hosts
     }
 
     private static func find(_ hay: [UInt8], _ needle: [UInt8]) -> Int? {

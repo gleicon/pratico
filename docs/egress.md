@@ -62,7 +62,8 @@ name pratico cannot read (no SNI, a ClientHello split across records, two `Host`
 headers, a request target naming another host) is refused: on a CDN the same address
 serves many sites. Other protocols (SSH, a database) are held to the addresses alone,
 so on a shared address an allowlist is as narrow as that address. Queries to outside
-DNS servers are checked one by one. The Mac (`host.docker.internal`) counts as a name.
+DNS servers are checked one by one, and so is every request on a plain-HTTP connection
+(keep-alive and pipelined ones too). The Mac (`host.docker.internal`) counts as a name.
 Containers' own networks are not affected.
 The MCP `run` and `start` tools set the label from `egress`.
 
