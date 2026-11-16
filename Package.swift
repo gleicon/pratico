@@ -11,7 +11,8 @@ let package = Package(
     ],
     dependencies: [
         // Embedded runtime (docs/design/runtime.md); pinned, its API is pre-1.0.
-        .package(url: "https://github.com/apple/containerization.git", exact: "0.54.0"),
+        // apple/containerization 0.54.0 (baf212e), vendored: pratico's own VM changes it (Vendor/README.md).
+        .package(path: "Vendor/containerization"),
         // Already in the graph through containerization; named for pratico's registry client.
         .package(url: "https://github.com/apple/swift-crypto.git", from: "4.0.0"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.0.0"),
