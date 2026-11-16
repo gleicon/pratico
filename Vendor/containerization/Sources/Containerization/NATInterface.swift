@@ -1,0 +1,42 @@
+//===----------------------------------------------------------------------===//
+// Copyright © 2025-2026 Apple Inc. and the Containerization project authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//   https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//===----------------------------------------------------------------------===//
+
+import ContainerizationExtras
+
+public struct NATInterface: Interface {
+    public var ipv4Address: CIDRv4
+    public var ipv4Gateway: IPv4Address?
+    public var ipv6Address: CIDRv6?
+    public var ipv6Gateway: IPv6Address?
+    public var macAddress: MACAddress?
+    public var mtu: UInt32
+
+    public init(
+        ipv4Address: CIDRv4,
+        ipv4Gateway: IPv4Address?,
+        ipv6Address: CIDRv6? = nil,
+        ipv6Gateway: IPv6Address? = nil,
+        macAddress: MACAddress? = nil,
+        mtu: UInt32 = 1500
+    ) {
+        self.ipv4Address = ipv4Address
+        self.ipv4Gateway = ipv4Gateway
+        self.ipv6Address = ipv6Address
+        self.ipv6Gateway = ipv6Gateway
+        self.macAddress = macAddress
+        self.mtu = mtu
+    }
+}

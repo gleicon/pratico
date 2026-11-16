@@ -1,0 +1,718 @@
+//===----------------------------------------------------------------------===//
+// Copyright © 2025-2026 Apple Inc. and the Containerization project authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//   https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//===----------------------------------------------------------------------===//
+
+import ContainerizationError
+import ContainerizationExtras
+import ContainerizationOCI
+import ContainerizationOS
+import Foundation
+import GRPCCore
+import GRPCNIOTransportHTTP2
+import NIO
+
+/// A remote connection into the vminitd Linux guest agent via a port (vsock).
+/// Used to modify the runtime environment of the Linux sandbox.
+public struct Vminitd: Sendable {
+    // Default vsock port that the agent and client use.
+    public static let port: UInt32 = 1024
+
+    /// The `:authority` sent with every request to the guest agent.
+    ///
+    /// The connection is an already-connected vsock, so grpc-swift has no target address to
+    /// derive an authority from and would send none. The guest agent does not require one, but
+    /// gRPC-Go v1.82.2, v1.83.2 and v1.84.0 or later reject requests without an `:authority`
+    /// (grpc-go #9365), so sending one keeps this client working against servers that enforce it.
+    /// The agent does not route on the authority, so any valid host name works.
+    static let grpcAuthority = "vminitd"
+
+    /// The transport configuration for the connection to the guest agent.
+    static func transportConfig() -> HTTP2ClientTransport.WrappedChannel.Config {
+        .defaults {
+            $0.connection.maxIdleTime = nil
+            $0.http2.authority = grpcAuthority
+        }
+    }
+
+    let client: Com_Apple_Containerization_Sandbox_V3_SandboxContext.Client<HTTP2ClientTransport.WrappedChannel>
+    public let grpcClient: GRPCClient<HTTP2ClientTransport.WrappedChannel>
+    private let connectionTask: Task<Void, Error>
+
+    public init(connection: FileHandle, group: any EventLoopGroup) async throws {
+        let transport = try await HTTP2ClientTransport.WrappedChannel.wrapping(
+            config: Vminitd.transportConfig(),
+            serviceConfig: .init()
+        ) { configure in
+            try await withCheckedThrowingContinuation { continuation in
+                ClientBootstrap(group: group)
+                    .channelInitializer { channel in
+                        configure(channel).map { configured in
+                            continuation.resume(returning: configured)
+                        }
+                    }
+                    .withConnectedSocket(connection.fileDescriptor)
+                    .whenFailure { error in
+                        continuation.resume(throwing: error)
+                    }
+            }
+        }
+        let grpcClient = GRPCClient(transport: transport)
+        self.grpcClient = grpcClient
+        self.client = Com_Apple_Containerization_Sandbox_V3_SandboxContext.Client(wrapping: self.grpcClient)
+        // Not very structured concurrency friendly, but we'd need to expose a way on the protocol to "run" the
+        // agent otherwise, which some agents might not even need.
+        self.connectionTask = Task {
+            try await grpcClient.runConnections()
+        }
+    }
+
+    /// Close the connection to the guest agent.
+    public func close() async throws {
+        self.grpcClient.beginGracefulShutdown()
+        try await self.connectionTask.value
+    }
+}
+
+extension Vminitd: VirtualMachineAgent {
+    /// Perform the standard guest setup necessary for vminitd to be able to
+    /// run containers.
+    public func standardSetup() async throws {
+        try await up(name: "lo")
+
+        try await setenv(key: "PATH", value: LinuxProcessConfiguration.defaultPath)
+
+        // Vminitd mounts /proc, /sys, /sys/fs/cgroup and /run automatically.
+        let mounts: [ContainerizationOCI.Mount] = [
+            .init(type: "tmpfs", source: "tmpfs", destination: "/tmp"),
+            .init(type: "devpts", source: "devpts", destination: "/dev/pts", options: ["gid=5", "mode=620", "ptmxmode=666"]),
+        ]
+        for mount in mounts {
+            try await self.mount(mount)
+        }
+    }
+
+    public func writeFile(path: String, data: Data, flags: WriteFileFlags, mode: UInt32) async throws {
+        _ = try await client.writeFile(
+            .with {
+                $0.path = path
+                $0.mode = mode
+                $0.data = data
+                $0.flags = .with {
+                    $0.append = flags.append
+                    $0.createIfMissing = flags.create
+                    $0.createParentDirs = flags.createParentDirectories
+                }
+            })
+    }
+
+    /// Get statistics for containers. If `containerIDs` is empty returns stats for all containers
+    /// in the guest. If `categories` is empty, all categories are returned.
+    public func containerStatistics(containerIDs: [String], categories: StatCategory) async throws -> [ContainerStatistics] {
+        let response = try await client.containerStatistics(
+            .with {
+                $0.containerIds = containerIDs
+                $0.categories = categories.toProtoCategories()
+            })
+
+        return response.containers.map { protoStats in
+            ContainerStatistics(
+                id: protoStats.containerID,
+                process: categories.contains(.process) && protoStats.hasProcess
+                    ? .init(
+                        current: protoStats.process.current,
+                        limit: protoStats.process.limit
+                    ) : nil,
+                memory: categories.contains(.memory) && protoStats.hasMemory
+                    ? .init(
+                        usageBytes: protoStats.memory.usageBytes,
+                        limitBytes: protoStats.memory.limitBytes,
+                        swapUsageBytes: protoStats.memory.swapUsageBytes,
+                        swapLimitBytes: protoStats.memory.swapLimitBytes,
+                        cacheBytes: protoStats.memory.cacheBytes,
+                        kernelStackBytes: protoStats.memory.kernelStackBytes,
+                        slabBytes: protoStats.memory.slabBytes,
+                        pageFaults: protoStats.memory.pageFaults,
+                        majorPageFaults: protoStats.memory.majorPageFaults,
+                        inactiveFile: protoStats.memory.inactiveFile,
+                        anon: protoStats.memory.anon,
+                        workingsetRefaultAnon: protoStats.memory.workingsetRefaultAnon,
+                        workingsetRefaultFile: protoStats.memory.workingsetRefaultFile,
+                        pgstealKswapd: protoStats.memory.pgstealKswapd,
+                        pgstealDirect: protoStats.memory.pgstealDirect,
+                        pgstealKhugepaged: protoStats.memory.pgstealKhugepaged
+                    ) : nil,
+                cpu: categories.contains(.cpu) && protoStats.hasCpu
+                    ? .init(
+                        usageUsec: protoStats.cpu.usageUsec,
+                        userUsec: protoStats.cpu.userUsec,
+                        systemUsec: protoStats.cpu.systemUsec,
+                        throttlingPeriods: protoStats.cpu.throttlingPeriods,
+                        throttledPeriods: protoStats.cpu.throttledPeriods,
+                        throttledTimeUsec: protoStats.cpu.throttledTimeUsec
+                    ) : nil,
+                blockIO: categories.contains(.blockIO) && protoStats.hasBlockIo
+                    ? .init(
+                        devices: protoStats.blockIo.devices.map { device in
+                            .init(
+                                major: device.major,
+                                minor: device.minor,
+                                readBytes: device.readBytes,
+                                writeBytes: device.writeBytes,
+                                readOperations: device.readOperations,
+                                writeOperations: device.writeOperations
+                            )
+                        }
+                    ) : nil,
+                networks: categories.contains(.network)
+                    ? protoStats.networks.map { network in
+                        ContainerStatistics.NetworkStatistics(
+                            interface: network.interface,
+                            receivedPackets: network.receivedPackets,
+                            transmittedPackets: network.transmittedPackets,
+                            receivedBytes: network.receivedBytes,
+                            transmittedBytes: network.transmittedBytes,
+                            receivedErrors: network.receivedErrors,
+                            transmittedErrors: network.transmittedErrors,
+                            receivedDropped: network.receivedDropped,
+                            transmittedDropped: network.transmittedDropped
+                        )
+                    } : nil,
+                memoryEvents: categories.contains(.memoryEvents) && protoStats.hasMemoryEvents
+                    ? .init(
+                        low: protoStats.memoryEvents.low,
+                        high: protoStats.memoryEvents.high,
+                        max: protoStats.memoryEvents.max,
+                        oom: protoStats.memoryEvents.oom,
+                        oomKill: protoStats.memoryEvents.oomKill
+                    ) : nil,
+                filesystem: categories.contains(.filesystem)
+                    ? protoStats.filesystem.map { entry in
+                        ContainerStatistics.FilesystemStatistics(
+                            mountPoint: entry.mountPoint,
+                            blockSize: entry.blockSize,
+                            blocks: entry.blocks,
+                            freeBlocks: entry.freeBlocks,
+                            inodes: entry.inodes,
+                            freeInodes: entry.freeInodes
+                        )
+                    } : nil,
+                networkProtocols: categories.contains(.network) && protoStats.hasNetworkProtocols
+                    ? .init(protoStats.networkProtocols) : nil
+            )
+        }
+    }
+
+    /// Mount a filesystem in the sandbox's environment.
+    public func mount(_ mount: ContainerizationOCI.Mount) async throws {
+        _ = try await client.mount(
+            .with {
+                $0.type = mount.type
+                $0.source = mount.source
+                $0.destination = mount.destination
+                $0.options = mount.options
+            })
+    }
+
+    /// Unmount a filesystem in the sandbox's environment.
+    public func umount(path: String, flags: Int32) async throws {
+        _ = try await client.umount(
+            .with {
+                $0.path = path
+                $0.flags = flags
+            })
+    }
+
+    /// Create a directory inside the sandbox's environment.
+    public func mkdir(path: String, all: Bool, perms: UInt32) async throws {
+        _ = try await client.mkdir(
+            .with {
+                $0.path = path
+                $0.all = all
+                $0.perms = perms
+            })
+    }
+
+    /// Perform a filesystem operation on a path inside the sandbox's environment.
+    public func filesystemOperation(operation: FilesystemOperation, path: String, containerID: String? = nil) async throws {
+        _ = try await client.filesystemOperation(
+            .with {
+                $0.operation = operation.toProtoOperation()
+                $0.path = path
+                if let containerID {
+                    $0.containerID = containerID
+                }
+            })
+    }
+
+    public func createProcess(
+        id: String,
+        containerID: String?,
+        stdinPort: UInt32?,
+        stdoutPort: UInt32?,
+        stderrPort: UInt32?,
+        ociRuntimePath: String?,
+        configuration: ContainerizationOCI.Spec,
+        options: Data?
+    ) async throws {
+        let enc = JSONEncoder()
+        _ = try await client.createProcess(
+            .with {
+                $0.id = id
+                if let stdinPort {
+                    $0.stdin = stdinPort
+                }
+                if let stdoutPort {
+                    $0.stdout = stdoutPort
+                }
+                if let stderrPort {
+                    $0.stderr = stderrPort
+                }
+                if let containerID {
+                    $0.containerID = containerID
+                }
+                if let ociRuntimePath {
+                    $0.ociRuntimePath = ociRuntimePath
+                }
+                $0.configuration = try enc.encode(configuration)
+            })
+    }
+
+    @discardableResult
+    public func startProcess(id: String, containerID: String?) async throws -> Int32 {
+        let request = Com_Apple_Containerization_Sandbox_V3_StartProcessRequest.with {
+            $0.id = id
+            if let containerID {
+                $0.containerID = containerID
+            }
+        }
+        let resp = try await client.startProcess(request)
+        return resp.pid
+    }
+
+    public func signalProcess(id: String, containerID: String?, signal: Int32) async throws {
+        let request = Com_Apple_Containerization_Sandbox_V3_KillProcessRequest.with {
+            $0.id = id
+            $0.signal = signal
+            if let containerID {
+                $0.containerID = containerID
+            }
+        }
+        _ = try await client.killProcess(request)
+    }
+
+    public func resizeProcess(id: String, containerID: String?, columns: UInt32, rows: UInt32) async throws {
+        let request = Com_Apple_Containerization_Sandbox_V3_ResizeProcessRequest.with {
+            if let containerID {
+                $0.containerID = containerID
+            }
+            $0.id = id
+            $0.columns = columns
+            $0.rows = rows
+        }
+        _ = try await client.resizeProcess(request)
+    }
+
+    public func waitProcess(
+        id: String,
+        containerID: String?,
+        timeoutInSeconds: Int64? = nil
+    ) async throws -> ExitStatus {
+        let request = Com_Apple_Containerization_Sandbox_V3_WaitProcessRequest.with {
+            $0.id = id
+            if let containerID {
+                $0.containerID = containerID
+            }
+        }
+
+        var callOpts = GRPCCore.CallOptions.defaults
+        if let timeoutInSeconds {
+            callOpts.timeout = .seconds(timeoutInSeconds)
+        }
+
+        do {
+            let resp = try await client.waitProcess(request, options: callOpts)
+            return ExitStatus(exitCode: resp.exitCode, exitedAt: resp.exitedAt.date)
+        } catch {
+            if let err = error as? RPCError, err.code == .deadlineExceeded {
+                throw ContainerizationError(
+                    .timeout,
+                    message: "failed to wait for process exit within timeout of \(timeoutInSeconds!) seconds",
+                    cause: err
+                )
+            }
+            throw error
+        }
+    }
+
+    public func deleteProcess(id: String, containerID: String?) async throws {
+        let request = Com_Apple_Containerization_Sandbox_V3_DeleteProcessRequest.with {
+            $0.id = id
+            if let containerID {
+                $0.containerID = containerID
+            }
+        }
+        _ = try await client.deleteProcess(request)
+    }
+
+    public func closeProcessStdin(id: String, containerID: String?) async throws {
+        let request = Com_Apple_Containerization_Sandbox_V3_CloseProcessStdinRequest.with {
+            $0.id = id
+            if let containerID {
+                $0.containerID = containerID
+            }
+        }
+        _ = try await client.closeProcessStdin(request)
+    }
+
+    public func up(name: String, mtu: UInt32? = nil) async throws {
+        let request = Com_Apple_Containerization_Sandbox_V3_IpLinkSetRequest.with {
+            $0.interface = name
+            $0.up = true
+            if let mtu { $0.mtu = mtu }
+        }
+        _ = try await client.ipLinkSet(request)
+    }
+
+    public func down(name: String) async throws {
+        let request = Com_Apple_Containerization_Sandbox_V3_IpLinkSetRequest.with {
+            $0.interface = name
+            $0.up = false
+        }
+        _ = try await client.ipLinkSet(request)
+    }
+
+    /// Get an environment variable from the sandbox's environment.
+    public func getenv(key: String) async throws -> String {
+        let response = try await client.getenv(
+            .with {
+                $0.key = key
+            })
+        return response.value
+    }
+
+    /// Set an environment variable in the sandbox's environment.
+    public func setenv(key: String, value: String) async throws {
+        _ = try await client.setenv(
+            .with {
+                $0.key = key
+                $0.value = value
+            })
+    }
+}
+
+/// Vminitd specific rpcs.
+extension Vminitd {
+    /// Sets up an emulator in the guest.
+    public func setupEmulator(binaryPath: String, configuration: Binfmt.Entry) async throws {
+        let request = Com_Apple_Containerization_Sandbox_V3_SetupEmulatorRequest.with {
+            $0.binaryPath = binaryPath
+            $0.name = configuration.name
+            $0.type = configuration.type
+            $0.offset = configuration.offset
+            $0.magic = configuration.magic
+            $0.mask = configuration.mask
+            $0.flags = configuration.flags
+        }
+        _ = try await client.setupEmulator(request)
+    }
+
+    /// Sets the guest time.
+    public func setTime(sec: Int64, usec: Int32) async throws {
+        let request = Com_Apple_Containerization_Sandbox_V3_SetTimeRequest.with {
+            $0.sec = sec
+            $0.usec = usec
+        }
+        _ = try await client.setTime(request)
+    }
+
+    /// Set the provided sysctls inside the Sandbox's environment.
+    public func sysctl(settings: [String: String]) async throws {
+        let request = Com_Apple_Containerization_Sandbox_V3_SysctlRequest.with {
+            $0.settings = settings
+        }
+        _ = try await client.sysctl(request)
+    }
+
+    /// Add an IP address to the sandbox's network interfaces.
+    public func addressAdd(name: String, address: InterfaceAddress) async throws {
+        _ = try await client.ipAddrAdd(
+            .with {
+                $0.interface = name
+                $0.ipv4Address = address.ipv4Address.description
+                if let ipv6Address = address.ipv6Address {
+                    $0.ipv6Address = ipv6Address.description
+                }
+            })
+    }
+
+    /// Add a link-scoped route in the sandbox's environment, used to install an
+    /// on-link host route (a /32 for v4, /128 for v6) to a gateway that lives
+    /// outside the interface's subnet so the kernel will accept the default route.
+    /// `route.ipv4Destination`/`route.ipv6Destination` carry the
+    /// gateway address; the wire format is a CIDR string with the per-family host prefix appended.
+    public func routeAddLink(name: String, route: LinkRoute) async throws {
+        _ = try await client.ipRouteAddLink(
+            .with {
+                $0.interface = name
+                if let ipv4Destination = route.ipv4Destination {
+                    $0.dstIpv4Addr = "\(ipv4Destination.description)/32"
+                }
+                if let ipv4Source = route.ipv4Source {
+                    $0.srcIpv4Addr = ipv4Source.description
+                }
+                if let ipv6Destination = route.ipv6Destination {
+                    $0.dstIpv6Addr = "\(ipv6Destination.description)/128"
+                }
+                if let ipv6Source = route.ipv6Source {
+                    $0.srcIpv6Addr = ipv6Source.description
+                }
+            })
+    }
+
+    /// Set the default route in the sandbox's environment.
+    public func routeAddDefault(name: String, route: DefaultRoute) async throws {
+        _ = try await client.ipRouteAddDefault(
+            .with {
+                $0.interface = name
+                $0.ipv4Gateway = route.ipv4Gateway?.description ?? ""
+                if let ipv6Gateway = route.ipv6Gateway {
+                    $0.ipv6Gateway = ipv6Gateway.description
+                }
+            })
+    }
+
+    /// Configure DNS within the sandbox's environment.
+    public func configureDNS(config: DNS, location: String) async throws {
+        try config.validate()
+        _ = try await client.configureDns(
+            .with {
+                $0.location = location
+                $0.nameservers = config.nameservers
+                if let domain = config.domain {
+                    $0.domain = domain
+                }
+                $0.searchDomains = config.searchDomains
+                $0.options = config.options
+            })
+    }
+
+    /// Configure /etc/hosts within the sandbox's environment.
+    public func configureHosts(config: Hosts, location: String) async throws {
+        _ = try await client.configureHosts(config.toAgentHostsRequest(location: location))
+    }
+
+    /// Perform a sync call.
+    public func sync() async throws {
+        _ = try await client.sync(.init())
+    }
+
+    public func kill(pid: Int32, signal: Int32) async throws -> Int32 {
+        let response = try await client.kill(
+            .with {
+                $0.pid = pid
+                $0.signal = signal
+            })
+        return response.result
+    }
+
+    /// Metadata received from the guest during a copy operation.
+    public struct CopyMetadata: Sendable {
+        /// Whether the data on the vsock channel is a tar+gzip archive.
+        public let isArchive: Bool
+        /// Total size in bytes (0 if unknown, e.g. for archives).
+        public let totalSize: UInt64
+    }
+
+    /// Stat a path in the guest filesystem and return its metadata. `path` is
+    /// resolved by the guest as if `root` were the filesystem root and confined to it.
+    public func stat(
+        root: String,
+        path: String
+    ) async throws -> ContainerizationOS.Stat {
+        let request = Com_Apple_Containerization_Sandbox_V3_StatRequest.with {
+            $0.root = root
+            $0.path = path
+        }
+
+        let response: Com_Apple_Containerization_Sandbox_V3_StatResponse
+        do {
+            response = try await client.stat(request)
+        } catch let error as RPCError where error.code == .notFound {
+            throw ContainerizationError(.notFound, message: "stat: path not found '\(path)'", cause: error)
+        }
+        guard response.error.isEmpty else {
+            throw ContainerizationError(.internalError, message: "stat: \(response.error)")
+        }
+
+        let s = response.stat
+        return ContainerizationOS.Stat(
+            dev: s.dev,
+            ino: s.ino,
+            mode: s.mode,
+            nlink: s.nlink,
+            uid: s.uid,
+            gid: s.gid,
+            rdev: s.rdev,
+            size: s.size,
+            blksize: s.blksize,
+            blocks: s.blocks,
+            atime: TimeSpec(seconds: s.atime.seconds, nanoseconds: s.atime.nanos),
+            mtime: TimeSpec(seconds: s.mtime.seconds, nanoseconds: s.mtime.nanos),
+            ctime: TimeSpec(seconds: s.ctime.seconds, nanoseconds: s.ctime.nanos)
+        )
+    }
+
+    /// Unified copy control plane. Sends a CopyRequest over gRPC and processes
+    /// the response stream. Data transfer happens over a separate vsock connection
+    /// managed by the caller.
+    ///
+    /// For COPY_OUT, the `onMetadata` callback is invoked when the guest sends
+    /// metadata (is_archive, total_size) before data transfer begins.
+    /// For COPY_IN, `onMetadata` is not called.
+    public func copy(
+        direction: Com_Apple_Containerization_Sandbox_V3_CopyRequest.Direction,
+        root: String,
+        path: String,
+        vsockPort: UInt32,
+        mode: UInt32 = 0,
+        createParents: Bool = false,
+        isArchive: Bool = false,
+        onMetadata: @Sendable @escaping (CopyMetadata) -> Void = { _ in }
+    ) async throws {
+        let request = Com_Apple_Containerization_Sandbox_V3_CopyRequest.with {
+            $0.direction = direction
+            $0.root = root
+            $0.path = path
+            $0.mode = mode
+            $0.createParents = createParents
+            $0.vsockPort = vsockPort
+            $0.isArchive = isArchive
+        }
+
+        try await client.copy(
+            request,
+            onResponse: { stream in
+                for try await response in stream.messages {
+                    if !response.error.isEmpty {
+                        throw ContainerizationError(.internalError, message: "copy: \(response.error)")
+                    }
+                    switch response.status {
+                    case .metadata:
+                        onMetadata(CopyMetadata(isArchive: response.isArchive, totalSize: response.totalSize))
+                    case .complete:
+                        break
+                    case .UNRECOGNIZED(let value):
+                        throw ContainerizationError(.internalError, message: "copy: unrecognized response status \(value)")
+                    }
+                }
+            })
+    }
+}
+
+extension Hosts {
+    func toAgentHostsRequest(location: String) -> Com_Apple_Containerization_Sandbox_V3_ConfigureHostsRequest {
+        Com_Apple_Containerization_Sandbox_V3_ConfigureHostsRequest.with {
+            $0.location = location
+            if let comment {
+                $0.comment = comment
+            }
+            $0.entries = entries.map {
+                let entry = $0
+                return Com_Apple_Containerization_Sandbox_V3_ConfigureHostsRequest.HostsEntry.with {
+                    if let comment = entry.comment {
+                        $0.comment = comment
+                    }
+                    $0.ipAddress = entry.ipAddress
+                    $0.hostnames = entry.hostnames
+                }
+            }
+        }
+    }
+}
+
+extension StatCategory {
+    /// Convert StatCategory to proto enum values.
+    func toProtoCategories() -> [Com_Apple_Containerization_Sandbox_V3_StatCategory] {
+        var categories: [Com_Apple_Containerization_Sandbox_V3_StatCategory] = []
+        if contains(.process) {
+            categories.append(.process)
+        }
+        if contains(.memory) {
+            categories.append(.memory)
+        }
+        if contains(.cpu) {
+            categories.append(.cpu)
+        }
+        if contains(.blockIO) {
+            categories.append(.blockIo)
+        }
+        if contains(.network) {
+            categories.append(.network)
+        }
+        if contains(.memoryEvents) {
+            categories.append(.memoryEvents)
+        }
+        if contains(.filesystem) {
+            categories.append(.filesystem)
+        }
+        return categories
+    }
+}
+
+extension FilesystemOperation {
+    /// Convert FilesystemOperation to proto oneof value.
+    fileprivate func toProtoOperation() -> Com_Apple_Containerization_Sandbox_V3_FilesystemOperationRequest.OneOf_Operation {
+        switch self {
+        case .freeze:
+            return .freeze(.init())
+        case .thaw:
+            return .thaw(.init())
+        case .trim:
+            return .trim(
+                .with {
+                    $0.oneShot = .init()
+                })
+        }
+    }
+}
+
+extension ContainerStatistics.NetworkProtocolCounters {
+    init(_ proto: Com_Apple_Containerization_Sandbox_V3_NetworkProtocolCounters) {
+        self.init(
+            receivedPackets: proto.receivedPackets,
+            transmittedPackets: proto.transmittedPackets,
+            receivedBytes: proto.hasReceivedBytes ? proto.receivedBytes : nil,
+            transmittedBytes: proto.hasTransmittedBytes ? proto.transmittedBytes : nil,
+            receivedDrops: proto.hasReceivedDrops ? proto.receivedDrops : nil,
+            transmittedDrops: proto.hasTransmittedDrops ? proto.transmittedDrops : nil,
+            receivedErrors: proto.hasReceivedErrors ? proto.receivedErrors : nil,
+            transmittedErrors: proto.hasTransmittedErrors ? proto.transmittedErrors : nil
+        )
+    }
+}
+
+extension ContainerStatistics.NetworkProtocolStatistics {
+    init(_ proto: Com_Apple_Containerization_Sandbox_V3_NetworkProtocolStats) {
+        self.init(
+            tcp: .init(proto.tcp),
+            udp: .init(proto.udp),
+            icmp: .init(proto.icmp),
+            ip: .init(proto.ip),
+            udp6: proto.hasUdp6 ? .init(proto.udp6) : nil,
+            icmp6: proto.hasIcmp6 ? .init(proto.icmp6) : nil,
+            ip6: proto.hasIp6 ? .init(proto.ip6) : nil
+        )
+    }
+}

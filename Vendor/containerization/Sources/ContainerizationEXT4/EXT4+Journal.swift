@@ -1,0 +1,204 @@
+//===----------------------------------------------------------------------===//
+// Copyright © 2026 Apple Inc. and the Containerization project authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//   https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//===----------------------------------------------------------------------===//
+
+import ContainerizationOS
+import Foundation
+
+// JBD2 on-disk format reference:
+// https://www.kernel.org/doc/html/latest/filesystems/ext4/journal.html
+
+extension EXT4.Formatter {
+    /// Entry point called from close() when journaling is enabled.
+    func initializeJournal(
+        config: EXT4.JournalConfig,
+        filesystemUUID: (
+            UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8,
+            UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8
+        )
+    ) throws -> UInt32 {
+        let journalBlocks = try calculateJournalSize(requestedSize: config.size, usableBlocks: blockCount)
+        // Align to block boundary before recording start.
+        if self.pos % self.blockSize != 0 {
+            try self.seek(block: self.currentBlock + 1)
+        }
+        let journalStartBlock = self.currentBlock
+        let journalEndBlock = try calculateJournalEndBlock(
+            startBlock: journalStartBlock,
+            blockCount: journalBlocks
+        )
+        try writeJournalSuperblock(journalBlocks: journalBlocks, filesystemUUID: filesystemUUID)
+        try skipJournalBlocks(count: journalBlocks - 1)
+        try setupJournalInode(
+            startBlock: journalStartBlock,
+            endBlock: journalEndBlock
+        )
+        return journalBlocks
+    }
+
+    // MARK: - Private helpers
+
+    private func calculateJournalSize(requestedSize: UInt64?, usableBlocks: UInt32) throws -> UInt32 {
+        if let size = requestedSize {
+            let blocks = size / UInt64(self.blockSize)
+            // JBD2_MIN_JOURNAL_BLOCKS: the kernel refuses to mount with fewer.
+            // blocks == 0 would also cause a UInt32 underflow in the caller.
+            guard blocks >= EXT4.MinJournalBlocks else {
+                throw EXT4.Formatter.Error.journalTooSmall(size)
+            }
+            // Safe: blocks is guaranteed to be at least EXT4.MinJournalBlocks and at most UInt32.max.
+            guard blocks <= UInt64(UInt32.max) else {
+                throw EXT4.Formatter.Error.journalTooLarge(size)
+            }
+            return UInt32(blocks)
+        }
+        // Default sizing: scale with the usable content area, with a floor determined by
+        // JBD2_MIN_JOURNAL_BLOCKS and a ceiling that follows e2fsprogs convention: 128 MiB for
+        // filesystems up to 128 GiB, and 1 GiB for larger filesystems. The larger ceiling was
+        // introduced in e2fsprogs 1.43.2:
+        // https://e2fsprogs.sourceforge.net/e2fsprogs-release.html#1.43.2
+        let usableBytes = UInt64(usableBlocks) * UInt64(self.blockSize)
+        let scaledBytes = usableBytes / 64  // 1/64th of the usable area, matching e2fsprogs defaults
+        let minBytes: UInt64 = UInt64(EXT4.MinJournalBlocks) * UInt64(self.blockSize)
+        let maxBytes: UInt64 = usableBytes > 128.gib() ? 1.gib() : 128.mib()
+        let clampedBytes = min(max(scaledBytes, minBytes), maxBytes)
+        // Safe: clampedBytes ≤ 1 GiB and blockSize ≥ 1, so the quotient fits in UInt32.
+        return UInt32(clampedBytes / UInt64(self.blockSize))
+    }
+
+    private func writeJournalSuperblock(
+        journalBlocks: UInt32,
+        filesystemUUID: (
+            UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8,
+            UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8
+        )
+    ) throws {
+        // Safe: blockSize is UInt32; widening to Int (64-bit on all supported platforms) never truncates.
+        var buf = [UInt8](repeating: 0, count: Int(self.blockSize))
+
+        // JBD2 is a big-endian format regardless of host byte order (§3.6.1).
+        func writeU32BigEndian(_ value: UInt32, at offset: Int) {
+            buf[offset] = UInt8((value >> 24) & 0xFF)
+            buf[offset + 1] = UInt8((value >> 16) & 0xFF)
+            buf[offset + 2] = UInt8((value >> 8) & 0xFF)
+            buf[offset + 3] = UInt8(value & 0xFF)
+        }
+
+        // JBD2 block header (§3.6.3): https://www.kernel.org/doc/html/latest/filesystems/ext4/journal.html#block-header
+        writeU32BigEndian(EXT4.JournalMagic, at: 0x00)  // h_magic
+        writeU32BigEndian(4, at: 0x04)  // h_blocktype = superblock v2
+        writeU32BigEndian(1, at: 0x08)  // h_sequence
+
+        // JBD2 superblock body (§3.6.4): https://www.kernel.org/doc/html/latest/filesystems/ext4/journal.html#super-block
+        writeU32BigEndian(self.blockSize, at: 0x0C)  // s_blocksize
+        writeU32BigEndian(journalBlocks, at: 0x10)  // s_maxlen
+        writeU32BigEndian(1, at: 0x14)  // s_first (first usable block)
+        writeU32BigEndian(1, at: 0x18)  // s_sequence
+        // 0x1C s_start: left zero — kernel treats zero as "journal empty, begin at s_first"
+        // 0x20 s_errno: left zero — no prior abort error
+        // 0x24 s_feature_compat: left zero — no optional features (e.g. data-block checksums)
+        // 0x28 s_feature_incompat: left zero — non-zero unrecognised flags would cause mount refusal
+        // 0x2C s_feature_ro_compat: left zero — no flags defined by the spec
+
+        // s_uuid at 0x30 (16 bytes)
+        let uuidBytes = [
+            filesystemUUID.0, filesystemUUID.1, filesystemUUID.2, filesystemUUID.3,
+            filesystemUUID.4, filesystemUUID.5, filesystemUUID.6, filesystemUUID.7,
+            filesystemUUID.8, filesystemUUID.9, filesystemUUID.10, filesystemUUID.11,
+            filesystemUUID.12, filesystemUUID.13, filesystemUUID.14, filesystemUUID.15,
+        ]
+        buf[0x30..<0x40] = uuidBytes[...]
+
+        writeU32BigEndian(1, at: 0x40)  // s_nr_users
+
+        let maxTrans = min(journalBlocks / 4, 32768)
+        writeU32BigEndian(maxTrans, at: 0x48)  // s_max_transaction
+        writeU32BigEndian(maxTrans, at: 0x4C)  // s_max_trans_data
+
+        // s_users[0] at 0x100 (first entry of 768-byte users array)
+        buf[0x100..<0x110] = uuidBytes[...]
+
+        try self.handle.write(contentsOf: buf)
+    }
+
+    private func skipJournalBlocks(count: UInt32) throws {
+        guard count > 0 else { return }
+        // Widen before multiplying so the byte offset is calculated without UInt32 overflow.
+        let totalBytes = UInt64(count) * UInt64(self.blockSize)
+        try self.handle.seek(toOffset: self.pos + totalBytes)
+    }
+
+    private func setupJournalInode(startBlock: UInt32, endBlock: UInt32) throws {
+        var journalInode = EXT4.Inode()
+        journalInode.mode = EXT4.Inode.Mode(.S_IFREG, 0o600)
+        journalInode.uid = 0
+        journalInode.gid = 0
+        let blockCount = endBlock - startBlock
+        let size = UInt64(blockCount) * UInt64(self.blockSize)
+        journalInode.sizeLow = size.lo
+        journalInode.sizeHigh = size.hi
+        let now = Date().fs()
+        journalInode.atime = now.lo
+        journalInode.atimeExtra = now.hi
+        journalInode.ctime = now.lo
+        journalInode.ctimeExtra = now.hi
+        journalInode.mtime = now.lo
+        journalInode.mtimeExtra = now.hi
+        journalInode.crtime = now.lo
+        journalInode.crtimeExtra = now.hi
+        journalInode.linksCount = 1
+        journalInode.extraIsize = UInt16(EXT4.ExtraIsize)
+        journalInode.flags = EXT4.InodeFlag.extents.rawValue | EXT4.InodeFlag.hugeFile.rawValue
+
+        // Journal is one contiguous allocation → numExtents = 1 → extent tree fits inline
+        // in the inode, so writeExtents needs no extra disk I/O for extent index blocks.
+        journalInode = try self.writeExtents(journalInode, (startBlock, endBlock))
+
+        self.inodes[Int(EXT4.JournalInode) - 1].pointee = journalInode
+    }
+
+    private func calculateJournalEndBlock(startBlock: UInt32, blockCount: UInt32) throws -> UInt32 {
+        let (endBlock, overflow) = startBlock.addingReportingOverflow(blockCount)
+        guard !overflow else {
+            throw EXT4.Formatter.Error.journalTooLarge(UInt64(blockCount) * UInt64(self.blockSize))
+        }
+        return endBlock
+    }
+
+    func journalInodeBlockBackup() -> (
+        UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32,
+        UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32, UInt32,
+        UInt32
+    ) {
+        let ji = self.inodes[Int(EXT4.JournalInode) - 1].pointee
+        // s_jnl_blocks layout (§4.1.2): first 15 words = i_block[] extent-tree data,
+        // 16th word (index 15) = i_size_high, 17th word (index 16) = i_size.
+        var words = [UInt32](repeating: 0, count: 17)
+        withUnsafeBytes(of: ji.block) { bytes in
+            for i in 0..<15 {
+                words[i] = bytes.load(fromByteOffset: i * 4, as: UInt32.self)
+            }
+        }
+        words[15] = ji.sizeHigh  // i_size_high (16th element per spec)
+        words[16] = ji.sizeLow  // i_size      (17th element per spec)
+        return (
+            words[0], words[1], words[2], words[3],
+            words[4], words[5], words[6], words[7],
+            words[8], words[9], words[10], words[11],
+            words[12], words[13], words[14], words[15],
+            words[16]
+        )
+    }
+}

@@ -1,0 +1,170 @@
+//===----------------------------------------------------------------------===//
+// Copyright © 2025-2026 Apple Inc. and the Containerization project authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//   https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//===----------------------------------------------------------------------===//
+
+import ContainerizationArchive
+import ContainerizationEXT4
+import ContainerizationError
+import ContainerizationExtras
+import ContainerizationOCI
+import Foundation
+import SystemPackage
+
+public struct EXT4Unpacker: Unpacker {
+    let capacityInBytes: UInt64
+
+    let journal: EXT4.JournalConfig?
+
+    /// Creates an unpacker that extracts images into EXT4 filesystems.
+    /// - Parameters:
+    ///   - capacityInBytes: The minimum usable capacity of the filesystem image, in bytes.
+    ///   - journal: The journal configuration to use, or nil for no journaling.
+    public init(capacityInBytes: UInt64, journal: EXT4.JournalConfig? = nil) {
+        self.capacityInBytes = capacityInBytes
+        self.journal = journal
+    }
+
+    /// Performs the unpacking of a tar archive into a filesystem.
+    /// - Parameters:
+    ///   - archive: The archive to unpack.
+    ///   - compression: The compression to use when unpacking the image.
+    ///   - path: The path to the filesystem that will be created.
+    public func unpack(
+        archive: URL,
+        compression: ContainerizationArchive.Filter,
+        at path: URL
+    ) async throws {
+        let cleanedPath = try prepareUnpackPath(path: path)
+        var unpacked = false
+        defer {
+            if !unpacked {
+                try? FileManager.default.removeItem(atPath: cleanedPath)
+            }
+        }
+        let filesystem = try EXT4.Formatter(
+            FilePath(cleanedPath),
+            minDiskSize: capacityInBytes,
+            journal: journal
+        )
+
+        try await filesystem.unpack(
+            source: archive,
+            format: .paxRestricted,
+            compression: compression
+        )
+        try filesystem.close()
+        unpacked = true
+    }
+
+    /// Returns a `Mount` point after unpacking the image into a filesystem.
+    /// - Parameters:
+    ///   - image: The image to unpack.
+    ///   - platform: The platform content to unpack.
+    ///   - path: The path to the directory where the filesystem will be created.
+    ///   - progress: The progress handler to invoke as the unpacking progresses.
+    public func unpack(
+        _ image: Image,
+        for platform: Platform,
+        at path: URL,
+        progress: ProgressHandler? = nil
+    ) async throws -> Mount {
+        let cleanedPath = try prepareUnpackPath(path: path)
+        var unpacked = false
+        defer {
+            if !unpacked {
+                try? FileManager.default.removeItem(atPath: cleanedPath)
+            }
+        }
+        let manifest = try await image.manifest(for: platform)
+        let filesystem = try EXT4.Formatter(
+            FilePath(
+                cleanedPath
+            ),
+            minDiskSize: capacityInBytes,
+            journal: journal
+        )
+
+        // Resolve layer paths upfront.
+        var resolvedLayers: [(file: URL, filter: ContainerizationArchive.Filter)] = []
+        for layer in manifest.layers {
+            try Task.checkCancellation()
+            let content = try await image.getContent(digest: layer.digest)
+            let compression = try compressionFilter(for: layer.mediaType)
+            resolvedLayers.append((file: content.path, filter: compression))
+        }
+
+        if let progress {
+            var totalSize: Int64 = 0
+            var totalItems: Int = 0
+            for layer in resolvedLayers {
+                try Task.checkCancellation()
+                let totals = try EXT4.Formatter.scanArchiveHeaders(
+                    format: .paxRestricted, filter: layer.filter, file: layer.file)
+                totalSize += totals.size
+                totalItems += totals.items
+            }
+            var totalEvents: [ProgressEvent] = []
+            if totalSize > 0 {
+                totalEvents.append(.addTotalSize(totalSize))
+            }
+            if totalItems > 0 {
+                totalEvents.append(.addTotalItems(totalItems))
+            }
+            if !totalEvents.isEmpty {
+                await progress(totalEvents)
+            }
+        }
+
+        for resolved in resolvedLayers {
+            try Task.checkCancellation()
+            let reader = try ArchiveReader(
+                format: .paxRestricted,
+                filter: resolved.filter,
+                file: resolved.file
+            )
+            try await filesystem.unpack(reader: reader, progress: progress)
+        }
+
+        try filesystem.close()
+        unpacked = true
+        return .block(
+            format: "ext4",
+            source: cleanedPath,
+            destination: "/",
+            options: []
+        )
+    }
+
+    private func prepareUnpackPath(path: URL) throws -> String {
+        let blockPath = path.absolutePath()
+        guard !FileManager.default.fileExists(atPath: blockPath) else {
+            throw ContainerizationError(.exists, message: "block device already exists at \(blockPath)")
+        }
+        return blockPath
+    }
+
+    private func compressionFilter(for mediaType: String) throws -> ContainerizationArchive.Filter {
+        switch mediaType {
+        case MediaTypes.imageLayer, MediaTypes.dockerImageLayer:
+            return .none
+        case MediaTypes.imageLayerGzip, MediaTypes.dockerImageLayerGzip:
+            return .gzip
+        case MediaTypes.imageLayerZstd, MediaTypes.dockerImageLayerZstd:
+            return .zstd
+        default:
+            throw ContainerizationError(.unsupported, message: "media type \(mediaType) not supported.")
+        }
+    }
+}
