@@ -63,7 +63,9 @@ headers, a request target naming another host) is refused: on a CDN the same add
 serves many sites. Other protocols (SSH, a database) are held to the addresses alone,
 so on a shared address an allowlist is as narrow as that address. Queries to outside
 DNS servers are checked one by one, and so is every request on a plain-HTTP connection
-(keep-alive and pipelined ones too). The Mac (`host.docker.internal`) counts as a name.
+(keep-alive and pipelined ones too, any method). Under an allowlist pratico reads plain
+HTTP line by line and refuses what it cannot read, so a plain-HTTP body with a line over
+8 KiB is refused; HTTPS, which most traffic is, is not affected. The Mac (`host.docker.internal`) counts as a name.
 Containers' own networks are not affected.
 The MCP `run` and `start` tools set the label from `egress`.
 

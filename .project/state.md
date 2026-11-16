@@ -17,6 +17,7 @@
 - `pratico-shim` needs `com.apple.security.virtualization`. A plain `swift build` drops it; use `make build`, which re-signs. Symptom: `exit.json` says the process lacks the entitlement, exit 127.
 - Shim sockets live in `<home>/run/<short id>.sock`; anything under `containers/<64-hex id>/` exceeds the 104-byte Unix socket limit.
 - The MCP token (`~/.pratico/mcp-token`) is as powerful as `docker.sock`: never log it, never serve MCP beyond 127.0.0.1, and keep the Host/Origin checks before the token check (`MCPServer.refusal`).
+- `make release` checks the tree is clean at its start, then runs tests and builds the DMG from the working tree minutes later: do not edit sources or build while it runs (twice, edits made during a release nearly went into its DMG).
 - Container output reaches the daemon through `LogWatch` (kqueue on the shim's log, reopened after rotation, plus a 1 s tick). Do not go back to a polling thread per container: it cost 2.6% of a core with 16 idle containers (0.5% now).
 - Invariants are `precondition`s (Tiger Style): a broken one stops the process, the daemon or that container's shim. Input from clients or from a container (`ps` output, guest files) is never asserted; it is answered with an APIError: a precondition there lets a client or an image crash the daemon.
 - `blocking { }` (ImageBackend.swift) waits on a semaphore; call it only from the daemon's connection threads or plain threads, never from a Swift concurrency context.

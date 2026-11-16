@@ -792,7 +792,7 @@ private func emptyDir() throws -> URL {
     #expect(FirstBytes.inspect(Array(record.prefix(20))) == .needMore)
     #expect(FirstBytes.inspect(Array("GET / HTTP/1.1\r\nHost: Pypi.org:8080\r\nAccept: */*\r\n\r\n".utf8)) == .name("pypi.org"))
     #expect(FirstBytes.inspect(Array("GET / HTTP/1.1\r\nHost: x".utf8)) == .needMore)
-    #expect(FirstBytes.inspect([0x53, 0x53, 0x48, 0x2d]) == .none)  // SSH-…
+    #expect(FirstBytes.inspect(Array("SSH-2.0-OpenSSH_9.6\r\n".utf8)) == .none)  // a banner ends its line
     #expect(FirstBytes.inspect([0x16, 3, 1, 0xff, 0xff, 1, 0, 0]) == .needMore)  // a claimed 64 KiB record, cut short
 }
 
@@ -828,14 +828,32 @@ private func emptyDir() throws -> URL {
     #expect(http("GET http:/// HTTP/1.1\r\n\r\n") == .unnamed)
     #expect(http("GET evil.example HTTP/1.1\r\nHost: a.example\r\n\r\n") == .unnamed)
     #expect(http("CONNECT evil.example:443 HTTP/1.1\r\nHost: evil.example:443\r\n\r\n") == .name("evil.example"))
-    let later = FirstBytes.requestHosts(Array("GET / HTTP/1.1\r\nHost: a.example\r\n\r\nGET http://b.example/ HTTP/1.1\r\nhost: C.example:80\r\n\r\n".utf8))
+    var stream = HTTPStream()
+    let later = stream.feed(Array("GET / HTTP/1.1\r\nHost: a.example\r\n\r\nGET http://b.example/ HTTP/1.1\r\nhost: C.example:80\r\n\r\n".utf8))
     #expect(later == ["a.example", "b.example", "c.example"])
 }
 
 @Test func hostsHideNowhere() {
-    #expect(FirstBytes.requestHosts(Array("GET / HTTP/1.1\nHost: evil.example\n\n".utf8)) == ["evil.example"])
-    #expect(FirstBytes.requestHosts(Array("GET / HTTP/1.1\r\nHost : evil.example\r\n\r\n".utf8)) == ["evil.example"])
-    #expect(FirstBytes.requestHosts(Array("GET / HTTP/1.1\r\nHost: a.example\r\n evil.example\r\n\r\n".utf8)) == ["a.example", ""])
+    func hosts(_ chunks: [String]) -> [String]? {
+        var stream = HTTPStream()
+        var all: [String] = []
+        for c in chunks {
+            guard let h = stream.feed(Array(c.utf8)) else { return nil }
+            all += h
+        }
+        return all
+    }
+    #expect(hosts(["GET / HTTP/1.1\nHost: evil.example\n\n"]) == ["evil.example"])
+    #expect(hosts(["GET / HTTP/1.1\r\nHost : evil.example\r\n\r\n"]) == ["evil.example"])
+    #expect(hosts(["GET / HTTP/1.1\r\nHost: a.example\r\n evil.example\r\n\r\n"]) == nil)  // folded
+    #expect(hosts(["PROPFIND http://evil.example/ HTTP/1.1\r\n"]) == ["evil.example"])  // any method
+    #expect(hosts(["GET /x HTTP/1.1\r\nHo", "st: evil.example\r\n"]) == ["evil.example"])  // split across segments
+    #expect(hosts([String(repeating: "a", count: 9000)]) == nil)  // a line past the bound
+    #expect(hosts(["GET  \tevil.example:80  HTTP/1.1\r\n"]) == nil)  // an unreadable target
     #expect(FirstBytes.inspect(Array("GET / HTTP/1.1\r\nHost: a.example\r\n evil\r\n\r\n".utf8)) == .unnamed)
     #expect(FirstBytes.inspect(Array("GET / HTTP/1.1\r\nHost: a.example\nHost: evil.example\r\n\r\n".utf8)) == .unnamed)
+    #expect(FirstBytes.inspect(Array("PROPFIND / HTTP/1.1\r\nHost: a.example\r\n\r\n".utf8)) == .name("a.example"))
+    #expect(FirstBytes.inspect(Array("SSH-2.0-OpenSSH_9.6\r\n".utf8)) == .none)
+    #expect(FirstBytes.inspect([0, 0, 0, 8, 4, 210, 22, 47]) == .none)  // Postgres SSLRequest: never held
+    #expect(FirstBytes.inspect(Array("PING".utf8)) == .needMore)
 }

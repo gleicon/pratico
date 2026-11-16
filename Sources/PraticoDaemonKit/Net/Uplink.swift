@@ -481,7 +481,7 @@ final class TCPConn {
     /// (keep-alive) is checked as the first was. `tail` holds the end of the last segment,
     /// so a header split across two is still seen.
     private var watchHTTP = false
-    private var tail: [UInt8] = []
+    private var http = HTTPStream()
 
     static let receiveCapacity = 1 << 20
     /// Bytes in flight to the guest, whatever window it advertises.
@@ -673,7 +673,7 @@ final class TCPConn {
         watchHTTP = carried != nil && toHost.first != 0x16 && guardian.hasAllowlist(container)
         // Requests pipelined behind the first, in these same bytes, are checked before any goes.
         if watchHTTP {
-            tail = []
+            http = HTTPStream()
             return keepAliveAllowed(toHost)
         }
         return true
@@ -683,10 +683,11 @@ final class TCPConn {
     /// connection reset) when one is not on it.
     private func keepAliveAllowed(_ payload: [UInt8]) -> Bool {
         let guardian = uplink.sw.egress
-        let window = tail + payload
-        tail = Array(window.suffix(1024))
-        for host in FirstBytes.requestHosts(window) {
-            guard case .block(let why) = guardian.checkCarried(port.containerId, host.isEmpty ? "(unreadable)" : host) else { continue }
+        let hosts = http.feed(payload)
+        for host in hosts ?? ["(unreadable)"] {
+            var verdict = guardian.checkCarried(port.containerId, host)
+            if hosts == nil { verdict = .block("an HTTP line pratico cannot read (folded, or past \(FirstBytes.maxLine) bytes); this container's egress allowlist needs every request named") }
+            guard case .block(let why) = verdict else { continue }
             guardian.record(port.containerId, .init(time: Date(), proto: "tcp", ip: key.dstIP, port: key.dstPort, name: host, blocked: true, reason: why))
             toHost.removeAll()
             close(reset: true)

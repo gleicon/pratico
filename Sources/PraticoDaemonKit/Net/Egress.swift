@@ -188,13 +188,40 @@ enum FirstBytes {
     static func inspect(_ b: [UInt8]) -> Result {
         guard !b.isEmpty else { return .needMore }
         if b[0] == 0x16 { return clientHello(b) }
-        // HTTP only while the bytes still spell a method: a protocol whose client speaks
-        // and then waits (SSH's banner, SMTP's EHLO) must never be held.
-        let start = b.prefix(8)
-        let methods = ["GET ", "POST ", "PUT ", "HEAD ", "DELETE ", "OPTIONS ", "PATCH ", "CONNECT "].map { Array($0.utf8) }
-        if methods.contains(where: { $0.count > start.count && $0.starts(with: start) }) { return .needMore }
-        if methods.contains(where: { start.starts(with: $0) }) { return httpHost(b) }
-        return .none
+        // HTTP is told by its request line (`TOKEN target HTTP/x.y`), whatever the method.
+        // Bytes are held only while they read as text and until that first line ends: a
+        // binary client (Postgres starts with length bytes) is never held, and a line-based
+        // one (an SSH banner, Redis's PING) ends its line at once.
+        let head = b.prefix(maxLine)
+        guard let newline = head.firstIndex(where: { $0 == 10 || $0 == 13 }) else {
+            guard head.allSatisfy({ (0x20...0x7E).contains($0) || $0 == 9 }) else { return .none }
+            return b.count >= maxLine ? .unnamed : .needMore
+        }
+        let line = String(decoding: head[..<newline], as: UTF8.self)
+        return requestLine(line) != nil ? httpHost(b) : .none
+    }
+
+    /// The longest line read, in a first request or later: past it, a line names nothing.
+    static let maxLine = 8 * 1024
+
+    /// `TOKEN target HTTP/x.y`: method and target, for any method.
+    static func requestLine(_ line: String) -> (method: String, target: String)? {
+        let parts = line.split(whereSeparator: { $0 == " " || $0 == "\t" })
+        let tchars = Set("!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
+        guard parts.count == 3, parts[2].hasPrefix("HTTP/"), !parts[0].isEmpty, parts[0].allSatisfy(tchars.contains) else { return nil }
+        return (String(parts[0]), String(parts[1]))
+    }
+
+    /// The host a request target names: nil for origin-form (`/…`, `*`), the host for
+    /// absolute-form and CONNECT's authority-form, "" for a target that cannot be read.
+    static func targetHost(_ method: String, _ target: String) -> String? {
+        if target.hasPrefix("/") || target == "*" { return nil }
+        if method.uppercased() == "CONNECT" {
+            let host = target.hasPrefix("[") ? "" : target.splitOnce(":").0
+            return EgressGuard.normalized(host)
+        }
+        guard target.contains("://"), let host = URL(string: target)?.host, !host.isEmpty else { return "" }
+        return EgressGuard.normalized(host)
     }
 
     static func clientHello(_ b: [UInt8]) -> Result {
@@ -238,17 +265,9 @@ enum FirstBytes {
         if text.replacingOccurrences(of: "\r\n", with: "").contains(where: { $0 == "\n" || $0 == "\r" }) { return .unnamed }
         // An absolute-form target (`GET http://host/ …`) or CONNECT's `host:port` is where a
         // proxy sends it; one that cannot be read names nothing.
-        let request = lines.first?.split(separator: " ").map(String.init) ?? []
-        let target = request.count > 1 ? request[1] : ""
-        var absolute: String?
-        if request.first == "CONNECT" {
-            let (host, _) = target.splitOnce(":")
-            guard !host.isEmpty else { return .unnamed }
-            absolute = EgressGuard.normalized(host)
-        } else if !target.hasPrefix("/") && target != "*" {
-            guard target.contains("://"), let host = URL(string: target)?.host, !host.isEmpty else { return .unnamed }
-            absolute = EgressGuard.normalized(host)
-        }
+        guard let request = lines.first.flatMap({ requestLine(String($0)) }) else { return .unnamed }
+        let absolute = targetHost(request.method, request.target)
+        if absolute == "" { return .unnamed }
         let hosts = lines.dropFirst().compactMap { line -> String? in
             let (key, value) = String(line).splitOnce(":")
             guard key.trimmingCharacters(in: .whitespaces).lowercased() == "host", let value else { return nil }
@@ -260,36 +279,6 @@ enum FirstBytes {
         if let absolute, let host = hosts.first, host != absolute { return .unnamed }
         guard let name = absolute ?? hosts.first, !name.isEmpty else { return .unnamed }
         return .name(name)
-    }
-
-    /// Every host a stretch of plain-HTTP client bytes names: `Host:` headers and absolute
-    /// or CONNECT targets on request lines. Requests after a connection's first one
-    /// (keep-alive) are checked with it; a body that happens to hold such a line is
-    /// checked too, which errs toward refusing.
-    static func requestHosts(_ b: [UInt8]) -> [String] {
-        let text = String(decoding: b, as: UTF8.self)
-        var hosts: [String] = []
-        var afterHost = false
-        // Any line ending, as lenient servers read them; `Host :` and a folded Host line
-        // count too, the folded one as unreadable (refused under an allowlist).
-        // `\r\n` is one Character in Swift: isNewline covers it, `\n`, and `\r` alike.
-        for raw in text.split(whereSeparator: \.isNewline).prefix(4096) {
-            let l = String(raw)
-            if afterHost, l.first == " " || l.first == "\t" { hosts.append(""); continue }
-            afterHost = false
-            let (name, value) = l.splitOnce(":")
-            if name.trimmingCharacters(in: .whitespaces).lowercased() == "host", let value {
-                var host = value.trimmingCharacters(in: .whitespaces)
-                if let colon = host.lastIndex(of: ":"), !host.contains("]") { host = String(host[..<colon]) }
-                hosts.append(EgressGuard.normalized(host))
-                afterHost = true
-            } else if let method = ["GET ", "POST ", "PUT ", "HEAD ", "DELETE ", "OPTIONS ", "PATCH ", "CONNECT "].first(where: l.hasPrefix) {
-                let target = l.dropFirst(method.count).split(separator: " ").first.map(String.init) ?? ""
-                if method == "CONNECT " { hosts.append(EgressGuard.normalized(target.splitOnce(":").0)) }
-                else if target.contains("://") { hosts.append(URL(string: target)?.host.map(EgressGuard.normalized) ?? "") }
-            }
-        }
-        return hosts
     }
 
     private static func find(_ hay: [UInt8], _ needle: [UInt8]) -> Int? {
@@ -331,5 +320,51 @@ enum FirstBytes {
             defer { offset += n }
             return Array(b[offset..<offset + n])
         }
+    }
+}
+
+/// Later requests on a plain-HTTP connection from a container with an allowlist: lines
+/// read across segments, the incomplete one kept whole up to `FirstBytes.maxLine`, and
+/// every host they name (request targets, Host headers) handed back to be checked. A body
+/// that holds such a line is checked too, and a line past the bound is unreadable: both
+/// err toward refusing (bodies of plain HTTP are rare beside HTTPS's).
+struct HTTPStream {
+    private var partial: [UInt8] = []
+    private var afterHost = false
+    private var lastCR = false
+
+    /// The hosts complete lines in `bytes` name; nil when one cannot be read. CRLF, LF, and
+    /// a lone CR each end a line (lenient servers read all three).
+    mutating func feed(_ bytes: [UInt8]) -> [String]? {
+        var hosts: [String] = []
+        for byte in bytes {
+            defer { lastCR = byte == 13 }
+            if byte == 10 && lastCR { continue }  // the LF of a CRLF
+            guard byte == 10 || byte == 13 else {
+                partial.append(byte)
+                if partial.count > FirstBytes.maxLine { return nil }
+                continue
+            }
+            let line = String(decoding: partial, as: UTF8.self)
+            partial.removeAll(keepingCapacity: true)
+            guard let found = read(line) else { return nil }
+            hosts += found
+        }
+        return hosts
+    }
+
+    private mutating func read(_ line: String) -> [String]? {
+        if afterHost, line.first == " " || line.first == "\t" { return nil }  // a folded Host
+        afterHost = false
+        if let r = FirstBytes.requestLine(line) {
+            guard let host = FirstBytes.targetHost(r.method, r.target) else { return [] }
+            return host.isEmpty ? nil : [host]
+        }
+        let (name, value) = line.splitOnce(":")
+        guard name.trimmingCharacters(in: .whitespaces).lowercased() == "host", let value else { return [] }
+        afterHost = true
+        var host = value.trimmingCharacters(in: .whitespaces)
+        if let colon = host.lastIndex(of: ":"), !host.contains("]") { host = String(host[..<colon]) }
+        return host.isEmpty ? nil : [EgressGuard.normalized(host)]
     }
 }
