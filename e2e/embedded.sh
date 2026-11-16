@@ -824,8 +824,10 @@ docker run -d --name e-mysql -e MYSQL_ROOT_PASSWORD=x mysql:8.4 >/dev/null
 eventually "redis runs on its default volume" sh -c '[ "$(docker exec e-redis redis-cli ping 2>/dev/null)" = PONG ]'
 for _ in $(seq 60); do docker exec e-pg pg_isready -U postgres >/dev/null 2>&1 && break; sleep 0.5; done
 expect_eq "postgres runs and answers" "$(docker exec e-pg psql -U postgres -tAc 'select 1+1' 2>&1)" "2"
-for _ in $(seq 360); do docker exec e-mysql mysqladmin -uroot -px ping >/dev/null 2>&1 && break; sleep 0.5; done
-check "mysql runs and answers" docker exec e-mysql mysqladmin -uroot -px ping
+# The entrypoint's temporary server answers ping during init, then restarts: wait for
+# the init to be done, then for the real server.
+for _ in $(seq 360); do docker logs e-mysql 2>&1 | grep -q "init process done" && break; sleep 0.5; done
+eventually "mysql runs and answers" docker exec e-mysql mysqladmin -uroot -px ping
 expect_eq "copy-up kept the image's owner on /data" "$(docker exec e-redis stat -c '%U' /data)" "redis"
 docker rm -f -v e-redis e-pg e-mysql >/dev/null
 docker volume create e-disk >/dev/null
@@ -857,6 +859,20 @@ docker run --name e-allow --label dev.pratico.egress.allow=example.com alpine sh
 expect_eq "an allowlist lets its names through and refuses the rest" "$(grep -E 'allowed-ok|name-refused|address-refused' "$HOME_DIR/allow.out" | tr '\n' ' ')" "allowed-ok name-refused address-refused "
 expect_has "and says why" "$(flows e-allow)" "example.org is not on this container's egress allowlist"
 docker rm -f e-allow >/dev/null
+docker run --name e-ping alpine ping -c1 -W2 192.0.2.1 >/dev/null 2>&1 || true
+expect_has "an echo to a listed address is refused too" "$(flows e-ping)" "icmp 192.0.2.1 0 blocked"
+docker rm -f e-ping >/dev/null
+docker run --name e-nosni --label dev.pratico.egress.allow=example.com python:3.13-slim python3 -c '
+import socket, ssl
+ip = socket.gethostbyname("example.com")
+ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+try:
+    ctx.wrap_socket(socket.create_connection((ip, 443), timeout=10)).close(); print("no-sni-through")
+except Exception: print("no-sni-refused")
+' >"$HOME_DIR/nosni.out" 2>&1
+expect_eq "with an allowlist, TLS without a name is refused" "$(tail -1 "$HOME_DIR/nosni.out")" "no-sni-refused"
+expect_has "and says why" "$(flows e-nosni)" "without a name pratico can read"
+docker rm -f e-nosni >/dev/null
 
 # Many containers stopping together on a fresh daemon (the uplink's first use comes from
 # several threads at once; a lazy var there crashed the daemon).

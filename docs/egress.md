@@ -56,9 +56,14 @@ separated; `*.example.com` covers subdomains:
 docker run --label dev.pratico.egress.allow=pypi.org,files.pythonhosted.org python:3.13-slim pip install requests
 ```
 
-Only listed names resolve, connections go only to addresses pratico resolved for them,
-and an HTTPS or HTTP connection must name one of them too. The Mac
-(`host.docker.internal`) counts as a name. Containers' own networks are not affected.
+Only listed names resolve, connections and pings go only to addresses pratico resolved
+for them, and an HTTPS or HTTP connection must name one of them too. TLS or HTTP whose
+name pratico cannot read (no SNI, a ClientHello split across records, two `Host`
+headers, a request target naming another host) is refused: on a CDN the same address
+serves many sites. Other protocols (SSH, a database) are held to the addresses alone,
+so on a shared address an allowlist is as narrow as that address. Queries to outside
+DNS servers are checked one by one. The Mac (`host.docker.internal`) counts as a name.
+Containers' own networks are not affected.
 The MCP `run` and `start` tools set the label from `egress`.
 
 Decision: SPEC D-51. Example: [examples/11-egress.sh](../examples/11-egress.sh).

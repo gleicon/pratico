@@ -122,6 +122,12 @@ final class Uplink: @unchecked Sendable {
             udp[key] = flow
         }
         guard let flow = udp[key] else { return }
+        // Each query to an outside DNS server, not only a flow's first: a later one could ask
+        // for a listed name, or carry data out in names (DNS tunnelling).
+        if d.dstPort == 53, let q = DNSQuery(d.payload), case .block(let why) = sw.egress.checkName(port.containerId, q.name) {
+            sw.egress.record(port.containerId, .init(time: Date(), proto: "dns", ip: key.dstIP, port: 53, name: q.name, blocked: true, reason: why))
+            return
+        }
         flow.last = Date()
         _ = d.payload.withUnsafeBytes { Darwin.send(flow.fd, $0.baseAddress, $0.count, 0) }
     }
@@ -131,6 +137,9 @@ final class Uplink: @unchecked Sendable {
     private func ping(_ ip: IPv4Packet, _ port: NetPort, _ target: UInt32) {
         let p = ip.payload
         guard p.count >= 8, p[0] == 8, pings[port.path, default: 0] < Self.maxPingsPerNIC else { return }
+        // ICMP carries data too: the guard sees each echo, as it sees each flow.
+        let key = FlowKey(path: port.path, srcIP: ip.src, srcPort: 0, dstIP: ip.dst, dstPort: 0)
+        guard egressAllows(key, port, target: target, dnsQuery: nil, proto: "icmp") else { return }
         let fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP)
         guard fd >= 0 else { return }
         var sa = Self.sockaddr4(target, 0)
@@ -209,17 +218,17 @@ final class Uplink: @unchecked Sendable {
     /// A new flow's destination against the egress guard (D-51): refused ones are recorded
     /// here; a TCP flow it allows is recorded by its connection, once its first bytes name
     /// it. A query to an outside DNS server is checked by the name it asks for.
-    private func egressAllows(_ key: FlowKey, _ port: NetPort, target: UInt32, dnsQuery: DNSQuery?, tcp: Bool = false) -> Bool {
+    private func egressAllows(_ key: FlowKey, _ port: NetPort, target: UInt32, dnsQuery: DNSQuery?, tcp: Bool = false, proto: String = "udp") -> Bool {
         let guardian = sw.egress
         let isMac = target == IPv4.parse("127.0.0.1")
         var verdict = guardian.checkAddress(port.containerId, key.dstIP, port: key.dstPort, isMac: isMac)
         if verdict == .allow, let q = dnsQuery, !isMac { verdict = guardian.checkName(port.containerId, q.name) }
         let name = dnsQuery?.name ?? guardian.name(port.containerId, key.dstIP)
         if case .block(let why) = verdict {
-            guardian.record(port.containerId, .init(time: Date(), proto: tcp ? "tcp" : "udp", ip: key.dstIP, port: key.dstPort, name: name, blocked: true, reason: why))
+            guardian.record(port.containerId, .init(time: Date(), proto: tcp ? "tcp" : proto, ip: key.dstIP, port: key.dstPort, name: name, blocked: true, reason: why))
             return false
         }
-        if !tcp { guardian.record(port.containerId, .init(time: Date(), proto: "udp", ip: key.dstIP, port: key.dstPort, name: name, blocked: false, reason: nil)) }
+        if !tcp { guardian.record(port.containerId, .init(time: Date(), proto: proto, ip: key.dstIP, port: key.dstPort, name: name, blocked: false, reason: nil)) }
         return true
     }
 
@@ -634,13 +643,21 @@ final class TCPConn {
         let container = port.containerId
         let resolved = guardian.name(container, key.dstIP)
         var carried: String?
+        var unnamed = false
         switch FirstBytes.inspect(toHost) {
         case .needMore where toHost.count < FirstBytes.maxInspect && !final: return false
         case .name(let n): carried = n
-        default: break
+        case .unnamed, .needMore: unnamed = true
+        case .none: break
         }
         inspecting = false
-        let verdict = carried.map { guardian.checkCarried(container, $0) } ?? .allow
+        var verdict = carried.map { guardian.checkCarried(container, $0) } ?? .allow
+        // With an allowlist, TLS or HTTP that names nothing readable (a ClientHello split
+        // across records, no SNI, two Host headers) is refused: the address alone could be a
+        // CDN's, shared with sites the list does not name (domain fronting).
+        if unnamed, guardian.hasAllowlist(container) {
+            verdict = .block("TLS or HTTP to \(resolved ?? IPv4.format(key.dstIP)) without a name pratico can read; this container's egress allowlist needs one")
+        }
         if case .block(let why) = verdict {
             guardian.record(container, .init(time: Date(), proto: "tcp", ip: key.dstIP, port: key.dstPort, name: carried, blocked: true, reason: why))
             toHost.removeAll()

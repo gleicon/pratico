@@ -54,6 +54,8 @@ final class EgressGuard: @unchecked Sendable {
         return .allow
     }
 
+    func hasAllowlist(_ container: String) -> Bool { allowlist(container) != nil }
+
     /// A connection's first packet: its address, and the name pratico resolved for it.
     func checkAddress(_ container: String, _ ip: UInt32, port: UInt16, isMac: Bool) -> Verdict {
         let known = lock.withLock { names[container]?[ip] }
@@ -172,6 +174,10 @@ enum FirstBytes {
     enum Result: Equatable {
         case needMore
         case name(String)
+        /// TLS or HTTP whose name cannot be read: no SNI, a malformed or split ClientHello,
+        /// an ambiguous request (two Host headers, a target naming another host).
+        case unnamed
+        /// Another protocol.
         case none
     }
 
@@ -193,16 +199,16 @@ enum FirstBytes {
 
     static func clientHello(_ b: [UInt8]) -> Result {
         guard b.count >= 5 else { return .needMore }
-        guard b[1] == 0x03 else { return .none }
+        guard b[1] == 0x03 else { return .unnamed }
         let recordLength = Int(b[3]) << 8 | Int(b[4])
         guard b.count >= 5 + min(recordLength, 4) else { return .needMore }
         var r = Reader(b, from: 5, to: min(b.count, 5 + recordLength))
-        guard r.byte() == 0x01, let _ = r.skip(3), let _ = r.skip(2 + 32) else { return b.count < 5 + recordLength ? .needMore : .none }
+        guard r.byte() == 0x01, let _ = r.skip(3), let _ = r.skip(2 + 32) else { return b.count < 5 + recordLength ? .needMore : .unnamed }
         guard let sid = r.byte(), r.skip(Int(sid)) != nil,
             let suites = r.u16(), r.skip(Int(suites)) != nil,
             let comp = r.byte(), r.skip(Int(comp)) != nil,
             let extLen = r.u16()
-        else { return b.count < 5 + recordLength ? .needMore : .none }
+        else { return b.count < 5 + recordLength ? .needMore : .unnamed }
         let end = r.offset + Int(extLen)
         var count = 0
         while r.offset + 4 <= end, count < 256 {
@@ -214,24 +220,31 @@ enum FirstBytes {
             }
             guard r.u16() != nil, r.byte() == 0, let nameLen = r.u16(), let bytes = r.take(Int(nameLen)),
                 let name = String(bytes: bytes, encoding: .ascii), !name.isEmpty, name.count <= 253
-            else { return .none }
+            else { return .unnamed }
             return .name(EgressGuard.normalized(name))
         }
-        return b.count < 5 + recordLength ? .needMore : .none
+        return b.count < 5 + recordLength ? .needMore : .unnamed
     }
 
     static func httpHost(_ b: [UInt8]) -> Result {
         let head = b.prefix(8 * 1024)
         guard let end = find(Array(head), [13, 10, 13, 10]) else { return b.count >= 8 * 1024 ? .none : .needMore }
         let text = String(decoding: head[..<end], as: UTF8.self)
-        for line in text.split(separator: "\r\n").dropFirst() {
+        let lines = text.split(separator: "\r\n")
+        // An absolute-form target (`GET http://host/ …`) is where a proxy sends it.
+        let target = lines.first?.split(separator: " ").dropFirst().first.map(String.init) ?? ""
+        let absolute = target.contains("://") ? URL(string: target)?.host.map(EgressGuard.normalized) : nil
+        let hosts = lines.dropFirst().compactMap { line -> String? in
             let (key, value) = String(line).splitOnce(":")
-            guard key.lowercased() == "host", let value else { continue }
+            guard key.trimmingCharacters(in: .whitespaces).lowercased() == "host", let value else { return nil }
             var host = value.trimmingCharacters(in: .whitespaces)
             if let colon = host.lastIndex(of: ":"), !host.contains("]") { host = String(host[..<colon]) }
-            return host.isEmpty ? .none : .name(EgressGuard.normalized(host))
+            return EgressGuard.normalized(host)
         }
-        return .none
+        guard hosts.count <= 1 else { return .unnamed }
+        if let absolute, let host = hosts.first, host != absolute { return .unnamed }
+        guard let name = absolute ?? hosts.first, !name.isEmpty else { return .unnamed }
+        return .name(name)
     }
 
     private static func find(_ hay: [UInt8], _ needle: [UInt8]) -> Int? {

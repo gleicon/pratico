@@ -812,3 +812,12 @@ private func emptyDir() throws -> URL {
     let rows = EgressFeeds.csv(Data("# c\n\"1\",\"2024\",\"http://bad.example/x\",\"online\"\n".utf8))
     #expect(rows == [["1", "2024", "http://bad.example/x", "online"]])
 }
+
+@Test func ambiguousFirstBytesAreUnnamed() {
+    func http(_ s: String) -> FirstBytes.Result { FirstBytes.inspect(Array(s.utf8)) }
+    #expect(http("GET http://evil.example/x HTTP/1.1\r\nHost: allowed.example\r\n\r\n") == .unnamed)
+    #expect(http("GET / HTTP/1.1\r\nHost: a.example\r\nHost: b.example\r\n\r\n") == .unnamed)
+    #expect(http("GET http://a.example/x HTTP/1.1\r\nHost: a.example\r\n\r\n") == .name("a.example"))
+    #expect(http("GET / HTTP/1.1\r\nAccept: */*\r\n\r\n") == .unnamed)
+    #expect(FirstBytes.inspect([0x16, 0x02, 0, 0, 1, 0]) == .unnamed)  // TLS-looking, wrong version
+}
