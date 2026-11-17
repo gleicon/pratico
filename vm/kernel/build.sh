@@ -33,13 +33,14 @@ make -s ARCH=arm64 olddefconfig
 missing=0
 while IFS= read -r line; do
     case "$line" in
-        CONFIG_*) grep -qxF "$line" .config || { echo "kernel: $line did not survive olddefconfig" >&2; missing=1; } ;;
+        CONFIG_*|"# CONFIG_"*" is not set") grep -qxF "$line" .config || { echo "kernel: $line did not survive olddefconfig" >&2; missing=1; } ;;
     esac
 done < /in/config-pratico
 [ "$missing" = 0 ]
 
 export KBUILD_BUILD_USER=pratico KBUILD_BUILD_HOST=pratico KBUILD_BUILD_VERSION=1
-make -s ARCH=arm64 -j"$(nproc)" LOCALVERSION=-pratico Image
+# JOBS=1: pahole encodes BTF on one thread, deterministic whatever pahole's version.
+make -s ARCH=arm64 -j"$(nproc)" JOBS=1 LOCALVERSION=-pratico Image
 cp arch/arm64/boot/Image /out/vmlinux
 cp .config /out/config
 echo "kernel: $(make -s ARCH=arm64 LOCALVERSION=-pratico kernelrelease)"

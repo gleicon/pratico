@@ -12,6 +12,10 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+// Modified by the Pratico project (2026-11-16): the agent is polled every 2 ms, not
+// 20 ms, and each connection attempt and the whole wait are bounded, so a guest that
+// halts at boot fails the start instead of hanging it (Vendor/README.md).
 //===----------------------------------------------------------------------===//
 
 #if os(macOS)
@@ -19,6 +23,7 @@ import Foundation
 import Logging
 import Virtualization
 import ContainerizationError
+import Synchronization
 
 extension VZVirtualMachine {
     nonisolated func connect(queue: DispatchQueue, port: UInt32) async throws -> VZVirtioSocketConnection {
@@ -123,18 +128,49 @@ extension VZVirtualMachine {
 
 extension VZVirtualMachine {
     func waitForAgent(queue: DispatchQueue) async throws -> FileHandle {
-        let agentConnectionRetryCount: Int = 200
-        let agentConnectionSleepDuration: Duration = .milliseconds(20)
+        let deadline = ContinuousClock.now + .seconds(10)
+        let attemptTimeout: Duration = .seconds(1)
+        let agentConnectionSleepDuration: Duration = .milliseconds(2)
+        let attemptsMax = 5000  // the deadline ends it first; this bounds the loop
 
-        for _ in 0...agentConnectionRetryCount {
+        for _ in 0..<attemptsMax where ContinuousClock.now < deadline {
             do {
-                return try await self.connect(queue: queue, port: Vminitd.port).dupHandle()
+                return try await self.connect(queue: queue, port: Vminitd.port, timeout: attemptTimeout).dupHandle()
             } catch {
                 try await Task.sleep(for: agentConnectionSleepDuration)
-                continue
             }
         }
-        throw ContainerizationError(.timeout, message: "failed to get a connection to agent socket")
+        throw ContainerizationError(.timeout, message: "the guest agent did not answer within 10 s (did the guest kernel or init fail at boot?)")
+    }
+
+    /// `connect(queue:port:)` that gives up after `timeout`: Virtualization calls back
+    /// only when the guest answers, and a guest that halted never does. A connection
+    /// that arrives after the timeout is closed.
+    nonisolated func connect(queue: DispatchQueue, port: UInt32, timeout: Duration) async throws -> VZVirtioSocketConnection {
+        let resumed = Mutex(false)
+        return try await withCheckedThrowingContinuation { cont in
+            let claim = { resumed.withLock { done in defer { done = true }; return !done } }
+            queue.sync {
+                guard let vsock = self.socketDevices[0] as? VZVirtioSocketDevice else {
+                    if claim() { cont.resume(throwing: ContainerizationError(.invalidArgument, message: "no vsock device")) }
+                    return
+                }
+                vsock.connect(toPort: port) { result in
+                    switch result {
+                    case .success(let conn):
+                        // `conn` isn't used concurrently.
+                        nonisolated(unsafe) let conn = conn
+                        if claim() { cont.resume(returning: conn) } else { conn.close() }
+                    case .failure(let error):
+                        if claim() { cont.resume(throwing: error) }
+                    }
+                }
+            }
+            let ms = Int(timeout.components.seconds * 1000 + timeout.components.attoseconds / 1_000_000_000_000_000)
+            queue.asyncAfter(deadline: .now() + .milliseconds(ms)) {
+                if claim() { cont.resume(throwing: ContainerizationError(.timeout, message: "vsock connect to port \(port) timed out")) }
+            }
+        }
     }
 }
 

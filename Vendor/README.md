@@ -18,4 +18,8 @@ git subtree pull --prefix Vendor/containerization https://github.com/apple/conta
 
 ### Changes
 
-None yet: the tree is upstream's.
+- `Sources/Containerization/VZVirtualMachine+Helpers.swift` (2026-11-16): the guest
+  agent is polled every 2 ms instead of 20 ms (a VM is ready about 9 ms sooner on
+  average), each vsock connection attempt gives up after 1 s and the whole wait after
+  10 s. Virtualization calls back only when the guest answers, so a guest that halted at
+  boot used to hang the start for good.
