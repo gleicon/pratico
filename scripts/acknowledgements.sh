@@ -36,9 +36,10 @@ VERSION=$(sed -n 's/.*version = "\(.*\)".*/\1/p' Sources/PraticoCore/Pratico.swi
     echo
     echo "Guest init"
     echo "----------"
-    echo "vminitd and vmexec, from apple/containerization (Apache-2.0, license below, under"
-    echo "containerization), published by Apple as the vminit image. They are static Linux"
-    echo "binaries built with the Swift static Linux SDK, so they also contain:"
+    echo "vminitd and vmexec, built by the Pratico project from apple/containerization's source"
+    echo "(Apache-2.0, license below, under containerization; files Pratico changed say so, and"
+    echo "Vendor/README.md in Pratico's source lists them). They are static Linux binaries built"
+    echo "with the Swift static Linux SDK, so they also contain:"
     echo "  - musl libc (MIT)"
     echo "  - the Swift runtime and standard library (Apache-2.0 with Runtime Library Exception)"
     echo "  - swift-foundation and swift-corelibs-libdispatch (Apache-2.0 with Runtime Library Exception)"

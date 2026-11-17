@@ -52,7 +52,7 @@ final class EmbeddedImageBackend: ImageBackend, @unchecked Sendable {
     func images() -> [JSON] {
         (try? blocking { [store] in
             var out: [JSON] = []
-            for img in try await store.list() where img.reference != EmbeddedRuntime.initReference {
+            for img in try await store.list() where !EmbeddedRuntime.isInitImage(img.reference) {
                 if let r = try? await Self.record(img) { out.append(r) }
             }
             return out

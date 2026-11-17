@@ -16,7 +16,8 @@ vminitd ───────── guest init and agent: processes, exec, cp, s
 
 - **Kernel**: Linux 6.18.63 (the latest LTS) for arm64, built by pratico; see
   [Kernel](#kernel). It ships inside the app, so the first `docker run` works offline.
-- **Init**: `vminitd` from Apple's `vminit` image. It is PID 1 and serves a gRPC agent
+- **Init**: `vminitd`, built by pratico from apple/containerization's source; see
+  [Init](#init). It is PID 1 and serves a gRPC agent
   over vsock: create and signal processes, ptys, interface and address setup, DNS,
   filesystem operations, statistics.
 - **Devices**: the container's root filesystem as a block device (see
@@ -35,9 +36,10 @@ apple/containerization's configuration for Virtualization.framework
   events to attach to. Not kprobes, fentry, or the BPF LSM: on arm64 they cost 63 to 140
   ms on every boot, and nothing in pratico uses them yet.
 - Landlock, for programs that sandbox themselves.
+- 1000 Hz, as virtio's device reset waits out whole timer ticks (8 ms per device at
+  250 Hz), and no EFI or ACPI: the boot loader starts the kernel with a device tree.
 
-A VM boots about 30 ms slower than on the Kata kernel pratico shipped before (BTF and the
-larger image), measured over interleaved runs of `docker run -d`.
+The kernel reaches init in about 70 ms (128 ms in 0.2.14).
 
 `scripts/build-kernel.sh` runs the build in a pratico VM from pinned inputs: the tarball
 by SHA-256, the Debian build image by digest, its packages from a fixed
@@ -46,6 +48,16 @@ the same bytes, and the result must match [`vm/kernel/vmlinux.sha256`](../vm/ker
 so anyone can check that the kernel in the app is the one these files make. The
 configuration it was built with ships in the app as
 `Contents/Resources/runtime/kernel-config`.
+
+## Init
+
+`vminitd` and `vmexec` are built from apple/containerization's source, vendored in
+[`Vendor/containerization`](../Vendor/README.md) at the release pratico builds with, by
+`scripts/build-init.sh`: Swift 6.3.3 and its static Linux SDK, pinned by digest and
+SHA-256, in a pratico VM. The image is tagged by its content and pinned in
+[`vm/init/vminit.sha256`](../vm/init/vminit.sha256); when a new pratico brings a new one,
+the daemon rebuilds its init disk on start, and VMs already running keep the one they
+booted.
 
 ## Lifecycle
 
@@ -103,10 +115,12 @@ latency and daemon bounds on every run.
 | `/_ping`, `/version`, `ps -a` with 100 containers | P99 ≤ 3 ms |
 
 Most of a start is the VM itself. Profiled with `PRATICO_TRACE=1` (step timings in the
-daemon log and `shim.log`): the kernel boot is about 130 ms, at about 8 ms per virtio
-device (measured with four network cards, before one-card networking removed three);
-vminitd setup is about 110 ms; the process start about 40 ms. The Docker CLI adds about
-80 ms of its own.
+daemon log and `shim.log`, the guest console in `boot.log`), in 0.2.15: about 75 ms is
+Virtualization.framework starting the VM, whatever the kernel or memory size; the kernel
+reaches init in about 70 ms; vminitd serves its agent about 15 ms later; the agent's
+setup (rootfs, interface, DNS) takes about 15 ms; the process start about 50 ms, 30 of
+them `vmexec` loading. The Docker CLI adds about 80 ms of its own. Measured against
+0.2.14 over interleaved runs of `docker run -d`, a start is about 70 ms shorter.
 
 ## Why one VM per container
 

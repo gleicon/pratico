@@ -7,8 +7,38 @@ import Foundation
 /// apple/containerization, with the kernel and `vminit` shipped inside pratico, so no
 /// other software is needed. Images live in pratico's own store, `~/.pratico/store`.
 public actor EmbeddedRuntime {
-    /// The bundled init image, pinned in scripts/fetch-runtime-assets.sh.
-    public static let initReference = "ghcr.io/apple/containerization/vminit:0.54.0"
+    /// pratico's init images, the bundled one and earlier ones: runtime, never the user's.
+    static func isInitImage(_ reference: String) -> Bool {
+        reference.hasPrefix("dev.pratico/vminit:") || reference.hasPrefix("ghcr.io/apple/containerization/vminit:")
+    }
+
+    private struct LayoutIndex: Decodable {
+        struct Manifest: Decodable { var annotations: [String: String]? }
+        var manifests: [Manifest]
+    }
+
+    /// The bundled init image's reference, from its layout (scripts/build-init.sh tags it
+    /// by content, so a new init is a new reference).
+    static func initReference(assets: URL) throws -> String {
+        let index = try JSONDecoder().decode(LayoutIndex.self, from: Data(contentsOf: assets.appending(path: "vminit/index.json")))
+        guard let name = index.manifests.first?.annotations?["io.containerd.image.name"], isInitImage(name) else {
+            throw APIError(500, "pratico: the bundled vminit image has no pratico reference")
+        }
+        return name
+    }
+
+    /// Builds `initfs.ext4` from `reference` when it was built from another one (or never):
+    /// into a new file, then renamed over the old, so running VMs keep the one they booted.
+    static func refreshInitfs(store: ImageStore, root: URL, reference: String) async throws {
+        let fm = FileManager.default
+        let disk = root.appending(path: "initfs.ext4"), marker = root.appending(path: "initfs.ref")
+        if fm.fileExists(atPath: disk.path), (try? String(contentsOf: marker, encoding: .utf8)) == reference { return }
+        let fresh = root.appending(path: "initfs.ext4.new")
+        try? fm.removeItem(at: fresh)
+        _ = try await store.getInitImage(reference: reference).initBlock(at: fresh, for: .linuxArm)
+        if fm.fileExists(atPath: disk.path) { _ = try fm.replaceItemAt(disk, withItemAt: fresh) } else { try fm.moveItem(at: fresh, to: disk) }
+        try reference.write(to: marker, atomically: true, encoding: .utf8)
+    }
 
     public let assets: URL
     public let store: ImageStore
@@ -48,11 +78,16 @@ public actor EmbeddedRuntime {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let content = try LocalContentStore(path: root.appending(path: "content", directoryHint: .isDirectory))
         let store = try ImageStore(path: root, contentStore: content)
-        if try await store.getOrNil(reference: initReference) == nil {
+        let reference = try initReference(assets: assets)
+        if try await store.getOrNil(reference: reference) == nil {
             _ = try await store.load(from: assets.appending(path: "vminit", directoryHint: .isDirectory))
         }
+        try await refreshInitfs(store: store, root: root, reference: reference)
+        for img in try await store.list() where isInitImage(img.reference) && img.reference != reference {
+            try? await store.delete(reference: img.reference)  // an earlier pratico's init; its blobs go with prune
+        }
         let kernel = Kernel(path: assets.appending(path: "vmlinux"), platform: .linuxArm)
-        let manager = try await ContainerManager(kernel: kernel, initfsReference: initReference, imageStore: store)
+        let manager = try await ContainerManager(kernel: kernel, initfsReference: reference, imageStore: store)
         return EmbeddedRuntime(assets: assets, store: store, content: content, manager: manager)
     }
 

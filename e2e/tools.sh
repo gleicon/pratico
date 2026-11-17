@@ -14,6 +14,10 @@ mkdir -p "$DOCKER_CONFIG" && echo '{}' >"$DOCKER_CONFIG/config.json"
 "$BIN/pratico-daemon" --home "$HOME_DIR" >>"$HOME_DIR/daemon.log" 2>&1 &
 DAEMON_PID=$!
 cleanup() {
+    local rc=$?
+    # A tool's error often only says what failed (Testcontainers drops a pull's errors and
+    # reports "No such image" at create): the daemon's side says why.
+    if [ "$rc" != 0 ]; then echo "== daemon log (last 40 lines)"; tail -40 "$HOME_DIR/daemon.log"; fi
     "$COMPOSE" -p pratico-tools -f "$(dirname "$0")/tools/compose.yaml" down -v >/dev/null 2>&1 || true
     # Shims outlive the daemon: every VM goes before it does (BuildKit's included).
     ids=$("$DOCKER" ps -aq 2>/dev/null || true)

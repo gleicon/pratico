@@ -244,7 +244,8 @@ Requirements, acceptance criteria, and design decisions: [SPEC.md](SPEC.md).
   kernel.org source with apple/containerization's configuration plus
   [pratico's additions](vm/kernel/config-pratico); how: [docs/vm.md](docs/vm.md#kernel).
   Its configuration ships in the app, next to the kernel.
-- The guest init, `vminitd` and `vmexec`, comes from Apple's `vminit` image (Apache-2.0).
+- The guest init, `vminitd` and `vmexec`, is built by pratico from apple/containerization's
+  source (Apache-2.0, [Vendor/](Vendor/README.md)).
   These static binaries include musl (MIT), the Swift runtime, Foundation, libdispatch
   (Apache-2.0 with Runtime Library Exception), and ICU data (Unicode License V3).
 - osv-scanner, grype, trivy, and syft are installed separately and are not shipped with

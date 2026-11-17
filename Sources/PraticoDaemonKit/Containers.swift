@@ -449,7 +449,7 @@ public final class ContainerService: @unchecked Sendable {
                 cpus: options.cpus, memoryMiB: options.memoryMiB, mounts: mounts)
             spec.nics = nics
             spec.options = try resolved(options, rec, nics: nics, rootfs: rootfs)
-            spec.switchSocket = networks.netSwitch.socketPath ?? ""
+            spec.switchSocket = networks.netSwitch.socketPath
             try JSONEncoder().encode(spec).write(to: files.spec, options: .atomic)
         } catch {
             networks.stopped(rec.id)

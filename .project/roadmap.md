@@ -60,7 +60,7 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 - [ ] Own VM, self-contained (last in the Features discussion; decided 2026-11-15): pratico stops depending on upstream releases and binaries for what runs in and drives a VM. Containerization (Apache-2.0) is forked whole, host package and guest `vminitd`/`vmexec` at one pinned commit, since both speak one agent protocol; LICENSE, NOTICE, and modified files marked; upstream security fixes merged by us, as for the kernel.
   - [x] Build VM: `scripts/build-kernel.sh` builds in a VM of the installed pratico (the previous release's kernel and init) from pinned inputs only; `REPRO=1` builds twice and compares, and the result must match `vm/kernel/vmlinux.sha256`
   - [x] Own kernel (D-52): Linux 6.18.63 LTS with containerization's configuration plus BPF/BTF, tracepoints, uprobes, Landlock (balloon and seccomp filter were already on); configuration shipped in the app, GPL source offer in the acknowledgements; boots ≈30 ms slower than Kata's
-  - [ ] Own init: `vminitd` and `vmexec` built with Swift's static Linux SDK into `initfs.ext4`
+  - [x] Own init (D-53): `vminitd` and `vmexec` built from the vendored source with Swift 6.3.3's static Linux SDK, reproducible, tagged by content; the daemon rebuilds `initfs.ext4` when it changes
   - [ ] Seccomp: `vmexec` installs the filter before exec (Docker's default profile, already ported in ContainerizationOCI), default on; `--security-opt seccomp=<file>` applied; `unconfined` accepted. No runc in the guest (fewer parts, no runc CVEs)
   - [ ] Live limits: `docker update` writes the container's cgroup in the guest (`cpu.max`, `cpu.weight`, `cpuset.cpus`, `memory.max`, `memory.low`, `memory.swap.max`, `pids.max`) within the VM's size; more vCPUs or memory than the VM booted with still needs a restart (Virtualization.framework has no vCPU hotplug, memory cannot grow past boot size)
   - [ ] Memory balloon: a virtio balloon per VM, so idle VMs give RAM back to the Mac and a lower `--memory` on a running container returns the difference
@@ -68,7 +68,7 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
     - [ ] Flight recorder: every exec and exit (argv, uid, parent, code) and the process behind each connection, joined with the switch's flows; in the API, events, the menubar, and the MCP server
     - [ ] File access audit on chosen paths (LSM `file_open`), and opt-in drift prevention (deny exec of binaries not in the image, deny writes to chosen paths). Needs the function tracer and the BPF LSM in the kernel (+63 ms per boot, D-52): pair with boot trimming
     - [ ] Ask mode for agent containers: seccomp `user_notif` on chosen syscalls, decided by the daemon or the menubar
-    - [ ] Boot trimming: own kernel config cut to what a pratico VM uses, measured with `initcall_debug` and ftrace against today's ≈130 ms kernel boot
+    - [~] Boot trimming (D-53): 1000 Hz and no EFI/ACPI took the kernel from 128 to 70 ms to init; agent polled every 2 ms; next: one multi-call `vminitd`/`vmexec` binary (vmexec, 87 MB, is read cold on every start, ≈30 ms), then the agent's setup round trips
     - [ ] On-demand profiling: CPU and off-CPU stacks per container (`perf_event`)
 - [x] Embedded is the default: the app bundles `pratico-shim`, the kernel and `vminit`; acknowledgements (licenses) in the app and DMG
 - [x] `container` CLI adapter, `/etc/hosts` sync, freezer agent and default-network anchor removed; SPEC and docs updated
