@@ -65,9 +65,11 @@ rc=$?
 expect_eq "run --rm prints output" "$(tail -1 <<<"$out")" "hello"
 expect_eq "run --rm returns the exit code" "$rc" "7"
 check "image is listed" test "$(docker images --format '{{.Repository}}:{{.Tag}}' | grep -c '^alpine:latest$')" = 1
-# The kernel the app bundles: its Linux version, from the pinned asset's name.
-kernel=$(sed -n 's|^KERNEL_MEMBER=.*/vmlinux-\([0-9.]*\)-.*|\1|p' scripts/fetch-runtime-assets.sh)
+# The kernel the app bundles (scripts/build-kernel.sh), with its types for BPF and its LSMs.
+kernel="$(sed -n 's/^KERNEL_VERSION=//p' scripts/build-kernel.sh)-pratico"
 expect_eq "kernel is pratico's ($kernel)" "$(docker run --rm alpine uname -r)" "$kernel"
+check "the kernel carries BTF" docker run --rm alpine test -s /sys/kernel/btf/vmlinux
+expect_eq "the kernel runs landlock" "$(docker run --rm --privileged alpine sh -c 'mount -t securityfs none /sys/kernel/security && cat /sys/kernel/security/lsm')" "capability,landlock"
 
 # stdin and terminals
 expect_eq "run -i pipes stdin" "$(printf 'a\nb\nc\n' | docker run -i --rm alpine wc -l | tr -d ' ')" "3"

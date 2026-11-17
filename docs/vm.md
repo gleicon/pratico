@@ -14,14 +14,38 @@ vminitd ───────── guest init and agent: processes, exec, cp, s
 
 ## What a VM is made of
 
-- **Kernel**: Linux 6.18.56 for arm64, as built by Kata Containers 4.3.1, unmodified and
-  pinned by SHA-256. It ships inside the app, so the first `docker run` works offline.
+- **Kernel**: Linux 6.18.63 (the latest LTS) for arm64, built by pratico; see
+  [Kernel](#kernel). It ships inside the app, so the first `docker run` works offline.
 - **Init**: `vminitd` from Apple's `vminit` image. It is PID 1 and serves a gRPC agent
   over vsock: create and signal processes, ptys, interface and address setup, DNS,
   filesystem operations, statistics.
 - **Devices**: the container's root filesystem as a block device (see
   [storage](storage.md)), virtiofs shares for volumes and bind mounts, one network card
   (see [networking](network.md)), and vsock.
+
+## Kernel
+
+pratico builds its guest kernel from kernel.org's source, unmodified, with
+apple/containerization's configuration for Virtualization.framework
+(`Vendor/containerization/kernel/config-arm64`) and pratico's additions
+([`vm/kernel/config-pratico`](../vm/kernel/config-pratico)):
+
+- BPF compiled only (no interpreter) and never for unprivileged users, with the
+  kernel's types (BTF, `/sys/kernel/btf/vmlinux`), and tracepoints, uprobes, and perf
+  events to attach to. Not kprobes, fentry, or the BPF LSM: on arm64 they cost 63 to 140
+  ms on every boot, and nothing in pratico uses them yet.
+- Landlock, for programs that sandbox themselves.
+
+A VM boots about 30 ms slower than on the Kata kernel pratico shipped before (BTF and the
+larger image), measured over interleaved runs of `docker run -d`.
+
+`scripts/build-kernel.sh` runs the build in a pratico VM from pinned inputs: the tarball
+by SHA-256, the Debian build image by digest, its packages from a fixed
+snapshot.debian.org date, and a fixed build timestamp, user, and host. Two builds give
+the same bytes, and the result must match [`vm/kernel/vmlinux.sha256`](../vm/kernel/vmlinux.sha256),
+so anyone can check that the kernel in the app is the one these files make. The
+configuration it was built with ships in the app as
+`Contents/Resources/runtime/kernel-config`.
 
 ## Lifecycle
 

@@ -1,0 +1,24 @@
+# pratico's additions to Vendor/containerization/kernel/config-arm64, merged before
+# olddefconfig; scripts/build-kernel.sh fails if one does not survive it (an option
+# whose dependency is missing is dropped without a word).
+
+# BPF: compiled only (no interpreter to attack), never for unprivileged users, with the
+# kernel's types (BTF) so programs built once run on it (CO-RE).
+CONFIG_BPF_JIT=y
+CONFIG_BPF_JIT_ALWAYS_ON=y
+CONFIG_BPF_UNPRIV_DEFAULT_OFF=y
+CONFIG_DEBUG_INFO_DWARF5=y
+CONFIG_DEBUG_INFO_BTF=y
+
+# What BPF programs attach to: tracepoints, uprobes, perf events. Not the function
+# tracer (fentry, and the BPF LSM, which on arm64 attaches the same way: +63 ms per
+# boot, as it patches 53,523 call sites) nor kprobes (+77 ms), measured 2026-11-16.
+CONFIG_FTRACE=y
+CONFIG_UPROBE_EVENTS=y
+CONFIG_BPF_EVENTS=y
+
+# Landlock, for processes that sandbox themselves. Upstream builds no LSM; Yama stays
+# out, as its default ptrace scope stops a debugger or strace attaching in a container.
+CONFIG_SECURITY=y
+CONFIG_SECURITY_LANDLOCK=y
+CONFIG_LSM="landlock"

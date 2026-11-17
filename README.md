@@ -11,7 +11,7 @@ Website: <https://gleicon.github.io/pratico/> · License: MIT
 ## Requirements
 
 - Apple silicon Mac, macOS 26
-- Nothing else. The app carries the Linux kernel (6.18.56, from Kata Containers 4.3.1) and init
+- Nothing else. The app carries the Linux kernel (6.18.63 LTS, built by pratico) and init
   (`vminitd`) its VMs boot.
 
 ## Install
@@ -240,10 +240,10 @@ Requirements, acceptance criteria, and design decisions: [SPEC.md](SPEC.md).
 
 - [apple/containerization](https://github.com/apple/containerization) (Apache-2.0) and
   its Swift package dependencies are linked into the daemon and shim.
-- The guest kernel is Linux 6.18.56 (GPL-2.0), unmodified, as built by
-  [Kata Containers](https://katacontainers.io) for their
-  [4.3.1 release](https://github.com/kata-containers/kata-containers/releases/tag/4.3.1);
-  source and configuration are published there.
+- The guest kernel is Linux 6.18.63 (GPL-2.0), built by pratico from the unmodified
+  kernel.org source with apple/containerization's configuration plus
+  [pratico's additions](vm/kernel/config-pratico); how: [docs/vm.md](docs/vm.md#kernel).
+  Its configuration ships in the app, next to the kernel.
 - The guest init, `vminitd` and `vmexec`, comes from Apple's `vminit` image (Apache-2.0).
   These static binaries include musl (MIT), the Swift runtime, Foundation, libdispatch
   (Apache-2.0 with Runtime Library Exception), and ICU data (Unicode License V3).

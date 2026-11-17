@@ -2,8 +2,9 @@
 # Fetches the embedded runtime's assets at build time (docs/design/runtime.md) and checks
 # them against pinned SHA-256 digests. Users never download these: they ship in the app.
 #
-#   kernel   vmlinux from the Kata Containers static release (GPL-2.0; source and config
-#            are published with that release).
+#   kernel   vmlinux pratico builds from kernel.org's source (GPL-2.0) with
+#            scripts/build-kernel.sh, checked against vm/kernel/vmlinux.sha256; built
+#            once (about half an hour), then cached in .cache/kernel.
 #   vminit   linux/arm64 image of apple/containerization's vminitd (Apache-2.0), as an
 #            OCI layout directory.
 #
@@ -14,10 +15,6 @@ set -euo pipefail
 OUT="${1:?usage: scripts/fetch-runtime-assets.sh <out-dir>}"
 CACHE="${PRATICO_ASSET_CACHE:-.cache/assets}"
 
-KATA_VERSION=4.3.1
-KATA_URL="https://github.com/kata-containers/kata-containers/releases/download/$KATA_VERSION/kata-static-$KATA_VERSION-arm64.tar.zst"
-KATA_SHA256=2c5bf7cde334ad5307d482f45cceda496f91c9b6b96f5278c47f4f4eac1bbae6  # published by GitHub for the asset
-KERNEL_MEMBER=./opt/kata/share/kata-containers/vmlinux-6.18.56-208
 KERNEL_SHA256=dece388830720fe8bddb41552fff5f486240aeece5acc0aebc1812761e3e3f66
 
 VMINIT_REPO=apple/containerization/vminit
@@ -34,19 +31,14 @@ verify() {  # file, expected digest
 mkdir -p "$CACHE" "$OUT"
 
 # --- Kernel ------------------------------------------------------------------
-if [ ! -f "$CACHE/vmlinux" ] || [ "$(sha "$CACHE/vmlinux")" != "$KERNEL_SHA256" ]; then
-    tarball="$CACHE/kata-static-$KATA_VERSION-arm64.tar.zst"
-    if [ ! -f "$tarball" ]; then
-        curl -fL --retry 3 -o "$tarball.part" "$KATA_URL"
-        mv "$tarball.part" "$tarball"
-    fi
-    verify "$tarball" "$KATA_SHA256"
-    zstd -dc "$tarball" | tar -x -C "$CACHE" "$KERNEL_MEMBER"
-    mv -f "$CACHE/$KERNEL_MEMBER" "$CACHE/vmlinux"
-    rm -rf "$CACHE/opt"
+KERNEL_SHA256=$(cut -d' ' -f1 vm/kernel/vmlinux.sha256)
+built=.cache/kernel/out
+if [ ! -f "$built/vmlinux" ] || [ "$(sha "$built/vmlinux")" != "$KERNEL_SHA256" ]; then
+    scripts/build-kernel.sh "$built"
 fi
-verify "$CACHE/vmlinux" "$KERNEL_SHA256"
-cp "$CACHE/vmlinux" "$OUT/vmlinux"
+verify "$built/vmlinux" "$KERNEL_SHA256"
+cp "$built/vmlinux" "$OUT/vmlinux"
+cp "$built/config" "$OUT/kernel-config"
 
 # --- vminit OCI layout ----------------------------------------------------------
 layout="$CACHE/vminit-$VMINIT_TAG"
@@ -74,4 +66,4 @@ EOF
 fi
 rm -rf "$OUT/vminit"
 cp -R "$layout" "$OUT/vminit"
-echo "runtime assets in $OUT: kernel $KATA_VERSION, vminit $VMINIT_TAG"
+echo "runtime assets in $OUT: kernel $(sed -n 's/^KERNEL_VERSION=//p' scripts/build-kernel.sh), vminit $VMINIT_TAG"

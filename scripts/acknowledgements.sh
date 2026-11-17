@@ -7,9 +7,9 @@ set -euo pipefail
 
 OUT="${1:?usage: scripts/acknowledgements.sh <out-file>}"
 CHECKOUTS=.build/checkouts
-KATA_VERSION=$(sed -n 's/^KATA_VERSION=//p' scripts/fetch-runtime-assets.sh)
-KERNEL=$(sed -n 's|^KERNEL_MEMBER=.*/vmlinux-||p' scripts/fetch-runtime-assets.sh)  # e.g. 6.18.56-208: Linux version and Kata's build number
-LINUX=${KERNEL%-*}
+LINUX=$(sed -n 's/^KERNEL_VERSION=//p' scripts/build-kernel.sh)
+LINUX_SHA256=$(sed -n 's/^KERNEL_SHA256=\([0-9a-f]*\).*/\1/p' scripts/build-kernel.sh)
+VERSION=$(sed -n 's/.*version = "\(.*\)".*/\1/p' Sources/PraticoCore/Pratico.swift)
 [ -d "$CHECKOUTS" ] || { echo "acknowledgements: no $CHECKOUTS; build first" >&2; exit 1; }
 
 {
@@ -22,18 +22,17 @@ LINUX=${KERNEL%-*}
     echo
     echo "Guest kernel"
     echo "------------"
-    echo "Pratico ships a Linux kernel (vmlinux-$KERNEL) from the Kata Containers $KATA_VERSION"
-    echo "release, unmodified. Linux is licensed under GPL-2.0"
+    echo "Pratico ships a Linux kernel (Linux $LINUX), built by the Pratico project from the"
+    echo "unmodified kernel.org source. Linux is licensed under GPL-2.0"
     echo "(https://www.kernel.org/doc/html/latest/process/license-rules.html)."
-    echo "Its corresponding source is the Linux $LINUX source with the Kata Containers $KATA_VERSION"
-    echo "kernel configuration and patches:"
-    echo "  https://github.com/kata-containers/kata-containers/tree/$KATA_VERSION/tools/packaging/kernel"
-    echo "  https://cdn.kernel.org/pub/linux/kernel/"
+    echo "Its corresponding source:"
+    echo "  - linux-$LINUX.tar.xz, SHA-256 $LINUX_SHA256:"
+    echo "    https://cdn.kernel.org/pub/linux/kernel/v${LINUX%%.*}.x/linux-$LINUX.tar.xz"
+    echo "  - its configuration, Contents/Resources/runtime/kernel-config in this app"
+    echo "  - the build scripts: https://github.com/gleicon/pratico/tree/v$VERSION/vm/kernel"
+    echo "    and scripts/build-kernel.sh"
     echo "For three years from the date you received this copy of Pratico, a copy of that source"
     echo "is available on request at https://github.com/gleicon/pratico/issues."
-    echo
-    echo "The kernel is built and published by the Kata Containers project"
-    echo "(https://katacontainers.io, Apache-2.0 for the project's own code; license at the end)."
     echo
     echo "Guest init"
     echo "----------"
@@ -56,8 +55,9 @@ LINUX=${KERNEL%-*}
     echo
     echo "Swift packages"
     echo "--------------"
-    for dir in "$CHECKOUTS"/*/; do
+    for dir in Vendor/*/ "$CHECKOUTS"/*/; do
         name=$(basename "$dir")
+        [ "$dir" != "$CHECKOUTS/$name/" ] || [ ! -d "Vendor/$name" ] || continue  # vendored: listed once, from Vendor
         files=()
         for f in LICENSE LICENSE.txt LICENSE.md NOTICE NOTICE.txt NOTICES.txt; do
             [ -f "$dir$f" ] && files+=("$dir$f")
@@ -67,8 +67,4 @@ LINUX=${KERNEL%-*}
         echo "== $name =="
         for f in "${files[@]}"; do echo; cat "$f"; done
     done
-    echo
-    echo "== kata-containers =="
-    echo
-    cat Support/licenses/kata-containers.txt
 } >"$OUT"
