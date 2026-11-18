@@ -14,8 +14,8 @@ cp -a /src /build/src
 cd /build/src/vminitd
 flags=(-c release --swift-sdk aarch64-swift-linux-musl -Xlinker -s -Xlinker --build-id=none --scratch-path /build/scratch)
 export BUILD_TIME GIT_COMMIT
-swift build "${flags[@]}" --product vminitd >/dev/null
-swift build "${flags[@]}" --product vmexec >/dev/null
+swift build "${flags[@]}" --quiet --product vminitd  # errors go to stdout: keep them
+swift build "${flags[@]}" --quiet --product vmexec
 bin=$(swift build "${flags[@]}" --show-bin-path)
 
 root=/build/rootfs
