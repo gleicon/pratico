@@ -59,6 +59,8 @@ SHA-256, in a pratico VM. The image is tagged by its content and pinned in
 the daemon rebuilds its init disk on start, and VMs already running keep the one they
 booted.
 
+The scripts and code behind both builds, and the seccomp compiler: [tooling](tooling.md).
+
 ## Lifecycle
 
 - **create** clones the root filesystem and records the container. No VM yet.

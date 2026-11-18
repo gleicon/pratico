@@ -12,6 +12,8 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+// Modified by the Pratico project (2026-11-17): the container's seccomp filter is installed (Vendor/README.md).
 //===----------------------------------------------------------------------===//
 
 import ArgumentParser
@@ -267,6 +269,7 @@ struct RunCommand: ParsableCommand {
 
         // Prepare capabilities (before user change)
         let preparedCaps = try App.prepareCapabilities(capabilities: process.capabilities ?? ContainerizationOCI.LinuxCapabilities())
+        if !process.noNewPrivileges { try App.installSeccomp(spec.linux?.seccomp) }
 
         // Change stdio to be owned by the requested user.
         try App.fixStdioPerms(user: process.user)
@@ -279,6 +282,7 @@ struct RunCommand: ParsableCommand {
 
         // Set no_new_privs if requested by the OCI spec.
         try App.setNoNewPrivileges(process: process)
+        if process.noNewPrivileges { try App.installSeccomp(spec.linux?.seccomp) }
 
         // Finally execve the container process.
         try App.exec(process: process, currentEnv: process.env)

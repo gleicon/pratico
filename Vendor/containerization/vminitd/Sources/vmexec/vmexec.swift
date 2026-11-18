@@ -12,6 +12,8 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+// Modified by the Pratico project (2026-11-17): installSeccomp, the container's seccomp filter (Vendor/README.md).
 //===----------------------------------------------------------------------===//
 
 /// NOTE: This binary implements a very small subset of the OCI runtime spec, mostly just
@@ -245,6 +247,25 @@ extension App {
         }
 
         try? caps.apply(kind: [.ambs])
+    }
+
+    /// Installs the container's seccomp filter, compiled from its profile; nothing when
+    /// the profile is nil (unconfined). Without no_new_privs the kernel requires
+    /// CAP_SYS_ADMIN, so callers install it before capabilities drop, as runc does;
+    /// with it, as late as possible.
+    static func installSeccomp(_ profile: ContainerizationOCI.LinuxSeccomp?) throws {
+        guard let profile else { return }
+        let program = try profile.compileARM64()
+        var bytes: [UInt8] = []
+        bytes.reserveCapacity(program.instructions.count * 8)
+        for i in program.instructions {  // struct sock_filter, little-endian
+            withUnsafeBytes(of: i.code.littleEndian) { bytes += $0 }
+            bytes += [i.jt, i.jf]
+            withUnsafeBytes(of: i.k.littleEndian) { bytes += $0 }
+        }
+        precondition(bytes.count == program.instructions.count * 8, "sock_filter records are 8 bytes")
+        let rc = bytes.withUnsafeBytes { CZ_seccomp_set_filter(program.flags, UInt16(program.instructions.count), $0.baseAddress) }
+        guard rc == 0 else { throw App.Errno(stage: "seccomp(SECCOMP_SET_MODE_FILTER)") }
     }
 
     static func setNoNewPrivileges(process: ContainerizationOCI.Process) throws {

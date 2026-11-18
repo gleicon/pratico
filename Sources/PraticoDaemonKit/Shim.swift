@@ -236,6 +236,7 @@ public enum ShimHost {
             config.hosts = hosts
         }
         if let o = spec.options { try Self.apply(o, to: &config) }
+        config.seccompProfile = try Self.seccomp(spec.options)
         for m in spec.mounts {
             if m.socket {
                 config.sockets.append(UnixSocketConfiguration(source: URL(filePath: m.source), destination: URL(filePath: m.destination), direction: .into))
@@ -339,6 +340,15 @@ public enum ShimHost {
         try secure(&config.process, o, privileged: false)
         if let shm = o.shmBytes, let i = config.mounts.firstIndex(where: { $0.destination == "/dev/shm" }) {
             config.mounts[i].options = config.mounts[i].options.filter { !$0.hasPrefix("size=") } + ["size=\(shm / 1024)k"]
+        }
+    }
+
+    /// The container's seccomp filter (D-54); a container with no options gets Docker's default.
+    static func seccomp(_ o: RunOptions?) throws -> LinuxContainer.Configuration.SeccompProfile {
+        switch o?.seccomp ?? .default {
+        case .default: return .default
+        case .unconfined: return .unconfined
+        case .profile(let json): return .profile(try RunOptions.seccompProfile(json, capabilities: o?.capabilities))
         }
     }
 

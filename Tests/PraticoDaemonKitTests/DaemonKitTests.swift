@@ -676,8 +676,15 @@ private func emptyDir() throws -> URL {
     let priv = try parse(["Privileged": true])
     #expect(priv.unmaskedPaths && (priv.capabilities?.count ?? 0) > 30)
     let sec = try parse(["SecurityOpt": ["no-new-privileges", "seccomp=unconfined"]])
-    #expect(sec.noNewPrivileges)
-    #expect(throws: APIError.self) { try parse(["SecurityOpt": ["seccomp=/tmp/profile.json"]]) }
+    #expect(sec.noNewPrivileges && sec.seccomp == .unconfined)
+    #expect(try parse([:]).seccomp == .default)
+    #expect(try parse(["SecurityOpt": ["seccomp=builtin"]]).seccomp == .default)
+    #expect(priv.seccomp == .unconfined)  // as on Docker
+    let custom = #"{"defaultAction":"SCMP_ACT_ALLOW","syscalls":[{"names":["mkdirat"],"action":"SCMP_ACT_ERRNO"}]}"#
+    #expect(try parse(["SecurityOpt": [.string("seccomp=" + custom)]]).seccomp == .profile(custom))
+    #expect(throws: APIError.self) { try parse(["SecurityOpt": ["seccomp=/tmp/profile.json"]]) }  // a path, not contents
+    #expect(throws: APIError.self) { try parse(["SecurityOpt": [#"seccomp={"syscalls":[]}"#]]) }  // no defaultAction
+    #expect(throws: APIError.self) { try parse(["SecurityOpt": [#"seccomp={"defaultAction":"SCMP_ACT_NOTIFY"}"#]]) }
     let proc = try parse(["Ulimits": [["Name": "nofile", "Soft": 1024, "Hard": 2048]], "Sysctls": ["net.ipv4.ip_forward": "1"],
                           "ExtraHosts": ["db:10.0.0.5", "mac=host-gateway"], "Dns": ["9.9.9.9"], "Init": true, "ShmSize": 134_217_728],
                          ["Domainname": "example.com", "StopSignal": "SIGWINCH", "StopTimeout": 3])
@@ -856,4 +863,11 @@ private func emptyDir() throws -> URL {
     #expect(FirstBytes.inspect(Array("SSH-2.0-OpenSSH_9.6\r\n".utf8)) == .none)
     #expect(FirstBytes.inspect([0, 0, 0, 8, 4, 210, 22, 47]) == .none)  // Postgres SSLRequest: never held
     #expect(FirstBytes.inspect(Array("PING".utf8)) == .needMore)
+}
+
+@Test func guestKernelVersionMatchesTheBuild() throws {
+    let script = try String(contentsOfFile: "scripts/build-kernel.sh", encoding: .utf8)
+    let line = script.split(separator: "\n").first { $0.hasPrefix("KERNEL_VERSION=") }
+    let parts = line?.dropFirst("KERNEL_VERSION=".count).split(separator: ".").compactMap { Int($0) } ?? []
+    #expect(parts.count == 3 && parts[0] == RunOptions.guestKernel.major && parts[1] == RunOptions.guestKernel.minor)
 }

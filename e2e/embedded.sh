@@ -692,6 +692,25 @@ docker run -d --name e-caps --cap-drop ALL alpine sleep 300 >/dev/null
 expect_eq "an exec keeps the container's capabilities" "$(docker exec e-caps awk '/CapEff/ {print $2}' /proc/self/status)" "0000000000000000"
 expect_eq "exec --privileged has every one" "$(docker exec --privileged e-caps awk '/CapEff/ {print $2}' /proc/self/status)" "000001ffffffffff"
 docker rm -f e-caps >/dev/null
+# seccomp (D-54): Docker's default profile allows unshare only with CAP_SYS_ADMIN, and a
+# user namespace needs no capability, so the filter alone decides.
+expect_eq "seccomp is on by default" "$(run alpine grep Seccomp: /proc/self/status | awk '{print $2}')" "2"
+expect_has "the default profile refuses unshare without CAP_SYS_ADMIN" "$(run alpine unshare -U true)" "Operation not permitted"
+expect_eq "seccomp=unconfined runs no filter" "$(run --security-opt seccomp=unconfined alpine sh -c 'unshare -U true && grep Seccomp: /proc/self/status' | awk '{print $2}')" "0"
+expect_eq "--privileged runs no filter" "$(run --privileged alpine grep Seccomp: /proc/self/status | awk '{print $2}')" "0"
+SECCOMP="$HOME_DIR/no-mkdir.json"
+cat > "$SECCOMP" <<'JSON'
+{"defaultAction":"SCMP_ACT_ALLOW","archMap":[{"architecture":"SCMP_ARCH_AARCH64","subArchitectures":["SCMP_ARCH_ARM"]}],
+ "syscalls":[{"names":["mkdirat"],"action":"SCMP_ACT_ERRNO","errnoRet":13},
+             {"names":["rmdir"],"action":"SCMP_ACT_ERRNO","includes":{"caps":["CAP_SYS_ADMIN"]}}]}
+JSON
+expect_has "a custom profile (Docker's format, from the CLI) is applied" "$(run --security-opt seccomp="$SECCOMP" alpine mkdir /tmp/x)" "Permission denied"
+expect_eq "its rules gated on a capability the container lacks do not apply" "$(run --security-opt seccomp="$SECCOMP" alpine sh -c 'rmdir /mnt && echo ok')" "ok"
+docker run -d --name e-sec --security-opt seccomp="$SECCOMP" alpine sleep 300 >/dev/null
+expect_has "an exec gets the container's filter" "$(docker exec e-sec mkdir /tmp/y 2>&1)" "Permission denied"
+docker rm -f e-sec >/dev/null
+echo '{"syscalls":[]}' > "$HOME_DIR/bad.json"
+expect_has "a profile without defaultAction is refused at create" "$(run --security-opt seccomp="$HOME_DIR/bad.json" alpine true)" "defaultAction"
 docker run -d --name e-logs alpine sh -c 'echo early; sleep 2; echo late; sleep 300' >/dev/null
 sleep 3
 cut=$(python3 -c 'import time; print(f"{time.time() - 1.5:.3f}")')

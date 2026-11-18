@@ -39,6 +39,7 @@ let package = Package(
         .testTarget(name: "PraticoCoreTests", dependencies: ["PraticoCore"]),
         .testTarget(name: "PraticoDaemonKitTests", dependencies: [
             "PraticoCore", "PraticoDaemonKit", .product(name: "ContainerizationArchive", package: "containerization"),
+            .product(name: "ContainerizationOCI", package: "containerization"),
         ]),
     ]
 )

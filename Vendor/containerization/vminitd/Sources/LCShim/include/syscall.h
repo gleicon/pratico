@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Modified by the Pratico project (2026-11-17): CZ_seccomp_set_filter (Vendor/README.md).
+
 // The below fall into two main categories:
 // 1. Aren't exposed by Swifts glibc modulemap.
 // 2. Don't have syscall wrappers/definitions in glibc/musl.
@@ -124,5 +126,9 @@ typedef struct {
 } CZ_Statfs;
 
 int CZ_statfs(const char *path, CZ_Statfs *out);
+
+// seccomp(SECCOMP_SET_MODE_FILTER, flags, &prog): musl has no wrapper. `filter` is
+// `len` struct sock_filter records (8 bytes each, little-endian). Added by Pratico.
+int CZ_seccomp_set_filter(unsigned int flags, unsigned short len, const void *filter);
 
 #endif

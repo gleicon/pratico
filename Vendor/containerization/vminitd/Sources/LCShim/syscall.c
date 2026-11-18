@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Modified by the Pratico project (2026-11-17): CZ_seccomp_set_filter (Vendor/README.md).
+
 #ifdef __linux__
 #include <sys/prctl.h>
 #include <sys/resource.h>
@@ -69,4 +71,14 @@ int CZ_statfs(const char *path, CZ_Statfs *out) {
   out->f_flags = (unsigned long long)s.f_flags;
   return 0;
 }
+struct cz_sock_fprog {
+  unsigned short len;
+  const void *filter;
+};
+
+int CZ_seccomp_set_filter(unsigned int flags, unsigned short len, const void *filter) {
+  struct cz_sock_fprog prog = {len, filter};
+  return (int)syscall(SYS_seccomp, 1 /* SECCOMP_SET_MODE_FILTER */, flags, &prog);
+}
+
 #endif

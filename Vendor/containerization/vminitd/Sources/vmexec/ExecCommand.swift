@@ -12,6 +12,8 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+// Modified by the Pratico project (2026-11-17): execs get the container's seccomp filter (--bundle-path) (Vendor/README.md).
 //===----------------------------------------------------------------------===//
 
 import ArgumentParser
@@ -40,6 +42,9 @@ struct ExecCommand: ParsableCommand {
     @Option(name: .long, help: "pid of the init process for the container")
     var parentPid: Int
 
+    @Option(name: .long, help: "path to the container's OCI bundle, for its seccomp filter")
+    var bundlePath: String?
+
     func run() throws {
         do {
             let src = URL(fileURLWithPath: processPath)
@@ -48,7 +53,9 @@ struct ExecCommand: ParsableCommand {
                 ContainerizationOCI.Process.self,
                 from: processBytes
             )
-            try execInNamespaces(process: process)
+            // Read before entering the container's mount namespace, where the bundle is not.
+            let seccomp = try bundlePath.map { try ContainerizationOCI.Bundle.load(path: URL(filePath: $0)).loadConfig().linux?.seccomp } ?? nil
+            try execInNamespaces(process: process, seccomp: seccomp)
         } catch {
             App.writeError(error)
             throw error
@@ -61,7 +68,7 @@ struct ExecCommand: ParsableCommand {
         }
     }
 
-    private func execInNamespaces(process: ContainerizationOCI.Process) throws {
+    private func execInNamespaces(process: ContainerizationOCI.Process, seccomp: ContainerizationOCI.LinuxSeccomp?) throws {
         let syncPipe = FileDescriptor(rawValue: 3)
         let ackPipe = FileDescriptor(rawValue: 4)
 
@@ -159,6 +166,7 @@ struct ExecCommand: ParsableCommand {
 
             // Prepare capabilities (before user change)
             let preparedCaps = try App.prepareCapabilities(capabilities: process.capabilities ?? ContainerizationOCI.LinuxCapabilities())
+            if !process.noNewPrivileges { try App.installSeccomp(seccomp) }
 
             // Change stdio to be owned by the requested user.
             try App.fixStdioPerms(user: process.user)
@@ -171,6 +179,7 @@ struct ExecCommand: ParsableCommand {
 
             // Set no_new_privs if requested by the OCI spec.
             try App.setNoNewPrivileges(process: process)
+            if process.noNewPrivileges { try App.installSeccomp(seccomp) }
 
             try App.exec(process: process, currentEnv: process.env)
         } else {  // parent process

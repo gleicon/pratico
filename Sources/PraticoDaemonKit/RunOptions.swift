@@ -1,4 +1,5 @@
 import Containerization
+import ContainerizationOCI
 import ContainerizationOS
 import Foundation
 
@@ -19,6 +20,10 @@ struct RunOptions: Codable, Sendable, Equatable {
     /// `--privileged` and `systempaths=unconfined`: no masked or read-only `/proc` paths.
     var unmaskedPaths = false
     var noNewPrivileges = false
+    /// The seccomp filter (D-54): Docker's default profile for the container's
+    /// capabilities, none (`seccomp=unconfined`, `--privileged`), or a profile's JSON in
+    /// Docker's format or the OCI runtime spec's, checked at create.
+    var seccomp: Seccomp = .default
     var readonlyRootfs = false
     var sysctls: [String: String] = [:]
     var ulimits: [Ulimit] = []
@@ -34,6 +39,28 @@ struct RunOptions: Codable, Sendable, Equatable {
     var stopTimeout = 10
     var restart = RestartPolicy()
     var logBytes = LogStore.defaultCap
+
+    enum Seccomp: Codable, Sendable, Equatable {
+        case `default`, unconfined
+        case profile(String)
+    }
+
+    /// The guest kernel's version, for Docker profiles' `minKernel`; a test ties it to
+    /// scripts/build-kernel.sh.
+    static let guestKernel = (major: 6, minor: 18)
+
+    /// A profile's JSON resolved for a container with `capabilities` and compiled once,
+    /// so what vmexec will install is known to work before a VM boots.
+    static func seccompProfile(_ json: String, capabilities: [String]?) throws -> LinuxSeccomp {
+        do {
+            let target = LinuxSeccomp.Target(capabilities: capabilities ?? defaultCapabilities, kernel: guestKernel)
+            let profile = try LinuxSeccomp.decodeAnyFormat(from: Data(json.utf8), for: target)
+            _ = try profile.compileARM64()
+            return profile
+        } catch {
+            throw APIError(400, "pratico: seccomp profile: \(error)")
+        }
+    }
 
     struct Ulimit: Codable, Sendable, Equatable {
         var kind: String  // RLIMIT_…
@@ -175,14 +202,24 @@ extension RunOptions {
             case ("no-new-privileges", "" ), ("no-new-privileges", "true"): noNewPrivileges = true
             case ("no-new-privileges", "false"): noNewPrivileges = false
             case ("systempaths", "unconfined"): unmaskedPaths = true
-            // pratico runs no seccomp, AppArmor, or SELinux policy: the VM is the boundary.
-            case ("seccomp", "unconfined"), ("apparmor", "unconfined"), ("label", "disable"): break
-            case ("seccomp", _), ("apparmor", _), ("label", _):
+            case ("seccomp", "unconfined"): seccomp = .unconfined
+            case ("seccomp", "builtin"): seccomp = .default
+            // The docker CLI sends a profile file's contents, not its path.
+            case ("seccomp", let json) where json.hasPrefix("{"):
+                _ = try Self.seccompProfile(json, capabilities: capabilities)
+                seccomp = .profile(json)
+            case ("seccomp", _):
+                throw APIError(400, "pratico: --security-opt \(opt): seccomp takes unconfined, builtin, or a profile's JSON (the docker CLI reads the file)")
+            // pratico runs no AppArmor or SELinux policy: the VM is the boundary, with seccomp.
+            case ("apparmor", "unconfined"), ("label", "disable"): break
+            case ("apparmor", _), ("label", _):
                 throw APIError(400, "pratico: --security-opt \(opt) is not supported: pratico applies no \(key) policy inside the VM; only \(key)=\(key == "label" ? "disable" : "unconfined") is accepted")
             default:
                 throw APIError(400, "pratico: --security-opt \(opt) is not supported")
             }
         }
+        // As on Docker, a privileged container runs no seccomp filter, whatever was asked.
+        if host["Privileged"]?.bool == true { seccomp = .unconfined }
         readonlyRootfs = host["ReadonlyRootfs"]?.bool ?? false
     }
 

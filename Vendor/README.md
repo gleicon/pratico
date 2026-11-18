@@ -23,3 +23,16 @@ git subtree pull --prefix Vendor/containerization https://github.com/apple/conta
   average), each vsock connection attempt gives up after 1 s and the whole wait after
   10 s. Virtualization calls back only when the guest answers, so a guest that halted at
   boot used to hang the start for good.
+- `Sources/ContainerizationOCI/LinuxSeccomp+BPF.swift`, `LinuxSeccomp+Docker.swift`,
+  `LinuxSeccomp+SyscallsARM64.swift` (added, 2026-11-17): the seccomp compiler, Docker's
+  profile format resolved per container, and arm64's call numbers.
+- `Sources/ContainerizationOCI/LinuxSeccomp+Decode.swift`: `dockerFormatMarker` is
+  internal, for the Docker-format reader.
+- `Sources/Containerization/LinuxContainer.swift`: a seccomp profile no longer needs an
+  OCI runtime, as vmexec installs it; it is compiled at init, so one that cannot be
+  installed fails before a VM boots.
+- `vminitd/Sources/vmexec/vmexec.swift`, `RunCommand.swift`, `ExecCommand.swift`:
+  `installSeccomp`, where runc installs it; `exec` takes `--bundle-path` for the
+  container's filter.
+- `vminitd/Sources/VminitdCore/ManagedProcess.swift`: passes the bundle to `vmexec exec`.
+- `vminitd/Sources/LCShim/syscall.c`, `include/syscall.h`: `CZ_seccomp_set_filter`.

@@ -12,6 +12,9 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+// Modified by the Pratico project (2026-11-17): vmexec installs the seccomp filter, so a
+// profile no longer needs an OCI runtime; it is compiled at init (Vendor/README.md).
 //===----------------------------------------------------------------------===//
 
 import ContainerizationArchive
@@ -56,9 +59,9 @@ public final class LinuxContainer: Container, Sendable {
     public struct Configuration: Sendable {
         /// The seccomp filter to install on the container's processes.
         ///
-        /// Only an OCI runtime applies seccomp; `vmexec` ignores
-        /// `spec.linux.seccomp`. Anything other than ``unconfined`` therefore
-        /// requires ``Configuration/ociRuntimePath``.
+        /// Installed by the OCI runtime when ``Configuration/ociRuntimePath`` is set,
+        /// and by `vmexec` otherwise, compiled with
+        /// ``ContainerizationOCI/LinuxSeccomp/compileARM64()``.
         public enum SeccompProfile: Sendable {
             /// No seccomp filter.
             ///
@@ -407,7 +410,6 @@ public final class LinuxContainer: Container, Sendable {
         case .unconfined:
             self.seccomp = nil
         case .default:
-            try Self.requireOCIRuntimeForSeccomp(configuration)
             // Built here so an unsupported architecture fails before the caller
             // has booted a VM. The capabilities are the *init* process's, which
             // is what runc installs for execs too.
@@ -416,9 +418,10 @@ public final class LinuxContainer: Container, Sendable {
                 arch: try Arch.currentVerified()
             )
         case .profile(let profile):
-            try Self.requireOCIRuntimeForSeccomp(configuration)
             self.seccomp = profile
         }
+        // Compiled once here so a profile vmexec cannot install fails before a VM boots.
+        if configuration.ociRuntimePath == nil, let seccomp = self.seccomp { _ = try seccomp.compileARM64() }
         self.id = id
         self.vmm = vmm
         self.vm = vm
@@ -429,18 +432,6 @@ public final class LinuxContainer: Container, Sendable {
         self.state = AsyncMutex(.initialized)
         self.rootfs = rootfs
         self.writableLayer = writableLayer
-    }
-
-    /// Refuse a seccomp profile that no runtime will install. `vmexec` does not
-    /// read `spec.linux.seccomp`, so such a container would run unfiltered
-    /// while every observable said it was sandboxed.
-    private static func requireOCIRuntimeForSeccomp(_ configuration: Configuration) throws {
-        guard configuration.ociRuntimePath != nil else {
-            throw ContainerizationError(
-                .invalidArgument,
-                message: "seccompProfile requires ociRuntimePath: seccomp is applied by the OCI runtime, and the default vmexec launch path ignores it"
-            )
-        }
     }
 
     private static func createDefaultRuntimeSpec(_ id: String) -> Spec {

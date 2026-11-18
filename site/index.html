@@ -218,6 +218,8 @@
         <div><h3>One workload cannot reach another</h3><p>No shared kernel, no shared process table, no files in common unless you share a volume. A crash, a runaway process, or a breakout stays in its own VM.</p></div>
         <div><h3>Limits the hypervisor enforces</h3><p>Memory and CPU limits are the size of each VM, set by macOS, not settings inside a kernel every container shares.</p></div>
         <div><h3>Fast where you feel it</h3><p>CPU runs natively on Apple silicon, each root file system is its own disk image, and control calls answer in under 3 ms with 100 containers.</p></div>
+        <div><h3>A VM you can rebuild</h3><p>The guest kernel and init are built by Pratico from pinned sources, and two builds give the same bytes, so the ones in the app can be checked against the source.</p></div>
+        <div><h3>Syscalls filtered, as on Docker</h3><p>Every container runs Docker's default seccomp profile, or yours, compiled by Pratico and installed inside its VM.</p></div>
       </div>
     </div>
   </section>

@@ -63,7 +63,8 @@ pratico-shim ──── owns one VM (Virtualization.framework, via apple/conta
 vminitd ───────── guest agent: process, exec, cp, stats, healthchecks
 ```
 
-- **[VMs](docs/vm.md).** One VM per container, each with its own kernel. A shim owns the
+- **[VMs](docs/vm.md).** One VM per container, each with its own kernel and init, both
+  built by pratico from pinned sources, reproducibly ([tooling](docs/tooling.md)). A shim owns the
   VM and outlives the daemon, so restarts keep running containers, output, and exit
   codes. `docker run --rm alpine true`: P99 316 ms; ≈ 250 MB of memory per running
   container; no VMs when nothing runs.
@@ -76,8 +77,9 @@ vminitd ───────── guest agent: process, exec, cp, stats, healt
 - **[Builds](docs/build.md).** `docker build` and `compose build` run BuildKit in its
   own VM through buildx and load the result; one builder setup line, once.
 - **[Run options](docs/run-options.md).** Every `docker run` option pratico accepts is
-  applied (cgroup limits, capabilities, restart policies, `--init`, `--read-only`, …);
-  one a VM cannot honor, such as `--device` or `--pid host`, is refused with an error.
+  applied (cgroup limits, capabilities, seccomp profiles, restart policies, `--init`,
+  `--read-only`, …); one a VM cannot honor, such as `--device` or `--pid host`, is
+  refused with an error. Docker's default seccomp profile is on.
 - **[Egress](docs/egress.md).** Every connection a container makes is named (DNS, TLS
   SNI, HTTP Host) and recorded on the Mac; destinations threat feeds list (Feodo
   Tracker, SSL Blacklist, Spamhaus DROP, and URLhaus and ThreatFox with a free abuse.ch
@@ -117,8 +119,9 @@ Limits:
   ([networking](docs/network.md#limits)).
 - A disk volume serves one running container at a time; files on bind mounts and share
   volumes are owned by the Mac user ([storage](docs/storage.md#volumes)).
-- Host devices, host namespaces, blkio limits, and seccomp or AppArmor profiles are
-  refused ([run options](docs/run-options.md#refused)).
+- Host devices, host namespaces, blkio limits, and AppArmor profiles are refused
+  ([run options](docs/run-options.md#refused)). Seccomp is on, with Docker's default
+  profile ([seccomp](docs/run-options.md#seccomp)).
 
 ## Image scanning
 

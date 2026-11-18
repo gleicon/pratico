@@ -12,6 +12,8 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+// Modified by the Pratico project (2026-11-17): vmexec exec is given the container's bundle, for its seccomp filter (Vendor/README.md).
 //===----------------------------------------------------------------------===//
 
 #if os(Linux)
@@ -102,6 +104,8 @@ final class ManagedProcess: ContainerProcess, Sendable {
                 "\(owningPid)",
                 "--process-path",
                 bundle.getExecSpecPath(id: id).path,
+                "--bundle-path",
+                bundle.path.path,
             ]
         } else {
             args = ["run", "--bundle-path", bundle.path.path]

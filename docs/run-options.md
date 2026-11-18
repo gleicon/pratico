@@ -58,7 +58,8 @@ Mac restarts), `always` and `unless-stopped` containers come back. `RestartCount
 | `--blkio-weight`, `--device-read-bps` and the other blkio options | the VM's disk is not a host device |
 | `--pid`, `--ipc`, `--uts`, `--cgroupns` other than private; `--userns` other than `host` | each container is its own VM, with its own namespaces |
 | `--network host`, `--network container:…` | same |
-| `--security-opt seccomp=<profile>`, `apparmor=<profile>`, `label=<…>` | pratico applies no seccomp, AppArmor, or SELinux policy inside the VM; `seccomp=unconfined`, `apparmor=unconfined`, and `label=disable` are accepted |
+| `--security-opt apparmor=<profile>`, `label=<…>` | pratico applies no AppArmor or SELinux policy inside the VM; `apparmor=unconfined` and `label=disable` are accepted |
+| a seccomp profile with `SCMP_ACT_NOTIFY`, a `listenerPath`, or an errno over 4095 | pratico runs no notification listener ([Seccomp](#seccomp)) |
 | `--oom-kill-disable`, `--kernel-memory`, `--memory-swappiness` | cgroup v2 has no such control |
 | `--oom-score-adj` | the guest agent cannot set it |
 | `--cpu-rt-period`, `--cpu-rt-runtime` | the guest kernel has no real-time group scheduling |
@@ -69,10 +70,29 @@ Mac restarts), `always` and `unless-stopped` containers come back. `RestartCount
 | `--log-driver` other than `json-file` and `local`; log options other than `max-size` and `max-file` | logs stay in pratico's own store |
 | `--runtime`, `--isolation` other than the default | one runtime |
 
+## Seccomp
+
+Every container runs Docker's default seccomp profile, resolved for its capabilities (a
+call such as `mount` or `unshare` is allowed only with `CAP_SYS_ADMIN`), as on Docker:
+
+| Option | Filter |
+|---|---|
+| none, `--security-opt seccomp=builtin` | Docker's default profile |
+| `--security-opt seccomp=unconfined`, `--privileged` | none |
+| `--security-opt seccomp=profile.json` | that profile, in Docker's format or the OCI runtime spec's |
+
+A profile in Docker's format has its `includes` and `excludes` (capabilities,
+architectures, `minKernel`) resolved for the container, as moby does. It is checked when
+the container is created: one pratico cannot install is refused then, not at start. The
+filter is the same for `docker exec` and healthchecks. Containers created before 0.2.16
+get the default profile on their next start.
+
+How it works, and the tools behind it: [tooling](tooling.md#seccomp).
+
 ## Isolation
 
-Without a seccomp filter, a container can make any system call its capabilities allow,
-to its own kernel. That kernel runs in its own VM: the boundary between containers, and
-between a container and the Mac, is the hypervisor, not a syscall filter.
+Each container's kernel runs in its own VM: the boundary between containers, and between
+a container and the Mac, is the hypervisor. Seccomp narrows what a container may ask of
+its own kernel, as on Docker.
 
-Decisions: SPEC D-45.
+Decisions: SPEC D-45, D-54.

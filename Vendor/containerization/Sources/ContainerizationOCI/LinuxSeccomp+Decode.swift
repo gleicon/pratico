@@ -12,6 +12,9 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+// Modified by the Pratico project (2026-11-17): `dockerFormatMarker` is internal, for
+// `decodeAnyFormat` (Vendor/README.md).
 //===----------------------------------------------------------------------===//
 
 import ContainerizationError
@@ -92,7 +95,7 @@ extension LinuxSeccomp {
     /// are matched: `comment` is inert, so a file carrying only comments is
     /// still an OCI profile. Keys are spelled as literals because what is
     /// matched is the wire format, not a Swift property name.
-    private static func dockerFormatMarker(in object: [String: Any]) -> String? {
+    static func dockerFormatMarker(in object: [String: Any]) -> String? {
         for key in ["archMap", "minKernel"] where object[key] != nil {
             return "\"\(key)\" at the top level"
         }
