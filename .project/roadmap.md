@@ -125,7 +125,7 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 ## Known gaps (found while building, not yet scheduled)
 
 - [x] More than 4 networks per container: one NIC per VM with an address per network (D-43, 2026-11-15)
-- [ ] `--cap-add` / `--cap-drop` are accepted and ignored: processes get the default set (no `NET_ADMIN`). Apply them through `LinuxCapabilities`, or refuse them, instead of silently dropping
+- [x] `--cap-add` / `--cap-drop` applied through `LinuxCapabilities`, execs included (D-45; e2e: `--cap-drop ALL`, `exec --privileged`)
 - [x] `docker cp` with a stopped container: read from its ext4 rootfs on the Mac; copies in rewrite the rootfs (no VM), and the container cannot start meanwhile
 - [x] `docker save` of several images at once; `docker load` (OCI archives, Docker 25+); request bodies of `cp` in and `load` stream to disk past the 64 MiB in-memory limit
 - [ ] A per-install CA for egress interception (with the egress task)
