@@ -130,7 +130,7 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 - [x] `docker save` of several images at once; `docker load` (OCI archives, Docker 25+); request bodies of `cp` in and `load` stream to disk past the 64 MiB in-memory limit
 - [ ] A per-install CA for egress interception (with the egress task)
 - [x] `docker build` through buildx's docker-container driver: BuildKit in a pratico VM, results loaded (D-50)
-- [ ] `docker build` with no setup: serve BuildKit's daemon API (`/grpc`, `/session`, the image exporter) so buildx's default driver works
+- [ ] `docker build` with no setup (deferred 2026-11-19): serve BuildKit's daemon API (`/grpc`, `/session`, the image exporter) so buildx's default driver works. Measured against buildx 0.39: once `/grpc` answers, buildx picks its docker driver, which always exports `type=moby` (dockerd's built-in exporter); a standalone buildkitd has none, so a byte proxy fails every build. It needs either rewriting Solve requests inside HTTP/2, or a pratico-built buildkitd with a `moby` exporter into pratico's store. A stored builder named after the `pratico` context is refused by buildx ("already exists as context builder"), and the context's automatic builder takes no driver options. Today's cost is two lines once (docs/build.md), and `compose build` loads without them
 - [x] Hot-connect and uplink e2e checks wait on state (`eventually`, listener and size polls), not time; pass with every core busy (the socket-mount one was a real start-order race, D-34)
 - [x] Volume copy-up: a new empty volume gets the image's files at its mount path, as in Docker; `nocopy` honored
 - [x] `tmpfs` mounts (`--tmpfs`, `--mount type=tmpfs`), Docker's default options, size and mode
