@@ -11,6 +11,11 @@ swift sdk list | grep -q static-linux || swift sdk install "$sdk" --checksum "$S
 # Same paths every build: they are in the binaries' metadata.
 rm -rf /build/src
 cp -a /src /build/src
+# SwiftPM in a kept scratch directory misses source files added since its last build
+# ("cannot find 'X' in scope"): start it over whenever the set of files changes.
+files=$(cd /build/src && find . -name '*.swift' -o -name '*.c' -o -name '*.h' | LC_ALL=C sort | sha256sum)
+[ "$(cat /build/scratch.files 2>/dev/null)" = "$files" ] || rm -rf /build/scratch
+echo "$files" > /build/scratch.files
 cd /build/src/vminitd
 flags=(-c release --swift-sdk aarch64-swift-linux-musl -Xlinker -s -Xlinker --build-id=none --scratch-path /build/scratch)
 export BUILD_TIME GIT_COMMIT
@@ -24,6 +29,8 @@ rm -rf "$root" /build/layer.tar
 mkdir -p "$root"/{bin,dev,mnt,proc/self,run,sbin,sys,tmp,var}
 chmod 0700 "$root"
 install -m 0755 "$bin/vminitd" "$bin/vmexec" "$root/sbin/"
+# The flight recorder's probes, which vminitd loads at boot (Recorder.objectPath).
+install -D -m 0644 /bpf/recorder.bpf.o "$root/usr/lib/pratico/recorder.bpf.o"
 # Swift's per-module hashes (.swift_modhash) change from one build of the same source to
 # the next, and only debuggers and the backtracer read them; these binaries carry no
 # debug info, and neither a build ID, which would hash them.

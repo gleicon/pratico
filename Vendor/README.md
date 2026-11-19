@@ -36,5 +36,9 @@ git subtree pull --prefix Vendor/containerization https://github.com/apple/conta
   container's filter.
 - `vminitd/Sources/VminitdCore/ManagedProcess.swift`: passes the bundle to `vmexec exec`.
 - `vminitd/Sources/LCShim/syscall.c`, `include/syscall.h`: `CZ_seccomp_set_filter`.
+- `vminitd/Sources/VminitdCore/BPFObject.swift`, `Recorder.swift` (added, 2026-11-19): the
+  flight recorder: reads pratico's probe object, loads and attaches it, and serves its
+  ring buffer on vsock port 1028. `AgentCommand.swift` starts it at boot;
+  `LCShim/syscall.c`, `include/syscall.h` add `CZ_bpf` and the ring buffer's atomics.
 - `Sources/Containerization/VirtualMachineAgent.swift` (2026-11-18): `WriteFileFlags` has a
   public initializer, so pratico writes a running container's cgroup files (`docker update`).

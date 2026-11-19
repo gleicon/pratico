@@ -15,6 +15,8 @@ extension Daemon {
             ])
         case ("GET", 1, "containers"):
             conn.json(200, runningContainers())
+        case ("GET", 3, "containers") where p[2] == "activity":
+            conn.json(200, try activity(p[1], limit: req.query["limit"]))
         case ("GET", 1, "disk"):
             conn.json(200, disk.usage())
         case ("DELETE", 1, "alerts"):
@@ -78,6 +80,18 @@ extension Daemon {
         return .array(recs.map { rec in
             ["Id": .string(rec.id), "Name": .string(rec.name), "Flows": .array(guardian.flows(rec.id).map(Self.flowJSON))]
         })
+    }
+
+    /// `GET /pratico/containers/{id}/activity`: the flight recorder's events (D-56), the
+    /// newest `limit` (default and most `Activity.maxListed`), oldest first.
+    func activity(_ ref: String, limit: String?) throws -> JSON {
+        let rec = try containers.resolve(ref)
+        var n = Activity.maxListed
+        if let limit {
+            guard let v = Int(limit), (1...Activity.maxListed).contains(v) else { throw APIError(400, "limit is 1 to \(Activity.maxListed)") }
+            n = v
+        }
+        return ["Id": .string(rec.id), "Name": .string(rec.name), "Events": .array(Activity.read(containers.shimFiles(rec.id), limit: n))]
     }
 
     static func flowJSON(_ f: EgressGuard.Flow) -> JSON {

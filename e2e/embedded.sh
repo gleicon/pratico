@@ -206,6 +206,23 @@ expect_eq "host.docker.internal reaches the Mac" "$(docker exec e-c1 wget -qO- -
 if docker exec e-c1 wget -qO- -T5 http://host.docker.internal:1 >/dev/null 2>&1; then bad "a closed port is refused"; else ok "a closed port is refused"; fi
 expect_eq "20 MB download arrives intact" \
     "$(docker exec e-c1 sh -c "wget -qO /tmp/big.bin http://host.docker.internal:$WWW_PORT/big.bin && sha256sum /tmp/big.bin" | cut -d' ' -f1)" "$big_sum"
+# Flight recorder (D-56): every exec and exit in the container, and who opened each TCP
+# connection, from BPF probes in its VM; kept after it stops.
+activity() { curl -s --unix-socket "$SOCK" "http://d/pratico/containers/$1/activity" | python3 -c "import json,sys; ev=json.load(sys.stdin)['Events']; $2"; }
+docker run -d --name e-rec alpine sh -c "sleep 1; sh -c 'exit 3'; wget -qO /dev/null -T5 http://host.docker.internal:$WWW_PORT/; wget -qO /dev/null -T3 http://host.docker.internal:1/; sleep 300" >/dev/null
+eventually "the recorder sees the container run" sh -c "curl -s --unix-socket '$SOCK' http://d/pratico/containers/e-rec/activity | grep -q '\"Port\": *1[,}]'"
+expect_eq "its first process, as pid 1, with argv" "$(activity e-rec "e=[x for x in ev if x['Kind']=='exec'][0]; print(e['Pid'], e['Path'], e['Args'][:2])")" "1 /bin/sh ['sh', '-c']"
+expect_eq "a child's exit code" "$(activity e-rec "print([x['ExitCode'] for x in ev if x['Kind']=='exit' and x.get('ExitCode')==3])")" "[3]"
+expect_eq "the process behind a connection, and whether it connected" \
+    "$(activity e-rec "print(sorted((x['Command'], x['Port'], x['Connected'], x['SourcePort']>0) for x in ev if x['Kind']=='connect'))")" "[('wget', 1, False, False), ('wget', $WWW_PORT, True, True)]"
+docker exec e-rec ls / >/dev/null
+eventually "docker exec is recorded" sh -c "curl -s --unix-socket '$SOCK' http://d/pratico/containers/e-rec/activity | grep -q '\"Path\": *\"/bin/ls\"'"
+expect_eq "nothing from outside the container (vminitd, vmexec, kernel threads)" "$(activity e-rec "print([x['Path'] for x in ev if x['Kind']=='exec' and 'vm' in x['Path']])")" "[]"
+expect_eq "the container cannot use BPF" "$(docker exec e-rec cat /proc/sys/kernel/unprivileged_bpf_disabled)" "2"
+docker stop -t 0 e-rec >/dev/null
+expect_eq "the record outlives the VM" "$(activity e-rec "print(any(x['Kind']=='exit' and x['Pid']==1 for x in ev))")" "True"
+expect_has "a bad limit is refused" "$(curl -s --unix-socket "$SOCK" "http://d/pratico/containers/e-rec/activity?limit=0")" "limit is 1 to"
+docker rm e-rec >/dev/null
 (nc -l 127.0.0.1 18094 >"$HOME_DIR/up.bin" &)
 for _ in $(seq 50); do lsof -nP -iTCP:18094 -sTCP:LISTEN >/dev/null 2>&1 && break; sleep 0.1; done
 docker exec e-c1 sh -c 'nc host.docker.internal 18094 < /tmp/big.bin'

@@ -93,6 +93,9 @@ struct ShimFiles: Sendable {
     var state: URL { dir.appending(path: "state.json") }  // {"pid", "status": "starting|created|running|paused"}
     var exit: URL { dir.appending(path: "exit.json") }  // {"exitCode", "finishedAt"}; written last
     var log: URL { dir.appending(path: "log") }
+    /// The flight recorder's events (Activity), and the log before it rolled over.
+    var activity: URL { dir.appending(path: "activity.jsonl") }
+    var activityPrevious: URL { dir.appending(path: "activity.1.jsonl") }
     var shimLog: URL { dir.appending(path: "shim.log") }
 }
 
@@ -201,6 +204,7 @@ public enum ShimHost {
         trace.mark("container configured")
         try await container.create()
         trace.mark("VM booted, container created")
+        recordActivity(container, files)
         try await addCardAddresses(container, spec.nics)
         return container
     }

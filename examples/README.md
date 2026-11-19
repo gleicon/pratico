@@ -25,6 +25,7 @@ pratico's own endpoints, used here with `curl`:
 |---|---|
 | `GET /pratico/status` | version, pid, socket, container counts, change counter |
 | `GET /pratico/containers` | running containers with ports, health, CPU, memory |
+| `GET /pratico/containers/{id}/activity[?limit=n]` | the flight recorder: execs, exits, TCP connections ([VMs](../docs/vm.md#flight-recorder)) |
 | `GET /pratico/disk` | disk use by kind and the cleanup plans |
 | `GET /pratico/scanners` | scanners and SBOM tool found, with versions |
 | `GET /pratico/scans`, `/pratico/scans/summary` | findings per image; counts |

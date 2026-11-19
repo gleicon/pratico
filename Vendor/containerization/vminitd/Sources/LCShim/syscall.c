@@ -14,7 +14,8 @@
  * limitations under the License.
  */
 
-// Modified by the Pratico project (2026-11-17): CZ_seccomp_set_filter (Vendor/README.md).
+// Modified by the Pratico project (2026-11-17): CZ_seccomp_set_filter; (2026-11-19):
+// CZ_bpf and the ring buffer's atomics (Vendor/README.md).
 
 #ifdef __linux__
 #include <sys/prctl.h>
@@ -79,6 +80,22 @@ struct cz_sock_fprog {
 int CZ_seccomp_set_filter(unsigned int flags, unsigned short len, const void *filter) {
   struct cz_sock_fprog prog = {len, filter};
   return (int)syscall(SYS_seccomp, 1 /* SECCOMP_SET_MODE_FILTER */, flags, &prog);
+}
+
+int CZ_bpf(int cmd, void *attr, unsigned int size) {
+  return (int)syscall(SYS_bpf, cmd, attr, size);
+}
+
+unsigned long long CZ_load_acquire_u64(const void *p) {
+  return __atomic_load_n((const unsigned long long *)p, __ATOMIC_ACQUIRE);
+}
+
+unsigned int CZ_load_acquire_u32(const void *p) {
+  return __atomic_load_n((const unsigned int *)p, __ATOMIC_ACQUIRE);
+}
+
+void CZ_store_release_u64(void *p, unsigned long long v) {
+  __atomic_store_n((unsigned long long *)p, v, __ATOMIC_RELEASE);
 }
 
 #endif

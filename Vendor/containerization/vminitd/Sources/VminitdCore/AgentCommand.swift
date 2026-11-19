@@ -12,6 +12,8 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+// Modified by the Pratico project (2026-11-19): starts the flight recorder (Vendor/README.md).
 //===----------------------------------------------------------------------===//
 
 #if os(Linux)
@@ -152,6 +154,9 @@ public struct AgentCommand: AsyncParsableCommand {
             }
         }
         t.start()
+
+        // In vminitd's cgroup, which the probes' maps are charged to.
+        Recorder.start(log: log)
 
         let eg = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         let blockingPool = NIOThreadPool(numberOfThreads: 2)

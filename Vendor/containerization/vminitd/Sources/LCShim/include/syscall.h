@@ -14,7 +14,8 @@
  * limitations under the License.
  */
 
-// Modified by the Pratico project (2026-11-17): CZ_seccomp_set_filter (Vendor/README.md).
+// Modified by the Pratico project (2026-11-17): CZ_seccomp_set_filter; (2026-11-19):
+// CZ_bpf and the ring buffer's atomics (Vendor/README.md).
 
 // The below fall into two main categories:
 // 1. Aren't exposed by Swifts glibc modulemap.
@@ -130,5 +131,14 @@ int CZ_statfs(const char *path, CZ_Statfs *out);
 // seccomp(SECCOMP_SET_MODE_FILTER, flags, &prog): musl has no wrapper. `filter` is
 // `len` struct sock_filter records (8 bytes each, little-endian). Added by Pratico.
 int CZ_seccomp_set_filter(unsigned int flags, unsigned short len, const void *filter);
+
+// bpf(cmd, attr, size): musl has no wrapper. Added by Pratico, for the flight recorder.
+int CZ_bpf(int cmd, void *attr, unsigned int size);
+
+// A BPF ring buffer's positions and record headers are shared with the kernel: read with
+// acquire, the consumer position written with release. Added by Pratico.
+unsigned long long CZ_load_acquire_u64(const void *p);
+unsigned int CZ_load_acquire_u32(const void *p);
+void CZ_store_release_u64(void *p, unsigned long long v);
 
 #endif

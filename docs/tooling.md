@@ -10,7 +10,12 @@ repository. None of it is part of the app; the app ships what these produce.
 | [`scripts/build-kernel.sh`](../scripts/build-kernel.sh) | Builds the guest kernel in a pratico VM: kernel.org tarball checked against its SHA-256, Debian image by digest, packages from a fixed snapshot.debian.org date. `REPRO=1` builds twice and compares; `UPDATE=1` records a new hash. |
 | [`vm/kernel/build.sh`](../vm/kernel/build.sh) | Runs inside that VM: merges the configuration, fails if an option does not survive `olddefconfig`, builds with a fixed timestamp, user, host and path. |
 | [`vm/kernel/config-pratico`](../vm/kernel/config-pratico) | pratico's kernel options on top of apple/containerization's, each with the reason (and, for boot time, the measurement). |
-| [`vm/kernel/vmlinux.sha256`](../vm/kernel/vmlinux.sha256) | The kernel the source must build into; `make assets` checks it. |
+| [`vm/kernel/vmlinux.sha256`](../vm/kernel/vmlinux.sha256) | The kernel the source must build into; `make assets` checks it. The build also writes the kernel's types (`vmlinux.btf`) for the probes. |
+| [`vm/snapshot.sh`](../vm/snapshot.sh) | Points a build container's apt at Debian's archive as of a fixed date; the kernel and probe builds share it. |
+| [`scripts/build-bpf.sh`](../scripts/build-bpf.sh) | Builds the flight recorder's probes in a pratico VM with clang and bpftool from that snapshot, against the shipped kernel's `vmlinux.btf` (checked by the kernel's hash). Same `REPRO` and `UPDATE`. |
+| [`vm/bpf/recorder.bpf.c`](../vm/bpf/recorder.bpf.c), [`recorder.h`](../vm/bpf/recorder.h) | The probes (exec, exit, TCP connect on raw tracepoints) and the record they write, which vminitd and the shim read at the same offsets. |
+| [`vm/bpf/build.sh`](../vm/bpf/build.sh) | Runs inside that VM: writes the kernel's types as C, compiles without debug info, so two builds match. |
+| [`vm/bpf/recorder.sha256`](../vm/bpf/recorder.sha256) | The probe object the source must build into; the init build checks it before putting it in the image. |
 | [`scripts/build-init.sh`](../scripts/build-init.sh) | Builds the guest init (`vminitd`, `vmexec`) in a pratico VM with Swift 6.3.3 and its static Linux SDK (image by digest, SDK by SHA-256). Same `REPRO` and `UPDATE`. |
 | [`vm/init/build.sh`](../vm/init/build.sh) | Runs inside that VM: builds from `Vendor/containerization`, removes what differs between builds of the same source (build ID, `.swift_modhash`), writes the image as an OCI layout tagged by its content. |
 | [`vm/init/vminit.sha256`](../vm/init/vminit.sha256) | The init image's manifest the source must build into. |
@@ -35,6 +40,16 @@ like the code around it):
 
 `vmexec` installs the compiled filter (`installSeccomp`, through `CZ_seccomp_set_filter`
 in the C shim, as musl has no wrapper), so the guest needs no runc and no libseccomp.
+
+## Flight recorder
+
+Written for pratico in `Vendor/containerization/vminitd/Sources/VminitdCore` (Apache-2.0):
+
+| Tool | What it does |
+|---|---|
+| `BPFObject.swift` | Reads the probe object: its programs, maps, and the relocations that load a map; refuses anything else (calls, CO-RE relocations), which these probes never need. |
+| `Recorder.swift` | Creates the maps, patches each map load with its descriptor, loads the programs (asking the verifier for its log only when one is refused) and attaches them with `bpf(2)`, then reads the ring buffer and serves it on vsock. |
+| `Tests/PraticoDaemonKitTests/ActivityTests.swift` | The shim's reading of each record kind, and the log's roll-over. |
 
 ## Measuring
 

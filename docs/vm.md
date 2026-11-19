@@ -61,6 +61,39 @@ booted.
 
 The scripts and code behind both builds, and the seccomp compiler: [tooling](tooling.md).
 
+## Flight recorder
+
+Every container's VM records what runs in it: each program started (`exec`, with its
+path and arguments), each process that ends (its exit code, or the signal that killed
+it), and each outgoing TCP connection with the process that opened it (address, port,
+source port, and whether it connected). `docker exec` sessions and healthchecks are
+recorded too; pratico's own processes in the VM are not.
+
+```sh
+curl -s --unix-socket ~/.pratico/docker.sock http://d/pratico/containers/web/activity
+```
+
+The events are kept in the container's directory, up to 16 MiB (about 50,000 events;
+older ones roll off), so they can be read after the container stops, and are removed
+with it. PIDs are as the container sees them. `?limit=` returns only the newest (up to
+10,000, the most one call returns).
+
+How: three small BPF programs on the kernel's own tracepoints (no kprobes, no tracing
+filesystem), loaded by `vminitd` at boot (about 1 ms) and built by pratico against the
+types of the kernel it ships, so they need no relocation and no libbpf in the guest. The
+VM's kernel buffers events in 1 MiB while the shim reads them over vsock; if a burst
+outruns it, the events that did not fit are dropped and a `dropped` event says how many.
+
+What it does not see, or show:
+
+- UDP and IPv6 connections. DNS and every flow leaving the VM are recorded on the Mac
+  ([egress](egress.md)).
+- Arguments past the first 192 bytes, and paths past 128 bytes, are cut.
+- A container with `--privileged` (or `CAP_SYS_ADMIN` or `CAP_BPF`) can remove the
+  probes in its own VM, since it controls that kernel; others cannot use BPF at all
+  (`kernel.unprivileged_bpf_disabled` is 2).
+- Containers started by pratico 0.2.17 or earlier have no recorder until restarted.
+
 ## Lifecycle
 
 - **create** clones the root filesystem and records the container. No VM yet.

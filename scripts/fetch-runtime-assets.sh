@@ -5,6 +5,9 @@
 #   kernel   vmlinux pratico builds from kernel.org's source (GPL-2.0) with
 #            scripts/build-kernel.sh, checked against vm/kernel/vmlinux.sha256; built
 #            once (about half an hour), then cached in .cache/kernel.
+#   probes   the flight recorder's BPF probes (vm/bpf), built with scripts/build-bpf.sh
+#            against the kernel's own types, checked against vm/bpf/recorder.sha256;
+#            cached in .cache/bpf. They ship inside the init image.
 #   vminit   init image pratico builds from apple/containerization's vminitd source
 #            (Apache-2.0, Vendor/containerization) with scripts/build-init.sh, checked
 #            against vm/init/vminit.sha256; an OCI layout, cached in .cache/init.
@@ -27,19 +30,27 @@ mkdir -p "$OUT"
 # --- Kernel ------------------------------------------------------------------
 KERNEL_SHA256=$(cut -d' ' -f1 vm/kernel/vmlinux.sha256)
 built=.cache/kernel/out
-if [ ! -f "$built/vmlinux" ] || [ "$(sha "$built/vmlinux")" != "$KERNEL_SHA256" ]; then
+if [ ! -f "$built/vmlinux" ] || [ ! -f "$built/vmlinux.btf" ] || [ "$(sha "$built/vmlinux")" != "$KERNEL_SHA256" ]; then
     scripts/build-kernel.sh "$built"
 fi
 verify "$built/vmlinux" "$KERNEL_SHA256"
 cp "$built/vmlinux" "$OUT/vmlinux"
 cp "$built/config" "$OUT/kernel-config"
 
+# --- Flight recorder probes ----------------------------------------------------
+BPF_SHA256=$(cut -d' ' -f1 vm/bpf/recorder.sha256)
+probes=.cache/bpf/out
+if [ ! -f "$probes/recorder.bpf.o" ] || [ "$(sha "$probes/recorder.bpf.o")" != "$BPF_SHA256" ]; then
+    scripts/build-bpf.sh "$built" "$probes"
+fi
+verify "$probes/recorder.bpf.o" "$BPF_SHA256"
+
 # --- vminit OCI layout ----------------------------------------------------------
 INIT_SHA256=$(cut -d' ' -f1 vm/init/vminit.sha256)
 init=.cache/init/out
 manifest() { sed -n 's/.*"digest":"sha256:\([0-9a-f]*\)".*/\1/p' "$init/vminit/index.json" 2>/dev/null; }
 if [ "$(manifest)" != "$INIT_SHA256" ]; then
-    scripts/build-init.sh "$init"
+    BPF_DIR="$probes" scripts/build-init.sh "$init"
 fi
 verify "$init/vminit/blobs/sha256/$INIT_SHA256" "$INIT_SHA256"
 rm -rf "$OUT/vminit"

@@ -29,13 +29,18 @@ if [ ! -f "$sdk" ]; then
 fi
 [ "$(shasum -a 256 "$sdk" | cut -d' ' -f1)" = "$SDK_SHA256" ] || { echo "init: $sdk does not match its SHA-256" >&2; exit 1; }
 
+# The flight recorder's probes (scripts/build-bpf.sh), as pinned.
+BPF="${BPF_DIR:-$ROOT/.cache/bpf/out}"
+[ "$(shasum -a 256 "$BPF/recorder.bpf.o" 2>/dev/null | cut -d' ' -f1)" = "$(cut -d' ' -f1 "$ROOT/vm/bpf/recorder.sha256")" ] ||
+    { echo "init: $BPF/recorder.bpf.o is missing or does not match vm/bpf/recorder.sha256: run scripts/build-bpf.sh" >&2; exit 1; }
+
 build() {  # out-dir
     mkdir -p "$1"
     docker volume create pratico-init-build >/dev/null
     docker run --rm --cpus "${CPUS:-8}" --memory "${MEMORY:-8g}" --network bridge \
         -e SDK_SHA256="$SDK_SHA256" -e IMAGE_REPO="$IMAGE_REPO" -e INIT_VERSION="$INIT_VERSION" \
         -e BUILD_TIME="$INIT_VERSION" -e GIT_COMMIT="$UPSTREAM_COMMIT" \
-        -v "$ROOT/Vendor/containerization:/src:ro" -v "$ROOT/vm/init:/in:ro" -v "$CACHE/sdk:/sdk:ro" -v "$1:/out" -v pratico-init-build:/build \
+        -v "$ROOT/Vendor/containerization:/src:ro" -v "$ROOT/vm/init:/in:ro" -v "$CACHE/sdk:/sdk:ro" -v "$BPF:/bpf:ro" -v "$1:/out" -v pratico-init-build:/build \
         "$SWIFT_IMAGE" /in/build.sh
 }
 digest() { sed -n 's/.*"digest":"sha256:\([0-9a-f]*\)".*/\1/p' "$1/vminit/index.json"; }
