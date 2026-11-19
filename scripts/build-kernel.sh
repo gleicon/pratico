@@ -4,7 +4,7 @@
 # its packages by a Debian snapshot date. The result must match vm/kernel/vmlinux.sha256;
 # UPDATE=1 records a new one (a new kernel or config), REPRO=1 builds twice and compares.
 #
-#   scripts/build-kernel.sh <out-dir>   # writes <out-dir>/vmlinux and <out-dir>/config
+#   scripts/build-kernel.sh <out-dir>   # writes <out-dir>/vmlinux, config, and vmlinux.btf
 set -euo pipefail
 
 KERNEL_VERSION=6.18.63
@@ -32,7 +32,7 @@ if [ ! -f "$tarball" ]; then
 fi
 verify "$tarball" "$KERNEL_SHA256"
 ln -f "$tarball" "$CACHE/in/linux.tar.xz"
-cp "$ROOT/Vendor/containerization/kernel/config-arm64" "$ROOT/vm/kernel/config-pratico" "$ROOT/vm/kernel/build.sh" "$CACHE/in/"
+cp "$ROOT/Vendor/containerization/kernel/config-arm64" "$ROOT/vm/kernel/config-pratico" "$ROOT/vm/kernel/build.sh" "$ROOT/vm/snapshot.sh" "$CACHE/in/"
 
 build() {  # out-dir
     mkdir -p "$1"

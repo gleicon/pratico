@@ -2,23 +2,9 @@
 # Runs inside the build container (scripts/build-kernel.sh): installs a toolchain from a
 # fixed Debian snapshot, then builds the kernel from the verified tarball in /in.
 set -euo pipefail
-: "${APT_SNAPSHOT:?}" "${KBUILD_BUILD_TIMESTAMP:?}"
+: "${KBUILD_BUILD_TIMESTAMP:?}"
 
-rm -f /etc/apt/sources.list.d/*
-cat > /etc/apt/sources.list.d/snapshot.sources <<SOURCES
-Types: deb
-URIs: http://snapshot.debian.org/archive/debian/$APT_SNAPSHOT
-Suites: trixie trixie-updates
-Components: main
-Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
-
-Types: deb
-URIs: http://snapshot.debian.org/archive/debian-security/$APT_SNAPSHOT
-Suites: trixie-security
-Components: main
-Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
-SOURCES
-apt-get -qq -o Acquire::Check-Valid-Until=false update
+source /in/snapshot.sh
 DEBIAN_FRONTEND=noninteractive apt-get -qq install -y --no-install-recommends \
     bc bison cpio dwarves flex gcc libc6-dev libelf-dev libssl-dev make python3 xz-utils >/dev/null
 
@@ -43,4 +29,7 @@ export KBUILD_BUILD_USER=pratico KBUILD_BUILD_HOST=pratico KBUILD_BUILD_VERSION=
 make -s ARCH=arm64 -j"$(nproc)" JOBS=1 LOCALVERSION=-pratico Image
 cp arch/arm64/boot/Image /out/vmlinux
 cp .config /out/config
+# The kernel's types, for the guest's BPF probes (scripts/build-bpf.sh): built against
+# this kernel's own layout, so they need no relocation at load.
+objcopy -O binary --only-section=.BTF vmlinux /out/vmlinux.btf
 echo "kernel: $(make -s ARCH=arm64 LOCALVERSION=-pratico kernelrelease)"
