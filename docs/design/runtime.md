@@ -63,13 +63,14 @@ pratico-menubar ──► pratico-daemon ──(unix socket per container)──
 3. **pratico-net**: a user-space Ethernet switch in the daemon. VM NICs are
    `VZFileHandleNetworkDeviceAttachment` datagram socket pairs whose other end the
    daemon holds. It has no vmnet, no host bridges, and no `bridge100`.
-4. **Assets**: Linux kernel (~16 MB, built from Containerization's `kernel/config-arm64`)
-   and the `vminit` init filesystem (built from `vminitd` source), at pinned versions
-   and SHA-256 digests, **bundled in the app** (decided 2026-11-09). A download would
-   need pratico-hosted artifacts (the only upstream kernel is inside a multi-hundred-MB
-   Kata tarball), so the bundle is the source of truth: first `docker run` works offline,
-   with no setup step. Newer assets arrive with app releases; the GPL source offer for
-   the kernel ships alongside (see Licenses).
+4. **Assets**: the Linux kernel (an LTS release, unmodified kernel.org source with
+   Containerization's `kernel/config-arm64` plus `vm/kernel/config-pratico`, D-52) and the
+   `vminit` init filesystem (`vminitd` and `vmexec` from the vendored source, with the
+   flight recorder's BPF probes, D-53 and D-56), all built by pratico from pinned inputs,
+   reproducible, checked against SHA-256 digests, and **bundled in the app** (decided
+   2026-11-09): first `docker run` works offline, with no setup step. Newer assets
+   arrive with app releases; the GPL source offer for the kernel ships alongside (see
+   Licenses). Build tools: [tooling](../tooling.md).
 
 ## Networking
 
@@ -174,6 +175,7 @@ networks cannot exchange a frame, because the switch never forwards one.
 | sandwich-proxy (embedded parts) | MIT | keep copyright notice |
 | SQLite.swift (sandwich's dependency) | MIT | keep copyright notice |
 | Linux kernel binary | GPL-2.0 | offer the exact source + config for the shipped binary (link to the tagged source and our config in the release) |
+| Flight recorder probes (`vm/bpf`, pratico's own) | MIT, declared `Dual MIT/GPL` to the kernel | source in this repository at the release's tag; built against the kernel's types (`vmlinux.btf`) |
 
 The app gets an "Acknowledgements" file in the DMG and in About. Naming stays
 "pratico"; Apple names are not used.

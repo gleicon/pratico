@@ -46,6 +46,9 @@ VERSION=$(sed -n 's/.*version = "\(.*\)".*/\1/p' Sources/PraticoCore/Pratico.swi
     echo "  - swift-foundation-icu and ICU data (Apache-2.0; ICU under the Unicode License V3)"
     echo "  - swift-crypto (BoringSSL), swift-nio, swift-nio-ssl, grpc-swift, swift-protobuf"
     echo "    (licenses below, under Swift packages)"
+    echo "The init image also carries the flight recorder's BPF probes, Pratico's own code (MIT,"
+    echo "declared Dual MIT/GPL to the kernel), built against the shipped kernel's types; their"
+    echo "source is vm/bpf in Pratico's repository at this release's tag."
     echo "Their license texts follow."
     for f in musl swift swift-foundation swift-corelibs-libdispatch swift-foundation-icu icu; do
         echo

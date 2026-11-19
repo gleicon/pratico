@@ -40,5 +40,9 @@
 - In e2e scripts, never use a bare `wait`: the suites leave `docker events` watchers running in the background, so `wait` never returns. Wait on the PIDs you started.
 - Docker `label` filters are AND-ed (`Filters.pass`); other keys OR their values. `compose exec` finds its container with two label filters, so OR-ing them runs commands in another service.
 - Concurrent creates race unless one critical section covers check and insert: network create is serialized (subnet choice), container names are reserved until the record exists.
-- The guest kernel follows Kata's latest release, regular build (D-41); `e2e/embedded.sh` reads the expected `uname -r` from `scripts/fetch-runtime-assets.sh`.
+- The guest kernel and init are pratico's own builds (D-52, D-53), pinned by `vm/kernel/vmlinux.sha256` and `vm/init/vminit.sha256`; `e2e/embedded.sh` reads the expected `uname -r` from `scripts/build-kernel.sh`. Any change under `Vendor/containerization` that vminitd or vmexec links changes the init image: rebuild with `REPRO=1 UPDATE=1 scripts/build-init.sh .cache/init/out`, then `make assets`.
+- The flight recorder's record (`struct pratico_event`) is defined in `vm/bpf/recorder.h` and read at the same offsets by `Activity.Layout` (host) and `Recorder.Layout` (vminitd): change all three together; the e2e recorder checks catch a mismatch.
+- Code under `Vendor/containerization` follows its lint rules (`NeverForceUnwrap`, `NeverUseForceTry`) and carries an Apache-2.0 header naming who changed or added it (`Vendor/README.md` lists every change).
+- `FileHandle.read(upToCount:)` on a socket waits for the whole count; read streams with `read(2)` (`ShimHost.recordActivity`).
+- Never clean up the installed pratico (`~/.pratico`) with broad commands such as `docker ps -q | xargs docker rm -f`: they take the user's containers too. Remove test containers by name.
 - Real Compose is `/opt/homebrew/bin/docker-compose` (5.x) or the `docker compose` plugin via `cliPluginsExtraDirs`; older Compose builds (API 1.41) are refused like dockerd refuses them.
