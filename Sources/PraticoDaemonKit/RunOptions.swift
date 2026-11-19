@@ -179,7 +179,8 @@ extension RunOptions {
                 cgroup["memory.swap.max"] = "\(swap - memory)"
             }
         }
-        if let pids = host["PidsLimit"]?.int, pids > 0 { cgroup["pids.max"] = "\(pids)" }
+        // Docker's -1 is no limit; written, so `docker update --pids-limit -1` lifts one.
+        if let pids = host["PidsLimit"]?.int, pids != 0 { cgroup["pids.max"] = pids < 0 ? "max" : "\(pids)" }
         if let shm = host["ShmSize"]?.int, shm > 0 { shmBytes = shm }
     }
 

@@ -3,6 +3,7 @@ import ContainerizationOCI
 import ContainerizationExtras
 import ContainerizationOS
 import Foundation
+import Synchronization
 
 /// What a shim runs, written by the daemon to `containers/<id>/spec.json`
 /// (docs/design/runtime.md). Paths are absolute.
@@ -370,12 +371,16 @@ final class ShimControl: Sendable {
     let stdin: StdinStream?
     let execs = ExecTable()
     let addresses: GuestAddresses
+    /// What the guest's cgroup holds now (the spec's, then each `POST /limits`), and
+    /// whether the VM is paused: one lock, so limits are never written to a paused VM.
+    let guest: Mutex<GuestState>
 
     init(container: LinuxContainer, files: ShimFiles, spec: ShimSpec, stdin: StdinStream?) {
         self.container = container
         self.files = files
         self.spec = spec
         self.stdin = stdin
+        guest = Mutex(GuestState(limits: CgroupLimits(cpus: spec.cpus, memoryMiB: spec.memoryMiB, cgroup: spec.options?.cgroup ?? [:])))
         // What each card holds: its boot address and the extra ones added after create.
         addresses = GuestAddresses(spec.nics.cards.indices.map(spec.nics.addresses(card:)))
     }
@@ -420,7 +425,8 @@ final class ShimControl: Sendable {
         return .close  // one request per connection; the client reads to EOF
     }
 
-    /// The process and the VM: start, signals, stop, stdin, terminal size, NICs, pause.
+    /// The process and the VM: start, signals, stop, stdin, terminal size, NICs, limits,
+    /// pause.
     private func routeLifecycle(_ method: String, _ route: String, _ req: Request, _ conn: Connection) throws -> Disposition? {
         let c = container
         switch (method, route) {
@@ -463,6 +469,9 @@ final class ShimControl: Sendable {
         case ("POST", "nic"):
             guard let change = try? JSONDecoder().decode(NICChange.self, from: req.body) else { throw APIError(400, "not a NIC change") }
             try nic(change)
+        case ("POST", "limits"):
+            guard let new = try? JSONDecoder().decode(CgroupLimits.self, from: req.body) else { throw APIError(400, "not cgroup limits") }
+            try setLimits(new)
         case ("POST", "sync"):
             // Flushes the guest's page cache to its disk image, so the Mac reads what it wrote.
             try blocking {
@@ -473,10 +482,16 @@ final class ShimControl: Sendable {
                 }
             }
         case ("POST", "pause"):
-            try blocking { try await c.withVirtualMachineInstance { try await $0.pause() } }
+            try guest.withLock { state in
+                try blocking { try await c.withVirtualMachineInstance { try await $0.pause() } }
+                state.paused = true
+            }
             record("paused")
         case ("POST", "resume"):
-            try blocking { try await c.withVirtualMachineInstance { try await $0.resume() } }
+            try guest.withLock { state in
+                try blocking { try await c.withVirtualMachineInstance { try await $0.resume() } }
+                state.paused = false
+            }
             record("running")
         default:
             return nil

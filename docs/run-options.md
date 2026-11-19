@@ -50,6 +50,23 @@ doubles from 100 ms to a minute and resets once a run lasts 10 seconds. `docker 
 Mac restarts), `always` and `unless-stopped` containers come back. `RestartCount` in
 `docker inspect` counts policy restarts since the last start by hand.
 
+### docker update
+
+`docker update` on a running container writes the new limits into its cgroup in the VM
+at once: `--cpus`, `--cpu-quota`/`--cpu-period`, `--cpu-shares`, `--cpuset-cpus`,
+`--memory`, `--memory-reservation`, `--memory-swap`, and `--pids-limit` (`-1` lifts the
+limit). Only files whose values change are written; if the guest kernel refuses one, the
+ones written before it are put back and the update fails, so the container keeps its old
+limits.
+
+A running VM cannot grow: Virtualization.framework adds no vCPUs or memory to it. Limits
+up to what the VM booted with change at once; more is refused with the size it has. To
+go higher, stop the container, update it, and start it: a stopped container takes its
+limits at the next start, in a VM of the new size. A paused container's limits are
+refused until it is unpaused, and a container started by pratico 0.2.16 or earlier must
+be restarted once before its limits change while it runs. The container cannot start
+while an update runs.
+
 ## Refused
 
 | Option | Why |

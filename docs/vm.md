@@ -75,9 +75,9 @@ The scripts and code behind both builds, and the seccomp compiler: [tooling](too
 - **pause** pauses the whole VM: its vCPUs stop, not just a cgroup.
 - **top** runs the image's `ps` in the container (a VM has no host `ps` to look in
   from), so an image without `ps` cannot answer it.
-- **update** changes the restart policy at once. Limits change on a stopped container,
-  for its next start; on a running one they are refused, as the VM's cgroup cannot be
-  written from outside it.
+- **update** changes the restart policy at once, and the limits of a running container
+  inside its VM, up to the vCPUs and memory it booted with; see
+  [run options](run-options.md#docker-update).
 - **exec**, **cp**, **stats**, and healthchecks go through the agent; images need no
   shell or tools for them. An exec has the container's capabilities and limits.
 - **logs** keep timestamps per line: `--since`, `--until`, `--tail`, and `-f` (which

@@ -49,6 +49,8 @@ struct ContainerState: Codable, Sendable {
 public struct APIError: Error, Sendable {
     public var status: Int
     public var message: String
+    /// A start refused while a change holds the container: worth trying again.
+    var busy = false
     public init(_ status: Int, _ message: String) {
         self.status = status
         self.message = message
@@ -81,8 +83,9 @@ public final class ContainerService: @unchecked Sendable {
     private var removeWaiters: [String: [@Sendable (Int) -> Void]] = [:]
     private var attached: [String: [Connection]] = [:]
     private var pausedVMs: Set<String> = []
-    /// Stopped containers whose rootfs is being read or rewritten (`docker cp`): no start.
-    private var busy: Set<String> = []
+    /// Containers whose rootfs (`docker cp`) or limits (`docker update`) are being changed,
+    /// with what: no start until it is done.
+    private var busy: [String: String] = [:]
     /// Names of containers being created, held until their records exist.
     private var reservedNames: Set<String> = []
     /// Containers between `start` and running: a second start waits its turn, not a second VM.
@@ -310,21 +313,28 @@ public final class ContainerService: @unchecked Sendable {
     /// Runs `body` with a stopped container's rootfs, which it may read or replace; the
     /// container cannot start until it returns.
     func whileStopped<T>(_ ref: String, _ body: (ContainerRecord, URL) throws -> T) throws -> T {
-        let rec = try resolve(ref)
-        lock.lock()
-        guard records[rec.id]?.state.running == false, !busy.contains(rec.id) else {
-            lock.unlock()
-            throw APIError(409, "container \(rec.name) started or is busy; try again")
+        try holding(ref, "a copy into it is in progress") { rec, running in
+            guard !running else { throw APIError(409, "container \(rec.name) started or is busy; try again") }
+            return try body(rec, dir(rec.id).appending(path: "rootfs.ext4"))
         }
-        busy.insert(rec.id)
-        lock.unlock()
-        defer {
-            lock.lock()
-            busy.remove(rec.id)
-            lock.unlock()
-        }
-        return try body(rec, dir(rec.id).appending(path: "rootfs.ext4"))
     }
+
+    /// Runs `body` with the container's current record, and whether it runs, while it
+    /// cannot start nor be held by another change; `doing` is what a start is told.
+    func holding<T>(_ ref: String, _ doing: String, _ body: (ContainerRecord, Bool) throws -> T) throws -> T {
+        let id = try resolve(ref).id
+        lock.lock()
+        guard let rec = records[id], !starting.contains(id), busy[id] == nil else {
+            let name = records[id]?.name ?? id
+            lock.unlock()
+            throw APIError(409, "container \(name) is starting or busy; try again")
+        }
+        busy[id] = doing
+        lock.unlock()
+        defer { lock.withLock { _ = busy.removeValue(forKey: id) } }
+        return try body(rec, rec.state.running)
+    }
+
 
     // MARK: Lifecycle
 
@@ -354,9 +364,11 @@ public final class ContainerService: @unchecked Sendable {
             lock.unlock()
             return false
         }
-        if busy.contains(id) {
+        if let doing = busy[id] {
             lock.unlock()
-            throw APIError(409, "container \(rec.name) is busy: a copy into it is in progress")
+            var e = APIError(409, "container \(rec.name) is busy: \(doing)")
+            e.busy = true
+            throw e
         }
         starting.insert(id)
         lock.unlock()

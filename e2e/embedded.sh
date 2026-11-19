@@ -735,11 +735,21 @@ expect_eq "and it keeps running, unpaused" "$(docker inspect e-ops2 --format '{{
 expect_has "image history" "$(docker history alpine)" "CMD [\"/bin/sh\"]"
 check "update --restart on a running container" docker update --restart unless-stopped e-ops2
 expect_eq "takes effect" "$(docker inspect e-ops2 --format '{{.HostConfig.RestartPolicy.Name}}')" "unless-stopped"
-expect_has "update of limits while running is refused" "$(docker update --cpus 1 e-ops2 2>&1)" "change at its next start"
+cg() { docker exec e-ops2 cat "${@/#//sys/fs/cgroup/}" | tr '\n' ' '; }
+check "update of limits on a running container" docker update --cpus 0.5 --memory 256m --pids-limit 50 --memory-reservation 128m e-ops2
+expect_eq "applies them in its VM at once" "$(cg cpu.max memory.max pids.max memory.low)" "50000 100000 268435456 50 134217728 "
+expect_eq "and records them" "$(docker inspect e-ops2 --format '{{.HostConfig.NanoCpus}} {{.HostConfig.Memory}} {{.HostConfig.PidsLimit}}')" "500000000 268435456 50"
+check "a limit can be lifted" docker update --pids-limit -1 e-ops2
+expect_eq "to the kernel's default" "$(cg pids.max memory.max)" "max 268435456 "
+expect_has "beyond the VM's boot size is refused" "$(docker update --memory 2g e-ops2 2>&1)" "a running VM cannot grow"
+expect_eq "and changes nothing" "$(cg memory.max) $(docker inspect e-ops2 --format '{{.HostConfig.Memory}}')" "268435456  268435456"
+docker pause e-ops2 >/dev/null
+expect_has "a paused container's limits are refused" "$(docker update --cpus 1 e-ops2 2>&1)" "unpause it"
+docker unpause e-ops2 >/dev/null
 docker stop -t 0 e-ops2 >/dev/null
 docker update --cpus 1 --memory 512m e-ops2 >/dev/null
 docker start e-ops2 >/dev/null
-expect_eq "and applied at the next start" "$(docker exec e-ops2 cat /sys/fs/cgroup/cpu.max /sys/fs/cgroup/memory.max | tr '\n' ' ')" "100000 100000 536870912 "
+expect_eq "a stopped container takes them at its next start" "$(cg cpu.max memory.max)" "100000 100000 536870912 "
 docker rm -f e-ops2 >/dev/null
 # docker commit: what the container changed, as a layer on its image.
 docker run -d --name e-cm alpine sh -c 'echo made > /made; ln -s /made /link; rm /etc/motd; sleep 300' >/dev/null

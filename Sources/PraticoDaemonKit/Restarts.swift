@@ -59,9 +59,17 @@ final class RestartSupervisor: @unchecked Sendable {
         }
     }
 
-    private func fire(_ id: String) {
+    /// Attempts at a restart that a change holding the container (`docker cp`, `docker
+    /// update`) put off, a second apart.
+    static let busyRetries = 60
+
+    private func fire(_ id: String, attempt: Int = 0) {
+        precondition(attempt <= Self.busyRetries, "restart retried past its bound")
         guard lock.withLock({ pending.remove(id) != nil }), let containers else { return }
-        do { try containers.restartByPolicy(id) } catch {
+        do { try containers.restartByPolicy(id) } catch let e as APIError where e.busy && attempt < Self.busyRetries {
+            lock.withLock { _ = pending.insert(id) }
+            DispatchQueue.global().asyncAfter(deadline: .now() + 1) { [weak self] in self?.fire(id, attempt: attempt + 1) }
+        } catch {
             Pratico.log("pratico-daemon: restart policy could not start \(id.prefix(12)): \(error)")
         }
     }

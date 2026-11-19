@@ -12,6 +12,9 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+// Modified by the Pratico project (2026-11-18): `WriteFileFlags` can be made outside the
+// module (Vendor/README.md).
 //===----------------------------------------------------------------------===//
 
 import ContainerizationError
@@ -19,10 +22,16 @@ import ContainerizationExtras
 import ContainerizationOCI
 import Foundation
 
-public struct WriteFileFlags {
+public struct WriteFileFlags: Sendable {
     public var createParentDirectories = false
     public var append = false
     public var create = false
+
+    public init(createParentDirectories: Bool = false, append: Bool = false, create: Bool = false) {
+        self.createParentDirectories = createParentDirectories
+        self.append = append
+        self.create = create
+    }
 }
 
 public enum FilesystemOperation: Sendable {

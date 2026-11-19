@@ -117,6 +117,8 @@ Limits:
 - Images without an arm64 variant do not run ([CPU](docs/cpu.md)).
 - IPv4 only; a container sees one interface, `eth0`, for all its networks
   ([networking](docs/network.md#limits)).
+- `docker update` changes a running container's limits up to the vCPUs and memory its VM
+  booted with; more takes a restart ([update](docs/run-options.md#docker-update)).
 - A disk volume serves one running container at a time; files on bind mounts and share
   volumes are owned by the Mac user ([storage](docs/storage.md#volumes)).
 - Host devices, host namespaces, blkio limits, and AppArmor profiles are refused

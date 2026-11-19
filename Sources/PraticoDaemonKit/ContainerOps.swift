@@ -96,24 +96,41 @@ extension ContainerService {
         return RootfsTree.changes(from: image, to: mine).map { ["Path": .string($0.path), "Kind": .int(Int64($0.kind))] }
     }
 
-    /// `POST /containers/{id}/update`. The restart policy changes at once. Limits change
-    /// on a stopped container, for its next start; a running VM's cgroup cannot be written
-    /// from outside (Containerization exposes no such call), so those are refused there.
+    /// `POST /containers/{id}/update`. The restart policy changes at once, and so do the
+    /// limits of a running container, inside its VM: up to the vCPUs and memory it booted
+    /// with, as Virtualization cannot add either to a running VM. A stopped container takes
+    /// them at its next start. The container cannot start while it is updated.
     func update(_ ref: String, _ body: JSON) throws -> JSON {
-        let rec = try resolve(ref)
-        var host = rec.hostConfig.object ?? [:]
-        var limits: [String] = []
-        for (key, value) in body.object ?? [:] where Self.updatable.contains(key) && Self.isSet(value) {
-            host[key] = value
-            if key != "RestartPolicy" { limits.append(key) }
+        let changed = try holding(ref, "docker update is in progress") { rec, running -> ContainerRecord in
+            var host = rec.hostConfig.object ?? [:]
+            var limits = false
+            for (key, value) in body.object ?? [:] where Self.updatable.contains(key) && Self.isSet(value) {
+                host[key] = value
+                limits = limits || key != "RestartPolicy"
+            }
+            let options = try RunOptions.parse(host: .object(host), config: rec.config, defaultCPUs: config.defaultCPUs, defaultMemoryMiB: config.defaultMemoryMiB)
+            if running && limits { try setLiveLimits(rec, options) }
+            update(rec.id) { $0.hostConfig = .object(host) }
+            return try resolve(rec.id)
         }
-        _ = try RunOptions.parse(host: .object(host), config: rec.config, defaultCPUs: config.defaultCPUs, defaultMemoryMiB: config.defaultMemoryMiB)
-        if rec.state.running && !limits.isEmpty {
-            throw APIError(409, "pratico: \(limits.sorted().joined(separator: ", ")) of a running container change at its next start; stop it, update it, and start it")
-        }
-        update(rec.id) { $0.hostConfig = .object(host) }
-        if let changed = try? resolve(rec.id) { emit(changed, "update") }
+        emit(changed, "update")
         return ["Warnings": []]
+    }
+
+    /// Writes the limits into the running VM's cgroup, through its shim.
+    private func setLiveLimits(_ rec: ContainerRecord, _ options: RunOptions) throws {
+        let files = shimFiles(rec.id)
+        guard let data = try? Data(contentsOf: files.spec), let booted = try? JSONDecoder().decode(ShimSpec.self, from: data) else {
+            throw APIError(500, "pratico: cannot read the spec \(rec.name) was started with")
+        }
+        guard options.cpus <= booted.cpus, options.memoryMiB <= booted.memoryMiB else {
+            throw APIError(409, "pratico: \(rec.name)'s VM started with \(booted.cpus) vCPUs and \(booted.memoryMiB) MiB, and a running VM cannot grow; limits up to that change at once. For more, stop it, update it, and start it")
+        }
+        do {
+            _ = try embedded.shim.request(files, "POST", "/limits", body: JSONEncoder().encode(CgroupLimits(options)))
+        } catch let e as APIError where e.status == 404 {
+            throw APIError(409, "pratico: \(rec.name) was started by an older pratico, which cannot change its limits while it runs; restart it, then update it")
+        }
     }
 
     /// What `docker update` may set (Docker's `UpdateConfig`); others are refused by
