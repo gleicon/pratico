@@ -202,7 +202,11 @@ struct ELF {
         return stride(from: 0, to: bytes.count, by: 16).map { Relocation(offset: Self.u64(bytes, $0), info: Self.u64(bytes, $0 + 8)) }
     }
 
-    static func u16(_ b: [UInt8], _ at: Int) -> UInt16 { UInt16(b[at]) | UInt16(b[at + 1]) << 8 }
-    static func u32(_ b: [UInt8], _ at: Int) -> UInt32 { (0..<4).reduce(0) { $0 | UInt32(b[at + $1]) << (8 * $1) } }
-    static func u64(_ b: [UInt8], _ at: Int) -> UInt64 { (0..<8).reduce(0) { $0 | UInt64(b[at + $1]) << (8 * $1) } }
+    static func u16(_ b: [UInt8], _ at: Int) -> UInt16 { load(b, at) }
+    static func u32(_ b: [UInt8], _ at: Int) -> UInt32 { load(b, at) }
+    static func u64(_ b: [UInt8], _ at: Int) -> UInt64 { load(b, at) }
+    private static func load<T: FixedWidthInteger>(_ b: [UInt8], _ at: Int) -> T {
+        precondition(at >= 0 && at + MemoryLayout<T>.size <= b.count, "a read past the end of the object")
+        return b.withUnsafeBytes { T(littleEndian: $0.loadUnaligned(fromByteOffset: at, as: T.self)) }
+    }
 }

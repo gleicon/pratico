@@ -63,34 +63,40 @@ extension ShimControl {
         try guest.withLock { state in
             guard !state.paused else { throw APIError(409, "the container is paused; unpause it to change its limits") }
             let current = try state.limits.files()
-            let changes = target.keys.sorted().filter { target[$0] != current[$0] }
+            let changes = target.keys.sorted().compactMap { name -> Change? in
+                guard let new = target[name], let old = current[name], new != old else { return nil }
+                return Change(name: name, new: new, old: old)
+            }
             guard !changes.isEmpty else { return }
             try blocking { [container] in
                 try await container.withVirtualMachineInstance { vm in
                     let agent = try await vm.dialAgent()
                     defer { Task { try? await agent.close() } }
-                    try await Self.write(changes, target, undo: current, in: dir, agent)
+                    try await Self.write(changes, in: dir, agent)
                 }
             }
             state.limits = new
         }
     }
 
-    private static func write(_ names: [String], _ values: [String: String], undo: [String: String], in dir: String,
-                              _ agent: any VirtualMachineAgent) async throws {
-        var written: [String] = []
-        for name in names {
-            precondition(values[name] != nil && undo[name] != nil, "\(name) has no value to write or restore")
+    /// A cgroup file whose value changes, and the value to put back if a later one fails.
+    struct Change: Sendable {
+        var name: String
+        var new: String
+        var old: String
+    }
+
+    private static func write(_ changes: [Change], in dir: String, _ agent: any VirtualMachineAgent) async throws {
+        func put(_ name: String, _ value: String) async throws {
+            try await agent.writeFile(path: "\(dir)/\(name)", data: Data((value + "\n").utf8), flags: .init(), mode: 0)
+        }
+        for (i, change) in changes.enumerated() {
             do {
-                try await agent.writeFile(path: "\(dir)/\(name)", data: Data((values[name]! + "\n").utf8), flags: .init(), mode: 0)
-                written.append(name)
+                try await put(change.name, change.new)
             } catch {
-                for done in written.reversed() {
-                    try? await agent.writeFile(path: "\(dir)/\(done)", data: Data((undo[done]! + "\n").utf8), flags: .init(), mode: 0)
-                }
-                throw APIError(409, "the guest kernel refused \(name) = \(values[name]!): \(error)")
+                for done in changes[..<i].reversed() { try? await put(done.name, done.old) }
+                throw APIError(409, "the guest kernel refused \(change.name) = \(change.new): \(error)")
             }
         }
-        assert(written == names, "a write was skipped")
     }
 }

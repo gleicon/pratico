@@ -38,9 +38,14 @@ import Glibc
 package final class Recorder: Sendable {
     package static let port: UInt32 = 1028
     package static let objectPath = "/usr/lib/pratico/recorder.bpf.o"
-    static let recordSize = 384
-    static let kindDrops: UInt32 = 4
-    static let kindError: UInt32 = 5
+    static let kindDrops: UInt32 = 4  // PRATICO_EVENT_DROPS
+    static let kindError: UInt32 = 5  // PRATICO_EVENT_ERROR
+
+    /// `struct pratico_event` (vm/bpf/recorder.h): the offsets the recorder writes at.
+    enum Layout {
+        static let kind = 0, time = 16, value = 24, fileLength = 40, text = 64, size = 384
+        static let textCapacity = size - text
+    }
     /// Records sent per wakeup at most, so a burst cannot hold the loop.
     static let batchMax = 512
 
@@ -107,7 +112,7 @@ package final class Recorder: Sendable {
         var dropsSent: UInt64 = 0
         var lost: UInt64 = 0
         var batch: [UInt8] = []
-        batch.reserveCapacity((Self.batchMax + 1) * Self.recordSize)
+        batch.reserveCapacity((Self.batchMax + 1) * Layout.size)
         while true {
             let (fd, retired) = readers.withLock { r in
                 defer { r.retired.removeAll() }
@@ -123,7 +128,7 @@ package final class Recorder: Sendable {
             batch.removeAll(keepingCapacity: true)
             let offset = Self.clockOffset()
             ring.drain(max: Self.batchMax) { record in
-                precondition(record.count == Self.recordSize, "a record of \(record.count) bytes, not \(Self.recordSize)")
+                precondition(record.count == Layout.size, "a record of \(record.count) bytes, not \(Layout.size)")
                 let start = batch.count
                 batch.append(contentsOf: record)
                 Self.rebase(&batch, at: start, by: offset)
@@ -134,7 +139,7 @@ package final class Recorder: Sendable {
                 dropsSent = drops
             }
             guard !batch.isEmpty, !Self.send(batch[...], to: fd) else { continue }
-            lost += UInt64(batch.count / Self.recordSize)
+            lost += UInt64(batch.count / Layout.size)
             readers.withLock { r in if r.current == fd { r.current = -1 } else { r.retired.removeAll { $0 == fd } } }
             close(fd)
         }
@@ -148,31 +153,31 @@ package final class Recorder: Sendable {
         return (Int64(real.tv_sec) - Int64(boot.tv_sec)) * 1_000_000_000 + Int64(real.tv_nsec) - Int64(boot.tv_nsec)
     }
 
-    /// The record's `time_ns` (offset 16) moved from boot time to wall time.
+    /// The record's `time_ns` moved from boot time to wall time.
     static func rebase(_ bytes: inout [UInt8], at start: Int, by offset: Int64) {
-        let t = (0..<8).reduce(UInt64(0)) { $0 | UInt64(bytes[start + 16 + $1]) << (8 * $1) }
-        let wall = UInt64(bitPattern: Int64(bitPattern: t) &+ offset)
-        for i in 0..<8 { bytes[start + 16 + i] = UInt8(truncatingIfNeeded: wall >> (8 * i)) }
+        bytes.withUnsafeMutableBytes { b in
+            let boot = Int64(littleEndian: b.loadUnaligned(fromByteOffset: start + Layout.time, as: Int64.self))
+            b.storeBytes(of: (boot &+ offset).littleEndian, toByteOffset: start + Layout.time, as: Int64.self)
+        }
     }
 
+    /// A record of the recorder's own, stamped now.
     static func record(kind: UInt32, value: UInt64) -> [UInt8] {
-        var r = [UInt8](repeating: 0, count: recordSize)
-        for i in 0..<4 { r[i] = UInt8(truncatingIfNeeded: kind >> (8 * i)) }
-        let now = UInt64(clockOffset() &+ Int64(bootNanoseconds()))
-        for i in 0..<8 {
-            r[16 + i] = UInt8(truncatingIfNeeded: now >> (8 * i))
-            r[24 + i] = UInt8(truncatingIfNeeded: value >> (8 * i))
+        var r = [UInt8](repeating: 0, count: Layout.size)
+        let now = clockOffset() &+ Int64(bootNanoseconds())
+        r.withUnsafeMutableBytes { b in
+            b.storeBytes(of: kind.littleEndian, toByteOffset: Layout.kind, as: UInt32.self)
+            b.storeBytes(of: now.littleEndian, toByteOffset: Layout.time, as: Int64.self)
+            b.storeBytes(of: value.littleEndian, toByteOffset: Layout.value, as: UInt64.self)
         }
         return r
     }
 
-    /// `text` (offset 64, 320 bytes) as the file part of the record.
+    /// `text` as the record's file part, NUL-terminated, cut to fit.
     static func put(text: String, into record: inout [UInt8]) {
-        let bytes = Array(text.utf8.prefix(319))
-        record.replaceSubrange(64..<(64 + bytes.count), with: bytes)
-        let n = bytes.count + 1
-        record[40] = UInt8(truncatingIfNeeded: n)
-        record[41] = UInt8(truncatingIfNeeded: n >> 8)
+        let bytes = Array(text.utf8.prefix(Layout.textCapacity - 1))
+        record.replaceSubrange(Layout.text..<(Layout.text + bytes.count), with: bytes)
+        record.withUnsafeMutableBytes { $0.storeBytes(of: UInt16(bytes.count + 1).littleEndian, toByteOffset: Layout.fileLength, as: UInt16.self) }
     }
 
     static func bootNanoseconds() -> UInt64 {
@@ -184,9 +189,10 @@ package final class Recorder: Sendable {
     /// Writes all of `bytes`; false when the reader is gone.
     static func send(_ bytes: ArraySlice<UInt8>, to fd: Int32) -> Bool {
         bytes.withUnsafeBytes { buffer in
+            guard let base = buffer.baseAddress else { return true }
             var done = 0
             while done < buffer.count {
-                let n = write(fd, buffer.baseAddress! + done, buffer.count - done)
+                let n = write(fd, base + done, buffer.count - done)
                 if n < 0 && errno == EINTR { continue }
                 guard n > 0 else { return false }
                 done += n
@@ -298,8 +304,8 @@ enum BPF {
 
     struct Attr {
         var bytes = [UInt8](repeating: 0, count: 128)
-        mutating func put32(_ at: Int, _ v: UInt32) { for i in 0..<4 { bytes[at + i] = UInt8(truncatingIfNeeded: v >> (8 * i)) } }
-        mutating func put64(_ at: Int, _ v: UInt64) { for i in 0..<8 { bytes[at + i] = UInt8(truncatingIfNeeded: v >> (8 * i)) } }
+        mutating func put32(_ at: Int, _ v: UInt32) { bytes.withUnsafeMutableBytes { $0.storeBytes(of: v.littleEndian, toByteOffset: at, as: UInt32.self) } }
+        mutating func put64(_ at: Int, _ v: UInt64) { bytes.withUnsafeMutableBytes { $0.storeBytes(of: v.littleEndian, toByteOffset: at, as: UInt64.self) } }
         mutating func call(_ cmd: Int32) -> Int32 {
             let size = UInt32(bytes.count)
             return bytes.withUnsafeMutableBytes { CZ_bpf(cmd, $0.baseAddress, size) }
@@ -326,7 +332,7 @@ enum BPF {
         for load in program.mapLoads {
             guard let fd = maps[load.map] else { throw BPFObject.Error.malformed("\(program.tracepoint) loads unknown map \(load.map)") }
             code[load.offset + 1] = (code[load.offset + 1] & 0x0f) | (pseudoMapFD << 4)
-            for i in 0..<4 { code[load.offset + 4 + i] = UInt8(truncatingIfNeeded: UInt32(bitPattern: fd) >> (8 * i)) }
+            code.withUnsafeMutableBytes { $0.storeBytes(of: fd.littleEndian, toByteOffset: load.offset + 4, as: Int32.self) }
         }
         func attempt(log: UnsafeMutableRawBufferPointer?) -> Int32 {
             code.withUnsafeBytes { insns in

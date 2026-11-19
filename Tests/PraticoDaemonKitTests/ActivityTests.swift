@@ -6,22 +6,24 @@ import Testing
 /// A `struct pratico_event` (vm/bpf/recorder.h) as the guest sends it.
 private func record(kind: UInt32, pid: UInt32 = 7, ppid: UInt32 = 1, value: UInt64 = 0, daddr: [UInt8] = [0, 0, 0, 0],
                     sport: UInt16 = 0, dport: UInt16 = 0, comm: String = "sh", file: String = "", args: [String] = []) -> [UInt8] {
-    var r = [UInt8](repeating: 0, count: Activity.recordSize)
-    func put(_ v: UInt64, _ at: Int, _ n: Int) { for i in 0..<n { r[at + i] = UInt8(truncatingIfNeeded: v >> (8 * i)) } }
-    put(UInt64(kind), 0, 4)
-    put(UInt64(pid), 4, 4)
-    put(UInt64(ppid), 8, 4)
-    put(1_700_000_000_000_000_000, 16, 8)
-    put(value, 24, 8)
-    r.replaceSubrange(32..<36, with: daddr)
-    put(UInt64(sport), 36, 2)
-    put(UInt64(dport), 38, 2)
-    r.replaceSubrange(48..<(48 + comm.utf8.count), with: comm.utf8)
+    typealias L = Activity.Layout
+    var r = [UInt8](repeating: 0, count: L.size)
     let fileBytes: [UInt8] = file.isEmpty ? [] : Array(file.utf8) + [0]
     let argBytes: [UInt8] = args.flatMap { Array($0.utf8) + [0] }
-    r.replaceSubrange(64..<(64 + fileBytes.count + argBytes.count), with: fileBytes + argBytes)
-    put(UInt64(fileBytes.count), 40, 2)
-    put(UInt64(argBytes.count), 42, 2)
+    r.withUnsafeMutableBytes { b in
+        b.storeBytes(of: kind.littleEndian, toByteOffset: L.kind, as: UInt32.self)
+        b.storeBytes(of: pid.littleEndian, toByteOffset: L.pid, as: UInt32.self)
+        b.storeBytes(of: ppid.littleEndian, toByteOffset: L.ppid, as: UInt32.self)
+        b.storeBytes(of: UInt64(1_700_000_000_000_000_000).littleEndian, toByteOffset: L.time, as: UInt64.self)
+        b.storeBytes(of: value.littleEndian, toByteOffset: L.value, as: UInt64.self)
+        b.storeBytes(of: sport.littleEndian, toByteOffset: L.sport, as: UInt16.self)
+        b.storeBytes(of: dport.littleEndian, toByteOffset: L.dport, as: UInt16.self)
+        b.storeBytes(of: UInt16(fileBytes.count).littleEndian, toByteOffset: L.fileLength, as: UInt16.self)
+        b.storeBytes(of: UInt16(argBytes.count).littleEndian, toByteOffset: L.argsLength, as: UInt16.self)
+    }
+    r.replaceSubrange(L.daddr..<(L.daddr + 4), with: daddr)
+    r.replaceSubrange(L.comm..<(L.comm + comm.utf8.count), with: comm.utf8)
+    r.replaceSubrange(L.text..<(L.text + fileBytes.count + argBytes.count), with: fileBytes + argBytes)
     return r
 }
 
