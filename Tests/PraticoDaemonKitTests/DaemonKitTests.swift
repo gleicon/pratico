@@ -956,3 +956,80 @@ private func emptyDir() throws -> URL {
     #expect(throws: APIError.self) { try ArchiveService.realDirectory(work, "link/data") }
     #expect(throws: APIError.self) { try ArchiveService.realDirectory(work, "link") }
 }
+
+// Ask mode (D-62): one question per container and destination, its answer standing
+// until the container stops, `always` kept, silence refused.
+@Test func egressQuestionsShareOneQuestionAndRemember() async throws {
+    let q = EgressQuestions(wait: 30)
+    let saved = LockedBox<[String]>([])
+    q.save = { _, list in saved.set(list) }
+    let outcomes = LockedBox<[EgressQuestions.Outcome]>([])
+    await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+        let both = LockedBox(0)
+        for _ in 0..<2 {
+            q.ask("c1", "example.com", port: 443) { o in
+                outcomes.update { $0.append(o) }
+                if both.update({ $0 += 1; return $0 }) == 2 { done.resume() }
+            }
+        }
+        #expect(q.list().count == 1)
+        #expect(q.answer(q.list()[0].id, .allow))
+    }
+    #expect(outcomes.get() == [.allowed, .allowed])
+    #expect(q.decided("c1", "example.com") == true && q.list().isEmpty)
+    #expect(!q.answer("gone", .deny))
+
+    q.ask("c1", "evil.example", port: 80) { _ in }
+    q.answer(q.list()[0].id, .deny)
+    #expect(q.decided("c1", "evil.example") == false)
+    q.ask("c1", "pypi.org", port: 443) { _ in }
+    q.answer(q.list()[0].id, .always)
+    #expect(saved.get() == ["pypi.org"] && q.alwaysAllowed("c1") == ["pypi.org"] && q.decided("c1", "pypi.org") == nil)
+
+    q.stopped("c1")
+    #expect(q.decided("c1", "example.com") == nil && q.alwaysAllowed("c1") == ["pypi.org"])
+    q.removed("c1")
+    q.load = { _ in [] }
+    #expect(q.alwaysAllowed("c1").isEmpty)
+}
+
+@Test func egressQuestionsRefuseWhenNobodyAnswers() async {
+    let q = EgressQuestions(wait: 0.1)
+    let outcome = await withCheckedContinuation { (done: CheckedContinuation<EgressQuestions.Outcome, Never>) in
+        q.ask("c1", "example.com", port: 443) { done.resume(returning: $0) }
+    }
+    #expect(outcome == .refused("example.com was not answered within 0 s"))
+    #expect(q.decided("c1", "example.com") == nil && q.list().isEmpty)  // the next connection asks again
+}
+
+// Ask mode in the guard: off the allowlist is a question; an allowed answer still meets the feeds.
+@Test func egressGuardAsksInAskMode() {
+    let g = EgressGuard(blockThreats: true)
+    g.askMode = { _ in true }
+    g.allowlist = { _ in ["pypi.org"] }
+    var feeds = ThreatSet()
+    feeds.names["evil.example"] = "URLhaus"
+    g.setFeeds(feeds)
+    #expect(g.checkName("c1", "pypi.org") == .allow)
+    #expect(g.checkName("c1", "example.com") == .ask("example.com"))
+    #expect(g.checkAddress("c1", 0x0101_0101, port: 53, isMac: false) == .ask("1.1.1.1"))
+    g.allowlist = { _ in ["pypi.org", "1.1.1.1"] }  // an address answered `always`
+    #expect(g.checkAddress("c1", 0x0101_0101, port: 53, isMac: false) == .allow)
+    g.allowlist = { _ in ["pypi.org"] }
+    #expect(g.checkName("c1", "evil.example") == .block("evil.example is listed by URLhaus"))  // listed: never asked
+    g.questions.ask("c1", "evil.example", port: 80) { _ in }
+    g.questions.answer(g.questions.list()[0].id, .allow)
+    #expect(g.checkName("c1", "evil.example") == .block("evil.example is listed by URLhaus"))
+    g.askMode = { _ in false }
+    #expect(g.checkName("c1", "example.com") == .block("example.com is not on this container's egress allowlist"))
+}
+
+/// A value callbacks on other queues update, for tests.
+final class LockedBox<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: T
+    init(_ value: T) { self.value = value }
+    func get() -> T { lock.withLock { value } }
+    func set(_ v: T) { lock.withLock { value = v } }
+    @discardableResult func update<R>(_ f: (inout T) -> R) -> R { lock.withLock { f(&value) } }
+}

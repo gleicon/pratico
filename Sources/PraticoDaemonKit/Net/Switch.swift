@@ -232,23 +232,37 @@ final class NetSwitch: @unchecked Sendable {
             respond(nil)
             return
         }
-        if case .block(let why) = egress.checkName(port.containerId, q.name) {
+        let refuse: @Sendable (String) -> Void = { [self] why in
             egress.record(port.containerId, .init(time: Date(), proto: "dns", ip: server, port: 53, sourcePort: udp.srcPort, name: q.name, blocked: true, reason: why))
             respond(nil)  // no such name, as far as the container can tell
-            return
         }
-        guard q.qtype == 1 else {
-            respond([])  // IPv6 and other types: no records yet (no IPv6 routing)
-            return
+        let resolve: @Sendable () -> Void = { [self] in
+            guard q.qtype == 1 else {
+                respond([])  // IPv6 and other types: no records yet (no IPv6 routing)
+                return
+            }
+            // External names go through the Mac's resolver, so VPN and split DNS apply.
+            guard lookups.wait(timeout: .now()) == .success else { return }  // busy: the client retries
+            let name = q.name
+            DispatchQueue.global().async { [self] in
+                defer { lookups.signal() }
+                let found = Self.hostLookup(name)
+                if let found { egress.resolved(port.containerId, name, found) }  // names its connections
+                respond(found)
+            }
         }
-        // External names go through the Mac's resolver, so VPN and split DNS apply.
-        guard lookups.wait(timeout: .now()) == .success else { return }  // busy: the client retries
-        let name = q.name
-        DispatchQueue.global().async { [self] in
-            defer { lookups.signal() }
-            let found = Self.hostLookup(name)
-            if let found { egress.resolved(port.containerId, name, found) }  // names its connections
-            respond(found)
+        switch egress.checkName(port.containerId, q.name) {
+        case .block(let why): refuse(why)
+        case .allow: resolve()
+        case .ask(let host):
+            // Ask mode: the answer waits for the question's (the container's resolver waits
+            // 30 s in ask mode), and nothing leaves the Mac for a name nobody allowed.
+            egress.questions.ask(port.containerId, host, port: 53) { [egress] outcome in
+                // Asked again after the answer: the feeds may have changed meanwhile.
+                if case .refused(let why) = outcome { return refuse(why) }
+                if case .block(let why) = egress.checkName(port.containerId, q.name) { return refuse(why) }
+                resolve()
+            }
         }
     }
 

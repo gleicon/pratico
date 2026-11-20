@@ -4,7 +4,8 @@ import Foundation
 /// through pratico's uplink on the Mac, out of the container's reach: the guard names it
 /// (pratico's DNS answers, the TLS ClientHello's SNI, the HTTP Host header), records it,
 /// and refuses it when a threat feed lists the name or address, or when the container
-/// has an allowlist the destination is not on.
+/// has an allowlist the destination is not on. In ask mode (D-62) a destination not on
+/// it waits for an answer instead (`EgressQuestions`).
 final class EgressGuard: @unchecked Sendable {
     struct Flow: Sendable {
         var time: Date
@@ -21,6 +22,8 @@ final class EgressGuard: @unchecked Sendable {
     enum Verdict: Equatable {
         case allow
         case block(String)
+        /// Ask mode: hold this, named so, until someone answers.
+        case ask(String)
     }
 
     /// Flows kept per container, and names it resolved: bounded, oldest out first.
@@ -33,8 +36,12 @@ final class EgressGuard: @unchecked Sendable {
     private var names: [String: [UInt32: String]] = [:]
     /// Off: flows are recorded and threats alert, nothing is refused (`egress_block`).
     let blockThreats: Bool
-    /// A container's allowlist, if it has one (its `dev.pratico.egress.allow` label).
+    /// A container's allowlist, if it has one (its `dev.pratico.egress.allow` label, and in
+    /// ask mode what was answered `always`; an empty one in ask mode).
     var allowlist: @Sendable (String) -> [String]? = { _ in nil }
+    /// Whether a container is in ask mode (its `dev.pratico.egress.ask` label).
+    var askMode: @Sendable (String) -> Bool = { _ in false }
+    let questions = EgressQuestions()
     /// Called once per refused or listed destination and container: alerts and events.
     var onThreat: @Sendable (_ container: String, _ destination: String, _ reason: String, _ blocked: Bool) -> Void = { _, _, _, _ in }
 
@@ -49,10 +56,17 @@ final class EgressGuard: @unchecked Sendable {
     /// A name a container asks pratico's DNS for.
     func checkName(_ container: String, _ name: String) -> Verdict {
         let host = Self.normalized(name)
+        let feed = lock.withLock { feeds.listing(name: host) }
         if let allowed = allowlist(container), !Self.matches(host, allowed) {
-            return .block("\(host) is not on this container's egress allowlist")
+            // A listed destination is refused, never offered for an answer.
+            if let feed, blockThreats { return threat(container, host, feed) }
+            switch asked(container, host) {
+            case .allow?: break
+            case let verdict?: return verdict
+            case nil: return .block("\(host) is not on this container's egress allowlist")
+            }
         }
-        if let feed = lock.withLock({ feeds.listing(name: host) }) { return threat(container, host, feed) }
+        if let feed { return threat(container, host, feed) }
         return .allow
     }
 
@@ -61,13 +75,31 @@ final class EgressGuard: @unchecked Sendable {
     /// A connection's first packet: its address, and the name pratico resolved for it.
     func checkAddress(_ container: String, _ ip: UInt32, port: UInt16, isMac: Bool) -> Verdict {
         let known = lock.withLock { names[container]?[ip] }
-        if let allowed = allowlist(container) {
-            guard let known, Self.matches(known, allowed) || (isMac && Self.matches("host.docker.internal", allowed)) else {
-                return .block("\(IPv4.format(ip)) was not resolved from a name on this container's egress allowlist")
+        let feed = isMac ? nil : lock.withLock { feeds.listing(ip: ip, port: port) }
+        // An address is allowed through a name pratico resolved for it, or listed itself
+        // (as ask mode's `always` keeps a bare address).
+        if let allowed = allowlist(container), !allowed.contains(IPv4.format(ip)),
+            !(known.map { Self.matches($0, allowed) } ?? false), !(isMac && Self.matches("host.docker.internal", allowed)) {
+            if let feed, blockThreats { return threat(container, known ?? IPv4.format(ip), feed) }
+            switch asked(container, known ?? IPv4.format(ip)) {
+            case .allow?: break
+            case let verdict?: return verdict
+            case nil: return .block("\(IPv4.format(ip)) was not resolved from a name on this container's egress allowlist")
             }
         }
-        if !isMac, let feed = lock.withLock({ feeds.listing(ip: ip, port: port) }) { return threat(container, known ?? IPv4.format(ip), feed) }
+        if let feed { return threat(container, known ?? IPv4.format(ip), feed) }
         return .allow
+    }
+
+    /// Ask mode, for a destination its allowlist does not hold: what was answered while the
+    /// container runs, else a question. Nil outside ask mode.
+    private func asked(_ container: String, _ destination: String) -> Verdict? {
+        guard askMode(container) else { return nil }
+        switch questions.decided(container, destination) {
+        case true?: return .allow
+        case false?: return .block("\(destination) was refused when asked")
+        case nil: return .ask(destination)
+        }
     }
 
     /// The name a connection's first bytes carry (SNI, Host): checked like a DNS name.
@@ -109,7 +141,11 @@ final class EgressGuard: @unchecked Sendable {
             flows[container] = nil
             names[container] = nil
         }
+        questions.removed(container)
     }
+
+    /// A container stopped: answers given while it ran end, and its questions are refused.
+    func stopped(_ container: String) { questions.stopped(container) }
 
     // MARK: Matching
 

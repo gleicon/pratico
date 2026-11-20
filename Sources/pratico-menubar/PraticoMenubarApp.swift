@@ -59,6 +59,7 @@ struct StatusMenu: View {
         }
         // Space used and cleanup, better than `docker system df` and `prune`.
         if daemon.isRunning {
+            EgressQuestionsMenu(daemon: daemon)
             ContainersMenu(daemon: daemon)
             AlertsMenu(daemon: daemon)
             SnapshotMenu(daemon: daemon)

@@ -104,9 +104,23 @@ extension RunOptions {
         try o.parseSecurity(host)
         try o.parseProcess(host, config: config)
         try o.parseLifecycle(host, config: config)
+        try o.parseAskMode(host, config: config)
         precondition(o.cpus >= 1 && o.memoryMiB >= 64, "VM below its minimum: \(o.cpus) vCPUs, \(o.memoryMiB) MiB")
         precondition(o.capabilities.map { !$0.contains("ALL") } ?? true, "ALL must be expanded")
         return o
+    }
+
+    /// Ask mode (D-62, `dev.pratico.egress.ask=true`): pratico's DNS holds an answer while
+    /// the menubar asks, so the resolver waits up to its question's 30 s, once.
+    private mutating func parseAskMode(_ host: JSON, config: JSON) throws {
+        guard let value = config["Labels"]?[MCPTools.askLabel]?.string else { return }
+        guard value == "true" || value == "false" else { throw APIError(400, "pratico: \(MCPTools.askLabel) is true or false, not \(value)") }
+        guard value == "true" else { return }
+        guard host["NetworkMode"]?.string != "none" else { throw APIError(400, "pratico: ask mode needs a network; with --network none nothing is asked") }
+        var r = dns ?? Resolver()
+        if !r.options.contains(where: { $0.hasPrefix("timeout:") }) { r.options.append("timeout:\(Int(EgressQuestions.timeout))") }
+        if !r.options.contains(where: { $0.hasPrefix("attempts:") }) { r.options.append("attempts:1") }
+        dns = r
     }
 
     private mutating func parseCPU(_ host: JSON) throws {

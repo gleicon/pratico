@@ -12,6 +12,8 @@ struct MCPTools: Sendable {
     /// A container's egress allowlist (D-51): names, `*.example.com` for subdomains; any
     /// container can carry it, `run` and `start` set it from `egress`.
     static let egressLabel = "dev.pratico.egress.allow"
+    /// Ask mode (D-62): destinations not on the allowlist wait for an answer in the menubar.
+    static let askLabel = "dev.pratico.egress.ask"
     /// Output an agent gets back per stream: the last 64 KiB, as a log tail.
     static let outputBytes = 64 * 1024
     static let maxTimeout = 3600
@@ -63,6 +65,7 @@ struct MCPTools: Sendable {
         ]]),
         "egress": .object(["type": "array", "items": ["type": "string"],
                            "description": "Allowlist: the only names it may reach (pypi.org, *.github.com); with a network, everything else is refused"]),
+        "ask_egress": bool("Ask mode: a destination not on egress is held until the person at the Mac allows it in the menubar (refused after 30 s unanswered); needs a network"),
         "cpus": .object(["type": "number", "description": "vCPUs (default pratico's)"]),
         "memory_mib": int("Memory in MiB (default pratico's)"),
     ]

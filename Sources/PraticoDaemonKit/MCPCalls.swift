@@ -170,6 +170,10 @@ extension MCPTools {
             guard !allow.isEmpty, allow.allSatisfy({ !$0.isEmpty && !$0.contains(",") }) else { throw APIError(400, "egress lists names, at least one") }
             labels[Self.egressLabel] = .string(allow.joined(separator: ","))
         }
+        if args["ask_egress"]?.bool == true {
+            guard network != "none" else { throw APIError(400, "ask mode needs a network: set network to bridge") }
+            labels[Self.askLabel] = "true"
+        }
         var body: [String: JSON] = ["Image": .string(ref), "HostConfig": .object(host), "Labels": .object(labels)]
         if let cmd = args["command"]?.strings, !cmd.isEmpty { body["Cmd"] = JSON(cmd) }
         if let env = args["env"]?.strings { body["Env"] = JSON(env) }

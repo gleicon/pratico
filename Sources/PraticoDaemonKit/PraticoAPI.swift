@@ -35,6 +35,20 @@ extension Daemon {
             guard let key = JSON.parse(req.body)?["key"]?.string else { throw APIError(400, "the body is {\"key\": \"…\"}") }
             try egressFeeds.setKey(key)
             conn.respond(204)
+        case ("GET", 2, "egress") where p[1] == "questions":
+            // Ask mode (D-62): what waits for an answer, oldest first.
+            let questions = networks.netSwitch.egress.questions
+            conn.json(200, .array(questions.list().map { q in
+                let name = (try? containers.resolve(q.container))?.name ?? String(q.container.prefix(12))
+                return ["Id": .string(q.id), "Container": .string(q.container), "ContainerName": .string(name),
+                        "Destination": .string(q.destination), "Port": .int(Int64(q.port)), "Asked": .string(Timestamp.format(q.asked))]
+            }))
+        case ("POST", 3, "egress") where p[1] == "questions":
+            guard let answer = req.query["answer"].flatMap(EgressQuestions.Answer.init(rawValue:)) else {
+                throw APIError(400, "answer is allow, always, or deny")
+            }
+            guard networks.netSwitch.egress.questions.answer(p[2], answer) else { throw APIError(404, "no question \(p[2]) is waiting: answered already, or it timed out") }
+            conn.respond(204)
         case ("DELETE", 2, "egress") where p[1] == "key":
             try egressFeeds.setKey(nil)
             conn.respond(204)

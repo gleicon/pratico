@@ -76,9 +76,25 @@ public final class Daemon: @unchecked Sendable {
         containers.startGate = { [scans] rec in scans.blockReason(imageId: rec.imageId) }
         // Egress (D-51): the switch's guard, its feeds, allowlists from labels, alerts.
         let guardian = EgressGuard(blockThreats: config.egressBlock)
-        guardian.allowlist = { [containers] id in
-            guard let rec = try? containers.resolve(id), let raw = rec.labels[MCPTools.egressLabel] else { return nil }
-            return raw.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        guardian.askMode = { [containers] id in (try? containers.resolve(id))?.labels[MCPTools.askLabel] == "true" }
+        guardian.allowlist = { [containers, guardian] id in
+            guard let rec = try? containers.resolve(id) else { return nil }
+            let listed = rec.labels[MCPTools.egressLabel].map { raw in
+                raw.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            }
+            // Ask mode: an allowlist, empty to start, that grows with the answers `always`.
+            guard rec.labels[MCPTools.askLabel] == "true" else { return listed }
+            return (listed ?? []) + guardian.questions.alwaysAllowed(id)
+        }
+        guardian.questions.load = { [containers] id in
+            let file = containers.shimFiles(id).dir.appending(path: "egress-always.json")
+            return (try? Data(contentsOf: file)).flatMap { try? JSONDecoder().decode([String].self, from: $0) } ?? []
+        }
+        guardian.questions.save = { [containers] id, list in
+            let file = containers.shimFiles(id).dir.appending(path: "egress-always.json")
+            do { try JSONEncoder().encode(list).write(to: file, options: .atomic) } catch {
+                Pratico.log("pratico-daemon: egress: cannot keep \(id.prefix(12))'s answers: \(error)")
+            }
         }
         guardian.onThreat = { [containers, alerts] id, destination, feed, blocked in
             let name = (try? containers.resolve(id))?.name ?? String(id.prefix(12))

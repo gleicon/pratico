@@ -75,7 +75,7 @@ final class AlertLog: @unchecked Sendable {
         let list = read()
         let kept = list.filter { alert in
             let parts = (alert["key"]?.string ?? "").split(separator: ":", maxSplits: 2).map(String.init)
-            guard parts.count >= 2, ["port", "health"].contains(parts[0]) else { return true }
+            guard parts.count >= 2, ["port", "health", "drift"].contains(parts[0]) else { return true }
             return ids.contains(parts[1])
         }
         if kept.count != list.count { write(kept) }
@@ -99,6 +99,12 @@ final class AlertLog: @unchecked Sendable {
 final class ContainerAlerts: @unchecked Sendable {
     let alerts: AlertLog
     let containers: ContainerService
+    /// Ask-mode containers' activity, read again when it grows: what alerts for drift.
+    private let drift = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "pratico.alerts.drift"))
+    private var activitySize: [String: Int] = [:]  // container → its activity log's size when last read
+    static let driftEvery: DispatchTimeInterval = .seconds(2)
+    /// Events read from an ask-mode container's activity each time it grows.
+    static let driftWindow = 500
 
     init(alerts: AlertLog, containers: ContainerService, events: EventBus) {
         self.alerts = alerts
@@ -109,6 +115,31 @@ final class ContainerAlerts: @unchecked Sendable {
             if e.type == "container" { handle(e) }
             return true
         }
+        drift.schedule(deadline: .now() + Self.driftEvery, repeating: Self.driftEvery)
+        drift.setEventHandler { [weak self] in self?.checkDrift() }
+        drift.resume()
+    }
+
+    deinit { drift.cancel() }
+
+    /// Ask mode (D-62) watches a container closely: running a file that did not come with
+    /// its image (`FromImage` false) alerts. Other containers only mark it in their activity,
+    /// as builds run what they write all the time.
+    private func checkDrift() {
+        var live: Set<String> = []
+        for rec in containers.all() where rec.state.running && rec.labels[MCPTools.askLabel] == "true" {
+            live.insert(rec.id)
+            let files = containers.shimFiles(rec.id)
+            let size = (try? FileManager.default.attributesOfItem(atPath: files.activity.path)[.size] as? Int) ?? 0
+            guard size != activitySize[rec.id] else { continue }
+            activitySize[rec.id] = size
+            for e in containers.activity(rec.id, limit: Self.driftWindow) where e["Kind"]?.string == "exec" && e["FromImage"]?.bool == false {
+                let path = e["Path"]?.string ?? "?"
+                alerts.raise(key: "drift:\(rec.id):\(path)", level: "serious", title: "\(rec.name) ran \(path), which is not from its image",
+                             detail: "\(rec.name) is in ask mode, and ran \(path) (\(e["Command"]?.string ?? "")), a file it downloaded, built, or changed, or one on a volume. Its activity has the arguments and the process that started it.")
+            }
+        }
+        activitySize = activitySize.filter { live.contains($0.key) }
     }
 
     static func isLoopback(_ ip: String) -> Bool { ip.hasPrefix("127.") || ip == "::1" || ip == "localhost" }
@@ -133,6 +164,7 @@ final class ContainerAlerts: @unchecked Sendable {
             alerts.resolve(key: "health:\(e.id)")
         case "destroy":  // not at stop: a restart would raise and notify it again
             alerts.resolve(prefix: "port:\(e.id):")
+            alerts.resolve(prefix: "drift:\(e.id):")
             alerts.resolve(key: "health:\(e.id)")
         default:
             break

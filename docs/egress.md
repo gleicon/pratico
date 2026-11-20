@@ -76,4 +76,30 @@ HTTP line by line and refuses what it cannot read, so a plain-HTTP body with a l
 Containers' own networks are not affected.
 The MCP `run` and `start` tools set the label from `egress`.
 
-Decision: SPEC D-51. Example: [examples/11-egress.sh](../examples/11-egress.sh).
+## Ask mode
+
+A container labeled `dev.pratico.egress.ask=true` reaches what is not on its allowlist
+(none at first) only once you allow it. Each destination waits for an answer in a
+notification and in the menubar's **Waiting for You**:
+
+```sh
+docker run --label dev.pratico.egress.ask=true alpine wget -qO- https://example.com
+```
+
+- **Allow** lets that destination through until the container stops; **Always Allow**
+  adds it (a name, or an address no name led to) to the container's allowlist, kept
+  while the container exists; **Deny** refuses
+  it until the container stops. A question nobody answers is refused after 30 s, and the
+  next connection asks again.
+- Nothing leaves the Mac before an answer. A name waits at pratico's DNS, so it is not
+  even looked up (the container's resolver waits up to 30 s in ask mode, set in its
+  `resolv.conf`); a connection to an address no allowed name resolved waits at its first
+  packet, and goes on the moment you answer. Once a connection is open, the name its TLS
+  or HTTP carries is checked too, and asked about if it is another.
+- Threat feeds still refuse what they list, whatever the answer.
+- Running a file that did not come with the image (`FromImage` false in its
+  [activity](vm.md#flight-recorder)) raises an alert for a container in ask mode.
+- The MCP `run` and `start` tools set the label from `ask_egress`.
+- With `--network none` there is nothing to ask, and the label is refused.
+
+Decision: SPEC D-51, D-62. Example: [examples/11-egress.sh](../examples/11-egress.sh).

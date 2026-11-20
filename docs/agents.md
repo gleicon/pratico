@@ -54,7 +54,9 @@ you. So:
 
 `run` and `start` take `image`, `command`, `env`, `workdir`, `network`, `mounts`
 (`host`, `container`, `read_only`), `egress` (an allowlist of names: with a network,
-everything else is refused), `cpus`, and `memory_mib`.
+everything else is refused), `ask_egress` ([ask mode](egress.md#ask-mode): anything else
+waits for you to allow it in the menubar, and running a file not from the image alerts),
+`cpus`, and `memory_mib`.
 
 The transport is Streamable HTTP without event streams: each `POST /mcp` gets one JSON
 reply, and a `GET` answers 405. Protocol versions 2025-11-25, 2025-06-18, and 2025-03-26.

@@ -543,6 +543,7 @@ public final class ContainerService: @unchecked Sendable {
         health.stopped(id)
         networks.unpublish(id)
         networks.stopped(id)
+        networks.netSwitch.egress.stopped(id)
         lock.lock()
         pausedVMs.remove(id)
         published[id] = nil

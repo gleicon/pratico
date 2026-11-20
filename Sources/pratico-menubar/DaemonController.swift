@@ -27,6 +27,8 @@ final class DaemonController {
     /// Whether one of the app's menus is open, tracked from AppKit's menu notifications.
     @ObservationIgnored private var menuOpen = false
     private(set) var alerts: [Alert] = []
+    /// Ask mode's open questions (D-62), oldest first.
+    private(set) var questions: [EgressQuestion] = []
     private(set) var registries = Registries()
     /// Time of the newest alert already notified, so a relaunch does not repeat it.
     private var seenUntil = UserDefaults.standard.string(forKey: "alertsSeenUntil") ?? ""
@@ -109,7 +111,7 @@ final class DaemonController {
         let blocked = (scanSummary?.Blocked ?? 0) > 0
         let serious = alerts.contains { $0.level == "serious" }  // a blocked image, a refused destination
         let unhealthy = containers.contains { $0.Health == "unhealthy" }
-        return blocked || serious || unhealthy ? .attention : .running
+        return blocked || serious || unhealthy || !questions.isEmpty ? .attention : .running
     }
 
     /// "Scan Results…" with what needs a look beside it.
@@ -152,6 +154,7 @@ final class DaemonController {
     }
 
     init() {
+        EgressQuestionNotifier.shared.install()
         poll()
         for (name, open) in [(NSMenu.didBeginTrackingNotification, true), (NSMenu.didEndTrackingNotification, false)] {
             NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
@@ -385,6 +388,30 @@ final class DaemonController {
         return (obj["SpaceReclaimed"] as? NSNumber)?.int64Value ?? 0
     }
 
+    /// Ask mode: a question each second at most waits to be seen; each new one notifies,
+    /// and one that closed (answered, timed out) is withdrawn.
+    private func refreshQuestions() async {
+        let fresh = await DaemonProbe.fetch("/pratico/egress/questions", as: [EgressQuestion].self) ?? []
+        let before = Set(questions.map(\.Id)), now = Set(fresh.map(\.Id))
+        for q in fresh where !before.contains(q.Id) { EgressQuestionNotifier.shared.post(q) }
+        EgressQuestionNotifier.shared.withdraw(Array(before.subtracting(now)))
+        update(\.questions, fresh)
+    }
+
+    func answer(_ q: EgressQuestion, _ answer: EgressAnswer) {
+        Task {
+            let answered = await Task.detached { EgressAnswer.send(answer, to: q.Id) }.value
+            if !answered {
+                let alert = NSAlert()
+                alert.messageText = "\(q.Destination) is no longer waiting"
+                alert.informativeText = "It was answered elsewhere, or refused after 30 s. \(q.ContainerName)'s next connection asks again."
+                NSApp.activate()
+                alert.runModal()
+            }
+            await refreshQuestions()
+        }
+    }
+
     func refreshContainers() async {
         let running = (status?.ContainersRunning ?? 0) > 0
         let fresh = running ? await DaemonProbe.fetch("/pratico/containers", as: [RunningContainer].self) ?? [] : []
@@ -417,6 +444,7 @@ final class DaemonController {
                 let changed = status?.Changes != self.status?.Changes
                 self.update(\.status, status)
                 self.refreshAlerts()
+                if self.isRunning { await self.refreshQuestions() }
                 self.refreshRegistries()
                 self.refreshDefaultSocket()
                 if changed || tick % 30 == 0 { await self.refreshAfterChange() }

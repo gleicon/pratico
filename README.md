@@ -97,7 +97,8 @@ vminitd ───────── guest agent: process, exec, cp, stats, healt
 - **[Egress](docs/egress.md).** Every connection a container makes is named (DNS, TLS
   SNI, HTTP Host) and recorded on the Mac; destinations threat feeds list (Feodo
   Tracker, SSL Blacklist, Spamhaus DROP, and URLhaus and ThreatFox with a free abuse.ch
-  key) are refused; a label limits a container to the names it lists.
+  key) are refused; a label limits a container to the names it lists, and ask mode
+  holds each new destination until you allow it from the menubar.
 - **[Flight recorder](docs/vm.md#flight-recorder).** Each VM records every program
   started in its container (path and arguments), every exit, and the process behind each
   TCP connection and UDP destination, named from the egress record, from BPF probes pratico builds for its

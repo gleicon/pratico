@@ -19,6 +19,8 @@ final class Uplink: @unchecked Sendable {
     unowned let sw: NetSwitch
     private var udp: [FlowKey: UDPFlow] = [:]
     private var tcp: [FlowKey: TCPConn] = [:]
+    /// Flows whose first packet waits for an ask-mode answer; later packets are dropped.
+    private var held: Set<FlowKey> = []
     private var pings: [String: Int] = [:]  // by NIC
     private var timer: DispatchSourceTimer?
     private var listeners: [String: [Listener]] = [:]  // by container ID
@@ -104,7 +106,8 @@ final class Uplink: @unchecked Sendable {
             return
         }
         if udp[key] == nil {
-            guard admits(port.path), egressAllows(key, port, target: target, dnsQuery: d.dstPort == 53 ? DNSQuery(d.payload) : nil),
+            guard admits(port.path),
+                egressAllows(key, port, target: target, dnsQuery: d.dstPort == 53 ? DNSQuery(d.payload) : nil, again: { [self] in udpOut(ip, port, target) }),
                 let fd = Self.connected(SOCK_DGRAM, target, d.dstPort)
             else { return }
             let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
@@ -124,9 +127,16 @@ final class Uplink: @unchecked Sendable {
         guard let flow = udp[key] else { return }
         // Each query to an outside DNS server, not only a flow's first: a later one could ask
         // for a listed name, or carry data out in names (DNS tunnelling).
-        if d.dstPort == 53, let q = DNSQuery(d.payload), case .block(let why) = sw.egress.checkName(port.containerId, q.name) {
-            sw.egress.record(port.containerId, .init(time: Date(), proto: "dns", ip: key.dstIP, port: 53, sourcePort: key.srcPort, name: q.name, blocked: true, reason: why))
-            return
+        if d.dstPort == 53, let q = DNSQuery(d.payload) {
+            switch sw.egress.checkName(port.containerId, q.name) {
+            case .allow: break
+            case .block(let why):
+                sw.egress.record(port.containerId, .init(time: Date(), proto: "dns", ip: key.dstIP, port: 53, sourcePort: key.srcPort, name: q.name, blocked: true, reason: why))
+                return
+            case .ask(let host):
+                hold(host, key, port, proto: "dns", name: q.name, again: { [self] in udpOut(ip, port, target) })
+                return
+            }
         }
         flow.last = Date()
         _ = d.payload.withUnsafeBytes { Darwin.send(flow.fd, $0.baseAddress, $0.count, 0) }
@@ -139,7 +149,7 @@ final class Uplink: @unchecked Sendable {
         guard p.count >= 8, p[0] == 8, pings[port.path, default: 0] < Self.maxPingsPerNIC else { return }
         // ICMP carries data too: the guard sees each echo, as it sees each flow.
         let key = FlowKey(path: port.path, srcIP: ip.src, srcPort: 0, dstIP: ip.dst, dstPort: 0)
-        guard egressAllows(key, port, target: target, dnsQuery: nil, proto: "icmp") else { return }
+        guard egressAllows(key, port, target: target, dnsQuery: nil, proto: "icmp", again: { [self] in ping(ip, port, target) }) else { return }
         let fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP)
         guard fd >= 0 else { return }
         var sa = Self.sockaddr4(target, 0)
@@ -203,9 +213,14 @@ final class Uplink: @unchecked Sendable {
             return
         }
         guard admits(port.path) else { return }
-        guard egressAllows(key, port, target: target, dnsQuery: nil, tcp: true) else {
+        let reset: @Sendable () -> Void = { [sw] in
             let rst = TCPSegment(srcPort: seg.dstPort, dstPort: seg.srcPort, seq: 0, ack: seg.seq &+ 1, flags: TCPSegment.rst | TCPSegment.ack, window: 0)
             sw.deliver(to: port, src: ip.dst, proto: 6, rst.bytes(src: ip.dst, dst: ip.src))
+        }
+        // Held in ask mode: the SYN is handled again once answered (the guest's own
+        // retransmissions join the same question), or the guest is reset.
+        guard egressAllows(key, port, target: target, dnsQuery: nil, tcp: true, again: { [self] in tcpIn(ip, port, target) }, refused: reset) else {
+            if !isHeld(key) { reset() }
             return
         }
         let conn = TCPConn(key: key, port: port, syn: seg, uplink: self)
@@ -218,12 +233,17 @@ final class Uplink: @unchecked Sendable {
     /// A new flow's destination against the egress guard (D-51): refused ones are recorded
     /// here; a TCP flow it allows is recorded by its connection, once its first bytes name
     /// it. A query to an outside DNS server is checked by the name it asks for.
-    private func egressAllows(_ key: FlowKey, _ port: NetPort, target: UInt32, dnsQuery: DNSQuery?, tcp: Bool = false, proto: String = "udp") -> Bool {
+    private func egressAllows(_ key: FlowKey, _ port: NetPort, target: UInt32, dnsQuery: DNSQuery?, tcp: Bool = false, proto: String = "udp",
+                              again: @escaping @Sendable () -> Void, refused: @escaping @Sendable () -> Void = {}) -> Bool {
         let guardian = sw.egress
         let isMac = target == IPv4.parse("127.0.0.1")
         var verdict = guardian.checkAddress(port.containerId, key.dstIP, port: key.dstPort, isMac: isMac)
         if verdict == .allow, let q = dnsQuery, !isMac { verdict = guardian.checkName(port.containerId, q.name) }
         let name = dnsQuery?.name ?? guardian.name(port.containerId, key.dstIP)
+        if case .ask(let destination) = verdict {
+            hold(destination, key, port, proto: tcp ? "tcp" : proto, name: name, again: again, refused: refused)
+            return false
+        }
         if case .block(let why) = verdict {
             guardian.record(port.containerId, .init(time: Date(), proto: tcp ? "tcp" : proto, ip: key.dstIP, port: key.dstPort, sourcePort: key.srcPort, name: name, blocked: true, reason: why))
             return false
@@ -231,6 +251,33 @@ final class Uplink: @unchecked Sendable {
         if !tcp { guardian.record(port.containerId, .init(time: Date(), proto: proto, ip: key.dstIP, port: key.dstPort, sourcePort: key.srcPort, name: name, blocked: false, reason: nil)) }
         return true
     }
+
+    /// Ask mode: the packet waits for the answer to `destination`'s question. Allowed, it
+    /// is handled again (the answer now stands); refused, the flow is recorded so and
+    /// `refused` runs. Later packets of the flow (retransmissions) are dropped meanwhile.
+    private func hold(_ destination: String, _ key: FlowKey, _ port: NetPort, proto: String, name: String?,
+                      again: @escaping @Sendable () -> Void, refused: @escaping @Sendable () -> Void = {}) {
+        guard !held.contains(key) else { return }
+        guard held.count < Self.maxFlows else {
+            // Not held: the caller refuses it as it refuses a block.
+            return sw.egress.record(port.containerId, .init(time: Date(), proto: proto, ip: key.dstIP, port: key.dstPort, sourcePort: key.srcPort, name: name, blocked: true, reason: "too many flows waiting for an answer"))
+        }
+        held.insert(key)
+        sw.egress.questions.ask(port.containerId, destination, port: key.dstPort) { [weak self] outcome in
+            self?.queue.async { [weak self] in
+                guard let self else { return }
+                held.remove(key)
+                switch outcome {
+                case .allowed: again()
+                case .refused(let why):
+                    sw.egress.record(port.containerId, .init(time: Date(), proto: proto, ip: key.dstIP, port: key.dstPort, sourcePort: key.srcPort, name: name, blocked: true, reason: why))
+                    refused()
+                }
+            }
+        }
+    }
+
+    private func isHeld(_ key: FlowKey) -> Bool { held.contains(key) }
 
     private func tick() {
         let now = Date()
@@ -477,6 +524,8 @@ final class TCPConn {
     /// A connection the container opened holds its first bytes until they name it (SNI,
     /// Host) and the egress guard has its say (D-51); published ports' are not inspected.
     private var inspecting = true
+    /// Ask mode: the first bytes named a host nobody has allowed yet; they wait for the answer.
+    private var awaiting = false
     /// Plain HTTP from a container with an allowlist: every later request on the connection
     /// (keep-alive) is checked as the first was. `tail` holds the end of the last segment,
     /// so a header split across two is still seen.
@@ -644,6 +693,7 @@ final class TCPConn {
     /// The first bytes' verdict: true once they may go on to the host. Until then they
     /// wait in `toHost`; a refused connection is reset and nothing reaches the host.
     private func inspect(final: Bool = false) -> Bool {
+        guard !awaiting else { return false }
         let guardian = uplink.sw.egress
         let container = port.containerId
         let resolved = guardian.name(container, key.dstIP)
@@ -663,12 +713,42 @@ final class TCPConn {
         if unnamed, guardian.hasAllowlist(container) {
             verdict = .block("TLS or HTTP to \(resolved ?? IPv4.format(key.dstIP)) without a name pratico can read; this container's egress allowlist needs one")
         }
-        if case .block(let why) = verdict {
-            guardian.record(container, .init(time: Date(), proto: "tcp", ip: key.dstIP, port: key.dstPort, sourcePort: key.srcPort, name: carried, blocked: true, reason: why))
-            toHost.removeAll()
-            close(reset: true)
+        if case .ask(let host) = verdict {
+            awaiting = true
+            // The connection lives on the uplink's queue: the answer goes back there.
+            let me = Weak(self), queue = uplink.queue
+            guardian.questions.ask(container, host, port: key.dstPort) { outcome in
+                queue.async { me.value?.answered(outcome, carried: carried) }
+            }
             return false
         }
+        if case .block(let why) = verdict {
+            refuse(why, name: carried)
+            return false
+        }
+        return admit(carried: carried, resolved: resolved)
+    }
+
+    /// The answer to the question the first bytes raised: they go on, or the connection is reset.
+    private func answered(_ outcome: EgressQuestions.Outcome, carried: String?) {
+        guard awaiting, state != .closed else { return }
+        awaiting = false
+        if case .refused(let why) = outcome { return refuse(why, name: carried) }
+        if let carried, case .block(let why) = uplink.sw.egress.checkCarried(port.containerId, carried) { return refuse(why, name: carried) }
+        if admit(carried: carried, resolved: uplink.sw.egress.name(port.containerId, key.dstIP)) { flushToHost() }
+    }
+
+    private func refuse(_ why: String, name: String?) {
+        uplink.sw.egress.record(port.containerId, .init(time: Date(), proto: "tcp", ip: key.dstIP, port: key.dstPort, sourcePort: key.srcPort, name: name, blocked: true, reason: why))
+        toHost.removeAll()
+        close(reset: true)
+    }
+
+    /// The first bytes may go: the flow is recorded, and with an allowlist plain HTTP is
+    /// watched for later requests.
+    private func admit(carried: String?, resolved: String?) -> Bool {
+        let guardian = uplink.sw.egress
+        let container = port.containerId
         guardian.record(container, .init(time: Date(), proto: "tcp", ip: key.dstIP, port: key.dstPort, sourcePort: key.srcPort, name: carried ?? resolved, blocked: false, reason: nil))
         watchHTTP = carried != nil && toHost.first != 0x16 && guardian.hasAllowlist(container)
         // Requests pipelined behind the first, in these same bytes, are checked before any goes.
@@ -686,6 +766,8 @@ final class TCPConn {
         let hosts = http.feed(payload)
         for host in hosts ?? ["(unreadable)"] {
             var verdict = guardian.checkCarried(port.containerId, host)
+            // Ask mode: a new host mid-connection is not held; a new connection asks.
+            if case .ask(let h) = verdict { verdict = .block("\(h) on a kept-alive connection to another host; ask mode asks on a new connection") }
             if hosts == nil { verdict = .block("an HTTP line pratico cannot read (folded, or past \(FirstBytes.maxLine) bytes); this container's egress allowlist needs every request named") }
             guard case .block(let why) = verdict else { continue }
             guardian.record(port.containerId, .init(time: Date(), proto: "tcp", ip: key.dstIP, port: key.dstPort, sourcePort: key.srcPort, name: host, blocked: true, reason: why))
@@ -841,4 +923,10 @@ final class TCPConn {
     private func resumeWrites() {
         if writeSuspended, let w = writeSource { w.resume(); writeSuspended = false }
     }
+}
+
+/// A weak reference handed across queues; read only on the queue that owns the object.
+private struct Weak<T: AnyObject>: @unchecked Sendable {
+    weak var value: T?
+    init(_ value: T) { self.value = value }
 }

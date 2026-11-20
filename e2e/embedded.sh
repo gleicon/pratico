@@ -25,6 +25,7 @@ echo 192.0.2.1 >"$HOME_DIR/feeds/feodo.txt"
 printf '"1","2026","http://blocked.pratico.example/x","online"\n"2","2026","https://raw.githubusercontent.com/a/b/c","online"\n' >"$HOME_DIR/feeds/urlhaus.csv"
 : >"$HOME_DIR/feeds/empty"
 export PRATICO_EGRESS_FEODO_URL="file://$HOME_DIR/feeds/feodo.txt" PRATICO_EGRESS_URLHAUS_URL="file://$HOME_DIR/feeds/urlhaus.csv"
+export PRATICO_EGRESS_ASK_SECONDS=4  # ask mode's questions time out sooner here than 30 s
 export PRATICO_EGRESS_SSLBL_URL="file://$HOME_DIR/feeds/empty" PRATICO_EGRESS_SPAMHAUS_DROP_URL="file://$HOME_DIR/feeds/empty" PRATICO_EGRESS_THREATFOX_URL="file://$HOME_DIR/feeds/empty"
 DAEMON_PID=""
 
@@ -990,6 +991,52 @@ except Exception: print("no-sni-refused")
 expect_eq "with an allowlist, TLS without a name is refused" "$(tail -1 "$HOME_DIR/nosni.out")" "no-sni-refused"
 expect_has "and says why" "$(flows e-nosni)" "without a name pratico can read"
 docker rm -f e-nosni >/dev/null
+
+# Ask mode (D-62): what is not allowed waits for an answer, held at pratico's DNS for
+# names and at the uplink for bare addresses; nothing leaves the Mac before one.
+questions() { curl -s --unix-socket "$SOCK" http://d/pratico/egress/questions; }
+question_for() {  # destination → the id of its open question, once one is asked (15 s at most)
+    for _ in $(seq 75); do
+        id=$(questions | python3 -c "import json,sys; print(next((q['Id'] for q in json.load(sys.stdin) if q['Destination']=='$1'), ''))")
+        [ -n "$id" ] && { echo "$id"; return; }
+        sleep 0.2
+    done
+}
+answer() { curl -s -o /dev/null -w '%{http_code}' -X POST --unix-socket "$SOCK" "http://d/pratico/egress/questions/$1?answer=$2"; }
+expect_has "ask mode takes true or false" "$(docker run --rm --label dev.pratico.egress.ask=yes alpine true 2>&1)" "is true or false"
+docker run -d --name e-ask --label dev.pratico.egress.ask=true alpine sleep 600 >/dev/null
+expect_has "an ask-mode container waits up to the question's time to resolve" "$(docker exec e-ask cat /etc/resolv.conf)" "timeout:30"
+docker exec e-ask sh -c 'wget -qT40 -O /dev/null http://example.com && echo reached' >"$HOME_DIR/ask1.out" 2>&1 &
+ASK1=$!
+q=$(question_for example.com)
+check "a name not allowed is asked about" test -n "$q"
+expect_eq "and answered from the API" "$(answer "$q" allow)" "204"
+wait $ASK1
+expect_eq "allowed, the held lookup goes on and the connection with it" "$(tail -1 "$HOME_DIR/ask1.out")" "reached"
+expect_eq "the answer stands while the container runs" "$(docker exec e-ask sh -c 'wget -qT10 -O /dev/null http://example.com && echo again')" "again"
+check "without a new question" test -z "$(questions | python3 -c 'import json,sys; print(json.load(sys.stdin) or "")')"
+docker exec e-ask sh -c 'nslookup example.org >/dev/null 2>&1 || echo refused' >"$HOME_DIR/ask2.out" 2>&1 &
+ASK2=$!
+expect_eq "deny refuses it" "$(answer "$(question_for example.org)" deny)" "204"
+wait $ASK2
+expect_eq "and the program is told the name does not exist" "$(tail -1 "$HOME_DIR/ask2.out")" "refused"
+expect_has "recorded with why" "$(flows e-ask)" "example.org was refused when asked"
+docker exec e-ask sh -c 'nc -w20 1.1.1.1 53 </dev/null && echo connected' >"$HOME_DIR/ask3.out" 2>&1 &
+ASK3=$!
+expect_eq "a bare address is asked about too, its SYN held" "$(answer "$(question_for 1.1.1.1)" always)" "204"
+wait $ASK3
+expect_eq "and connects once allowed" "$(tail -1 "$HOME_DIR/ask3.out")" "connected"
+expect_has "always is kept with the container" "$(cat "$HOME_DIR"/containers/*/egress-always.json 2>/dev/null)" "1.1.1.1"
+docker exec e-ask sh -c 'wget -qT40 -O /dev/null http://neverssl.com || echo gave-up' >"$HOME_DIR/ask4.out" 2>&1
+expect_eq "unanswered, it is refused" "$(tail -1 "$HOME_DIR/ask4.out")" "gave-up"
+expect_has "as not answered" "$(flows e-ask)" "neverssl.com was not answered within 4 s"
+docker exec e-ask sh -c 'cp /bin/busybox /tmp/true && /tmp/true'
+eventually "running a file not from the image alerts, in ask mode" grep -q 'e-ask ran /tmp/true, which is not from its image' "$HOME_DIR/alerts.json"
+docker restart -t 0 e-ask >/dev/null
+expect_eq "a restart ends allow answers" "$(docker exec e-ask sh -c 'wget -qT10 -O /dev/null http://example.com 2>/dev/null && echo through || echo asked')" "asked"
+expect_eq "and keeps always ones" "$(docker exec e-ask sh -c 'nc -w5 1.1.1.1 53 </dev/null && echo connected')" "connected"
+docker rm -f e-ask >/dev/null
+if grep -q 'e-ask ran' "$HOME_DIR/alerts.json"; then bad "removing the container ends its drift alert"; else ok "removing the container ends its drift alert"; fi
 docker run --name e-keepalive --label dev.pratico.egress.allow=example.com python:3.13-slim python3 -c '
 import socket
 s = socket.create_connection(("example.com", 80), timeout=10)
