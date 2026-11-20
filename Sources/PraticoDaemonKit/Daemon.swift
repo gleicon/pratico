@@ -313,7 +313,7 @@ public final class Daemon: @unchecked Sendable {
             try archives.get(p[0], path: req.query["path"] ?? "/", conn: conn)
         case ("PUT", 2, "archive"):
             guard let file = req.bodyFile else { throw APIError(400, "no archive in the request") }
-            try archives.put(p[0], path: req.query["path"] ?? "/", tar: file)
+            try archives.put(p[0], path: req.query["path"] ?? "/", tar: file, copyUIDGID: ["1", "true"].contains(req.query["copyUIDGID"] ?? ""))
             conn.respond(200, body: Data())
         case ("POST", 2, "wait"):
             try containers.wait(p[0], condition: req.query["condition"] ?? "not-running", conn: conn)

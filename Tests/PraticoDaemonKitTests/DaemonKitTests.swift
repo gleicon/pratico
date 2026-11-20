@@ -13,6 +13,10 @@ import PraticoCore
     ("localhost:5000/a", "localhost:5000/a:latest"),
     ("ghcr.io/o/r", "ghcr.io/o/r:latest"),
     ("alpine@sha256:abc", "docker.io/library/alpine@sha256:abc"),
+    ("docker.io/alpine", "docker.io/library/alpine:latest"),
+    ("index.docker.io/heroku/builder:24", "docker.io/heroku/builder:24"),
+    ("index.docker.io/redis", "docker.io/library/redis:latest"),
+    ("localhost/a", "localhost/a:latest"),
 ])
 func normalizesImageRefs(input: String, expected: String) {
     #expect(ImageRef.normalize(input) == expected)
@@ -43,6 +47,22 @@ func normalizesImageRefs(input: String, expected: String) {
 
 @Test func filtersAcceptMapForm() {
     #expect(ContainerService.parseFilters(#"{"label":{"a=1":true}}"#) == ["label": ["a=1"]])
+}
+
+// moby's merge: (request Entrypoint, request Cmd) against an image with entrypoint
+// ["/entry"] and cmd ["serve"].
+@Test(arguments: [
+    (nil, nil, ["/entry", "serve"]),
+    (nil, ["run"], ["/entry", "run"]),
+    ([], nil, ["serve"]),
+    ([""], ["/cnb/lifecycle/creator", "-daemon"], ["/cnb/lifecycle/creator", "-daemon"]),
+    ([""], nil, []),
+    (["/other"], nil, ["/other"]),
+] as [([String]?, [String]?, [String])])
+func mergesEntrypointAsMoby(entry: [String]?, cmd: [String]?, expected: [String]) {
+    let image: JSON = ["Entrypoint": ["/entry"], "Cmd": ["serve"]]
+    let body: JSON = .object(["Entrypoint": entry.map { JSON($0) }, "Cmd": cmd.map { JSON($0) }].compactMapValues { $0 })
+    #expect(ContainerService.containerConfig(body, image: image, imageRef: "a", hostname: "h").command == expected)
 }
 
 @Test func stdcopyFrameHeader() {
@@ -907,4 +927,44 @@ private func emptyDir() throws -> URL {
     log.raise(key: "image:sha256:abc", level: "serious", title: "image", detail: "")
     log.dropContainerAlerts(except: ["here"])
     #expect(JSON.parse(try Data(contentsOf: file))?.array?.map { $0["title"]?.string } == ["here port", "image"])
+}
+
+// `docker cp -a`: the container's User against its passwd and group files.
+@Test func resolvesCopyOwner() {
+    let passwd = "root:x:0:0::/root:/bin/sh\nheroku:x:1001:1002::/home/heroku:/bin/bash\n"
+    let group = "root:x:0:\nstaff:x:50:\n"
+    #expect(ArchiveService.owner(of: "heroku", passwd: passwd, group: group) == Tar.Owner(uid: 1001, gid: 1002))
+    #expect(ArchiveService.owner(of: "heroku:staff", passwd: passwd, group: group) == Tar.Owner(uid: 1001, gid: 50))
+    #expect(ArchiveService.owner(of: "1234:5678", passwd: passwd, group: group) == Tar.Owner(uid: 1234, gid: 5678))
+    #expect(ArchiveService.owner(of: "1001", passwd: passwd, group: group) == Tar.Owner(uid: 1001, gid: 1002))
+    #expect(ArchiveService.owner(of: "nobody", passwd: passwd, group: group) == nil)
+    #expect(ArchiveService.owner(of: "heroku:nogroup", passwd: passwd, group: group) == nil)
+}
+
+// A Docker archive's manifest names its members: inside the archive only.
+@Test func dockerArchiveMembersStayInside() throws {
+    let dir = FileManager.default.temporaryDirectory.appending(path: "pratico-test-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    try Data().write(to: dir.appending(path: "a.tar"))
+    #expect(try DockerArchive.member(dir, "/a.tar") == dir.appending(path: "a.tar"))
+    #expect(try DockerArchive.member(dir, "a.tar") == dir.appending(path: "a.tar"))
+    #expect(throws: APIError.self) { try DockerArchive.member(dir, "../a.tar") }
+    #expect(throws: APIError.self) { try DockerArchive.member(dir, "missing.tar") }
+    #expect(throws: APIError.self) { try DockerArchive.member(dir, "/") }
+}
+
+// cp into a stopped container: an archive's link at a mount point never leads to the Mac.
+@Test func mountPointsInArchivesAreRealDirectories() throws {
+    let dir = FileManager.default.temporaryDirectory.appending(path: "pratico-test-\(UUID().uuidString)")
+    let outside = dir.appending(path: "outside")
+    try FileManager.default.createDirectory(at: outside.appending(path: "data"), withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: dir.appending(path: "work/real/data"), withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let work = dir.appending(path: "work")
+    try FileManager.default.createSymbolicLink(atPath: work.appending(path: "link").path, withDestinationPath: outside.path)
+    #expect(try ArchiveService.realDirectory(work, "real/data") == work.appending(path: "real/data"))
+    #expect(try ArchiveService.realDirectory(work, "absent/data") == nil)
+    #expect(throws: APIError.self) { try ArchiveService.realDirectory(work, "link/data") }
+    #expect(throws: APIError.self) { try ArchiveService.realDirectory(work, "link") }
 }

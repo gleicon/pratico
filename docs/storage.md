@@ -3,8 +3,9 @@
 ## Images
 
 Images live in an OCI store under `~/.pratico/store`. Pull, push, tag, save, and load
-work with any OCI registry or archive; `docker load` takes OCI archives (Docker 25+), and
-Apple's `container` tool reads and writes the same format.
+work with any OCI registry or archive; `docker load` takes OCI archives (Docker 25+) and
+Docker's older ones without `index.json`, and Apple's `container` tool reads and writes
+the same format.
 
 ## Root filesystem
 
@@ -66,7 +67,12 @@ only what is written; `--opt size=200g` sets another capacity.
 `docker cp` works on running and stopped containers. A running one goes through the
 guest agent, with no tools needed in the image. A stopped one is read from its ext4
 rootfs on the Mac without booting the VM; copying into it rewrites the rootfs, and the
-container cannot start until that finishes.
+container cannot start until that finishes. Files under a disk volume's mount point go
+into that volume instead, as Docker writes through mounts; a share or bind mount is a
+Mac folder, so copy there on the Mac (or start the container first).
+
+Copied files keep the owner their archive gives, as on Docker: `docker cp` from the Mac
+writes your user's ID, and `docker cp -a` gives them the container's user.
 
 Archive extraction (`cp`, `load`) refuses paths that escape the target, follows no
 symlinks, and caps sizes and entry counts.

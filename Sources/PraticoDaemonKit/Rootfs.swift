@@ -137,8 +137,8 @@ enum CopyUp {
     }
 }
 
-/// Changes to a stopped container's rootfs from the Mac, without a VM (`docker cp` into a
-/// stopped container): the filesystem is exported, a fresh one is formatted, and the old
+/// Changes to a stopped container's rootfs, or a disk volume, from the Mac, without a VM
+/// (`docker cp` into a stopped container): the filesystem is exported, a fresh one is formatted, and the old
 /// contents, then the new files, are unpacked into it, as image layers are; the new image
 /// replaces the old one atomically. Costs a rewrite of the rootfs, so in time it is
 /// proportional to the container's files.
@@ -188,6 +188,9 @@ enum RootfsEdit {
             let formatter = try EXT4.Formatter(FilePath(fresh.path), minDiskSize: capacity, journal: EXT4.JournalConfig(defaultMode: .ordered))
             try await formatter.unpack(reader: try ArchiveReader(file: export))
             if let files { try await formatter.unpack(reader: try ArchiveReader(file: files)) }
+            // The formatter makes a lost+found; keep it only where there was one (a disk
+            // volume has none, as a Docker volume starts empty).
+            if tree["/lost+found"] == nil { try formatter.unlink(path: FilePath("/lost+found")) }
             try formatter.close()
         }
         _ = try fm.replaceItemAt(rootfs, withItemAt: fresh)

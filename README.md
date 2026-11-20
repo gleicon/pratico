@@ -88,7 +88,8 @@ vminitd ───────── guest agent: process, exec, cp, stats, healt
   networks, isolation enforced at the switch, DNS at each gateway, published ports bound
   on the Mac.
 - **[Builds](docs/build.md).** `docker build` and `compose build` run BuildKit in its
-  own VM through buildx and load the result; one builder setup line, once.
+  own VM through buildx and load the result; one builder setup line, once. Buildpacks'
+  `pack build` works with no setup.
 - **[Run options](docs/run-options.md).** Every `docker run` option pratico accepts is
   applied (cgroup limits, capabilities, seccomp profiles, restart policies, `--init`,
   `--read-only`, …); one a VM cannot honor, such as `--device` or `--pid host`, is

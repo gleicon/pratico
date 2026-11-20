@@ -19,8 +19,12 @@ public enum ImageRef {
         let parts = name.split(separator: "/", maxSplits: 1).map(String.init)
         let first = parts[0]
         let hasRegistry = parts.count > 1 && (first.contains(".") || first.contains(":") || first == "localhost")
-        if !hasRegistry {
-            name = parts.count == 1 ? "docker.io/library/\(name)" : "docker.io/\(name)"
+        var path = hasRegistry ? parts[1] : name
+        // Docker Hub's other spelling, as distribution/reference: buildpacks' pack asks
+        // for `index.docker.io/heroku/builder:24` after pulling it.
+        if !hasRegistry || first == "docker.io" || first == "index.docker.io" {
+            if !path.contains("/") { path = "library/" + path }
+            name = "docker.io/" + path
         }
         if let digest { return name + (tag.map { ":\($0)" } ?? "") + digest }
         return "\(name):\(tag ?? "latest")"
@@ -364,7 +368,8 @@ public final class ImageService: Sendable {
     }
 
     /// `POST /images/load` (`docker load`): an archive with an OCI `index.json`, as Docker 25
-    /// and later and `docker save` here write. Index entries without a name take, in order,
+    /// and later and `docker save` here write, or Docker's older `manifest.json` alone
+    /// (`DockerArchive`). Index entries without a name take, in order,
     /// the `RepoTags` of `manifest.json`. Replies with Docker's JSON lines.
     func load(_ archive: URL, quiet: Bool, conn: Connection) throws -> [String] {
         let fm = FileManager.default
@@ -374,8 +379,9 @@ public final class ImageService: Sendable {
         // No symlinks in an image archive: index.json and blobs are read and written here.
         try Tar.extract(archive, to: dir, links: false, maxBytes: Tar.unpackLimit(at: dir))
         let indexFile = dir.appending(path: "index.json")
+        if !fm.fileExists(atPath: indexFile.path) { try DockerArchive.convert(dir, stored: backend.storedLayers) }
         guard var index = (try? Data(contentsOf: indexFile)).flatMap(JSON.parse), var entries = index["manifests"]?.array else {
-            throw APIError(400, "pratico: this archive has no OCI index.json (Docker before 25 wrote archives without one); save it again with Docker 25 or later, or pull the image")
+            throw APIError(400, "pratico: this archive's index.json cannot be read")
         }
         let tags = ((try? Data(contentsOf: dir.appending(path: "manifest.json"))).flatMap(JSON.parse)?.array ?? [])
             .compactMap { $0["RepoTags"]?.strings?.first }

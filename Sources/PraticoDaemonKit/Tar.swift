@@ -3,25 +3,34 @@ import Foundation
 
 /// tar in process, through ContainerizationArchive (libarchive); pratico runs no tar binary.
 enum Tar {
+    /// A member's uid and gid.
+    struct Owner: Hashable {
+        var uid: uid_t
+        var gid: gid_t
+        static let root = Owner(uid: 0, gid: 0)
+    }
+
     /// Writes `names`, relative to `base`, with everything under them. Symlinks are stored as
     /// links, never followed, wherever they point, as Docker's `cp` does; files are streamed.
-    /// `prefix` goes before every member's name; `owner` replaces the files' own uid/gid.
-    static func create(_ file: URL, base: URL, names: [String], gzip: Bool = false, prefix: String = "", owner: (uid_t, gid_t)? = nil) throws {
+    /// `prefix` goes before every member's name; `owner`, given a member's path under
+    /// `base`, replaces the file's own uid/gid.
+    static func create(_ file: URL, base: URL, names: [String], gzip: Bool = false, prefix: String = "", owner: ((String) -> Owner)? = nil) throws {
         let writer = try ArchiveWriter(configuration: ArchiveWriterConfiguration(format: .pax, filter: gzip ? .gzip : .none))
         try writer.open(file: file)
         for name in names { try add(writer.makeTransactionWriter(), base: base, path: name, prefix: prefix, owner: owner) }
         try writer.finishEncoding()
     }
 
-    private static func add(_ w: ArchiveWriterTransaction, base: URL, path: String, prefix: String, owner: (uid_t, gid_t)?) throws {
+    private static func add(_ w: ArchiveWriterTransaction, base: URL, path: String, prefix: String, owner: ((String) -> Owner)?) throws {
         let full = base.appending(path: path).path
         var st = stat()
         guard lstat(full, &st) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .ENOENT) }
         let entry = WriteEntry()
         entry.path = prefix + path
         entry.permissions = st.st_mode & 0o7777
-        entry.owner = owner?.0 ?? st.st_uid
-        entry.group = owner?.1 ?? st.st_gid
+        let id = owner?(path) ?? Owner(uid: st.st_uid, gid: st.st_gid)
+        entry.owner = id.uid
+        entry.group = id.gid
         entry.modificationDate = Date(timeIntervalSince1970: TimeInterval(st.st_mtimespec.tv_sec))
         entry.size = 0
         switch st.st_mode & S_IFMT {
@@ -89,7 +98,9 @@ enum Tar {
     /// a name that already exists is not reused. Symlinks are kept as links with `links`,
     /// else refused; hard links and devices are refused. Caps count what is actually
     /// written: past `maxBytes` unpacked or `maxEntries` members the archive is rejected.
-    static func extract(_ file: URL, to dir: URL, links: Bool, maxBytes: Int64, maxEntries: Int = 1_000_000) throws {
+    /// Files are the Mac user's; what each member's header said is returned, by path.
+    @discardableResult
+    static func extract(_ file: URL, to dir: URL, links: Bool, maxBytes: Int64, maxEntries: Int = 1_000_000) throws -> [String: Owner] {
         let root = open(dir.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard root >= 0 else { throw APIError(500, "cannot open \(dir.path)") }
         defer { close(root) }
@@ -98,6 +109,7 @@ enum Tar {
         var entries = 0
         var buffer = [UInt8](repeating: 0, count: 1 << 20)
         var modes: [(String, mode_t)] = []  // directories get their mode last, once filled
+        var owners: [String: Owner] = [:]
         for (entry, stream) in reader.makeStreamingIterator() {
             entries += 1
             guard entries <= maxEntries else { throw APIError(400, "archive has more than \(maxEntries) members") }
@@ -109,6 +121,7 @@ enum Tar {
             defer { if parent != root { close(parent) } }
             let name = parts.last!
             let mode = mode_t(entry.permissions & 0o7777)
+            owners[parts.joined(separator: "/")] = Owner(uid: entry.owner ?? 0, gid: entry.group ?? 0)
             switch entry.fileType {
             case .directory:
                 if mkdirat(parent, name, 0o700) != 0 && errno != EEXIST { throw APIError(400, "cannot make \(raw)") }
@@ -148,6 +161,7 @@ enum Tar {
                 if parent != root { close(parent) }
             }
         }
+        return owners
     }
 
     /// The directory `parts` names under `root`, made as needed, each step `O_NOFOLLOW`:

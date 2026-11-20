@@ -23,10 +23,21 @@ protocol ImageBackend: Sendable {
     func saveLayout(_ ref: String, os: String, arch: String, into dir: URL) throws
     /// Imports every image an OCI layout directory names (`docker load`); their references.
     func loadLayout(from dir: URL) throws -> [String]
+    /// The layers stored images hold, by uncompressed digest (`diff_id`): what an archive
+    /// may leave out when the daemon has it already (`DockerArchive`).
+    func storedLayers() -> [String: StoredLayer]
     /// `docker login`: checks the credentials with the registry and keeps them for later
     /// pulls and pushes that come without `X-Registry-Auth`. Throws `APIError(401)` when
     /// the registry refuses them.
     func login(_ auth: RegistryAuth) throws
+}
+
+/// A layer blob in the content store.
+struct StoredLayer {
+    var digest: String
+    var size: Int64
+    var mediaType: String
+    var file: URL
 }
 
 struct BackendError: Error, CustomStringConvertible {
@@ -134,6 +145,23 @@ final class EmbeddedImageBackend: ImageBackend, @unchecked Sendable {
 
     func loadLayout(from dir: URL) throws -> [String] {
         try blocking { [store] in try await store.load(from: dir).map(\.reference) }
+    }
+
+    func storedLayers() -> [String: StoredLayer] {
+        (try? blocking { [store, content] in
+            var out: [String: StoredLayer] = [:]
+            for img in try await store.list() where !EmbeddedRuntime.isInitImage(img.reference) {
+                guard let manifest = try? await img.manifest(for: .current),
+                    let config = JSON.parse(try await img.getContent(digest: manifest.config.digest).data()),
+                    let diffs = config["rootfs"]?["diff_ids"]?.strings, diffs.count == manifest.layers.count
+                else { continue }
+                for (diff, layer) in zip(diffs, manifest.layers) where out[diff] == nil {
+                    guard let blob = try await content.get(digest: layer.digest) else { continue }
+                    out[diff] = StoredLayer(digest: layer.digest, size: layer.size, mediaType: layer.mediaType, file: blob.path)
+                }
+            }
+            return out
+        }) ?? [:]
     }
 
     func saveLayout(_ ref: String, os: String, arch: String, into dir: URL) throws {

@@ -116,7 +116,8 @@ docker cp e-box:/etc/apk "$CP/apk" >/dev/null
 check "cp copies a directory out" test -d "$CP/apk/keys"
 docker cp "$CP/in" e-box:/tmp/ >/dev/null
 expect_eq "cp copies a tree in, keeping modes" "$(docker exec e-box /tmp/in/x.sh)" "ran"
-expect_eq "copied files are owned by root" "$(docker exec e-box stat -c %U /tmp/in/sub/b.txt)" "root"
+# Owners come from the tar headers, as moby untars them: the CLI writes the Mac user's.
+expect_eq "copied files keep the owner the archive gives" "$(docker exec e-box stat -c %u /tmp/in/sub/b.txt)" "$(id -u)"
 if docker cp e-box:/nope "$CP/n" >/dev/null 2>&1; then bad "cp of a missing path is refused"; else ok "cp of a missing path is refused"; fi
 # A tar's top-level symlink to a host file arrives as a symlink, never as the host file.
 echo "host-secret-$$" >"$CP/secret"
@@ -372,6 +373,27 @@ check "tag" docker tag alpine pratico-e2e/emb:1
 check "inspect by tag" test "$(docker image inspect pratico-e2e/emb:1 --format '{{.Os}}/{{.Architecture}}')" = "linux/arm64"
 docker save -o "$HOME_DIR/save.tar" alpine 2>/dev/null
 check "docker save writes a Docker archive" tar -xOf "$HOME_DIR/save.tar" manifest.json
+check "Docker Hub's other spelling names the same image" docker image inspect index.docker.io/library/alpine
+# Docker's archive without index.json, as go-containerregistry writes it (buildpacks): a
+# leading / on member names, and an empty file for a base layer the daemon holds.
+python3 -I - "$HOME_DIR/legacy.tar" "$(docker image inspect alpine --format '{{index .RootFS.Layers 0}}')" <<'PY'
+import hashlib, io, json, sys, tarfile
+out, base = sys.argv[1], sys.argv[2]
+layer = io.BytesIO()
+with tarfile.open(fileobj=layer, mode="w") as t:
+    i = tarfile.TarInfo("hello.txt"); data = b"hello-legacy\n"; i.size = len(data); t.addfile(i, io.BytesIO(data))
+layer = layer.getvalue()
+config = json.dumps({"architecture": "arm64", "os": "linux", "config": {"Entrypoint": ["cat"], "Cmd": ["/hello.txt"]},
+                     "rootfs": {"type": "layers", "diff_ids": [base, "sha256:" + hashlib.sha256(layer).hexdigest()]}}).encode()
+manifest = json.dumps([{"Config": "/config.json", "RepoTags": ["pratico-e2e/legacy:1"], "Layers": ["/base.tar", "/new.tar"]}]).encode()
+with tarfile.open(out, "w") as t:
+    for name, data in [("config.json", config), ("base.tar", b""), ("new.tar", layer), ("manifest.json", manifest)]:
+        i = tarfile.TarInfo(name); i.size = len(data); t.addfile(i, io.BytesIO(data))
+PY
+check "docker load reads Docker's archive without index.json" docker load -i "$HOME_DIR/legacy.tar"
+expect_eq "with the left-out base layer taken from the store" "$(docker run --rm pratico-e2e/legacy:1)" "hello-legacy"
+expect_eq '--entrypoint "" clears the image entrypoint' "$(docker run --rm --entrypoint "" pratico-e2e/legacy:1 echo cleared)" "cleared"
+docker rmi pratico-e2e/legacy:1 >/dev/null
 docker rmi pratico-e2e/emb:1 >/dev/null
 # Registries (SPEC D-29): logins in pratico's own Keychain items, plain HTTP for
 # loopback as Docker, extra CAs from config.toml added to the system's roots, and every
@@ -497,7 +519,26 @@ echo hello-from-cp >"$CPS/greeting"; echo nested >"$CPS/conf.d/a.conf"
 docker create --name e2e-cps alpine sh -c 'stat -c "%u %a" /etc/greeting; cat /etc/greeting /etc/conf.d/a.conf' >/dev/null
 check "cp into a created container" docker cp "$CPS/greeting" e2e-cps:/etc/
 check "cp a directory into a created container" docker cp "$CPS/conf.d" e2e-cps:/etc/
-expect_eq "it starts with the files, owned by root" "$(docker start -a e2e-cps | tr '\n' ' ')" "0 644 hello-from-cp nested "
+expect_eq "it starts with the files, owned as the archive says" "$(docker start -a e2e-cps | tr '\n' ' ')" "$(id -u) 644 hello-from-cp nested "
+docker create --name e2e-cpa --user 1234:5678 alpine stat -c "%u:%g" /etc/greeting >/dev/null
+check "cp -a into a created container" docker cp -a "$CPS/greeting" e2e-cpa:/etc/
+expect_eq "gives the files the container's user" "$(docker start -a e2e-cpa)" "1234:5678"
+# A tar into / whose members fall under volume mount points, as buildpacks' pack sends
+# its app: each part goes into its volume's disk, with the owners its headers give.
+python3 -I - "$CPS/app.tar" <<'PY'
+import io, sys, tarfile
+with tarfile.open(sys.argv[1], "w") as t:
+    for name, data in [("workspace/app.txt", b"in-the-volume\n"), ("layers/meta.toml", b"x=1\n"), ("etc/rootfs.txt", b"in-the-rootfs\n")]:
+        i = tarfile.TarInfo(name); i.size = len(data); i.uid, i.gid, i.mode = 1002, 1000, 0o644
+        t.addfile(i, io.BytesIO(data))
+PY
+docker create --name e2e-cpv -v e2e-cpv-ws:/workspace -v e2e-cpv-layers:/layers alpine \
+    sh -c 'stat -c "%u:%g" /workspace/app.txt; cat /workspace/app.txt /layers/meta.toml /etc/rootfs.txt; ls -A /workspace' >/dev/null
+check "cp of a tar into / of a created container with volumes" docker cp - e2e-cpv:/ <"$CPS/app.tar"
+expect_eq "each file lands in its volume or the rootfs, owners kept, no lost+found" \
+    "$(docker start -a e2e-cpv | tr '\n' ' ')" "1002:1000 in-the-volume x=1 in-the-rootfs app.txt "
+docker rm -f e2e-cpa e2e-cpv >/dev/null
+docker volume rm e2e-cpv-ws e2e-cpv-layers >/dev/null
 docker run --name e2e-cpo alpine sh -c 'echo made-inside > /out.txt' >/dev/null
 check "cp out of an exited container" docker cp e2e-cpo:/out.txt "$CPS/out.txt"
 expect_eq "with its contents" "$(cat "$CPS/out.txt")" "made-inside"

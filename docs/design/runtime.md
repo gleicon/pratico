@@ -313,6 +313,6 @@ signals readiness on a pipe.
 rootfs on the Mac with ContainerizationEXT4's reader, writing every entry relative to
 its parent's descriptor with `O_NOFOLLOW` and `O_EXCL`, under byte and entry caps. Copies
 in unpack the tar on the Mac, then rewrite the rootfs: export it, format a new image,
-unpack the export and then the new files (owned by root), and swap the image in. A
+unpack the export and then the new files (owned as their tar headers say), and swap the image in. A
 container whose rootfs is in use cannot start until the copy ends. The same reader does
 volume copy-up when a new container mounts an empty volume.

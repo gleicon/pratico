@@ -33,6 +33,21 @@ Without the variable, `docker build` succeeds and its image stays there (buildx 
 - BuildKit runs privileged inside its VM, which is what it needs to build; the VM is
   the boundary, as for any container.
 
+## Buildpacks
+
+`pack build` works against pratico with no setup beyond `DOCKER_HOST`, checked with
+pack 0.40 and `heroku/builder:24`, a first build and a cached rebuild:
+
+```sh
+pack build myapp --builder heroku/builder:24
+docker run -p 8080:8080 myapp
+```
+
+pack runs the buildpacks' lifecycle in a container that reaches pratico through the
+mounted Docker socket, keeps its caches in volumes, and loads the image into pratico,
+where it is scanned like any image that arrives. Containers run on arm64, so the
+builder must be published for it, as `heroku/builder:24` is.
+
 ## What does not
 
 - The legacy builder (`DOCKER_BUILDKIT=0`, `POST /build`) is not served.

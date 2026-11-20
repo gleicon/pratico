@@ -85,14 +85,14 @@ extension ImageService {
         return .object(l)
     }
 
-    private static func addBlob(data: Data, to layout: URL) throws -> (digest: String, size: Int64) {
+    static func addBlob(data: Data, to layout: URL) throws -> (digest: String, size: Int64) {
         let hex = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
         try data.write(to: layout.appending(path: "blobs/sha256/\(hex)"), options: .atomic)
         return ("sha256:\(hex)", Int64(data.count))
     }
 
     /// Streams `file` through SHA-256 and moves it into the layout's blobs.
-    private static func addBlob(file: URL, to layout: URL) throws -> (digest: String, size: Int64) {
+    static func addBlob(file: URL, to layout: URL) throws -> (digest: String, size: Int64) {
         var hash = SHA256()
         var size: Int64 = 0
         let h = try FileHandle(forReadingFrom: file)

@@ -92,6 +92,9 @@ public final class ContainerService: @unchecked Sendable {
     private var starting: Set<String> = []
     /// Disk volume → the running container whose VM it is attached to: one at a time (D-49).
     private var diskHolders: [String: String] = [:]
+    /// Disk volumes being rewritten on the Mac (`docker cp` into a stopped container): no
+    /// VM may attach them meanwhile.
+    private var editedDisks: Set<String> = []
     private var published: [String: [String: [(ip: String, port: String)]]] = [:]  // bound host ports
     /// Serializes network connect and disconnect, which read, check, and write a
     /// container's endpoints and NIC slots.
@@ -202,6 +205,7 @@ public final class ContainerService: @unchecked Sendable {
         var hostFields = body["HostConfig"]?.object ?? [:]
         if ["", "default"].contains(hostFields["NetworkMode"]?.string ?? "") { hostFields["NetworkMode"] = "bridge" }
         let (config, command) = Self.containerConfig(body, image: imageConfig, imageRef: imageRef, hostname: String(id.prefix(12)))
+        guard !command.isEmpty else { throw APIError(400, "no command specified") }
 
         // Every option is checked before anything is made (D-45).
         let asked = try Self.publishingAll(.object(hostFields), exposed: config["ExposedPorts"])
@@ -250,14 +254,21 @@ public final class ContainerService: @unchecked Sendable {
         return short
     }
 
-    /// The container's `Config` and command, with the image's defaults merged as Docker
-    /// does: what the request leaves empty comes from the image, and an explicit
-    /// Entrypoint resets the image's Cmd.
+    /// The container's `Config` and command, with the image's defaults merged as moby's
+    /// `merge` does: an Entrypoint left out takes the image's, `[]` clears it, and any
+    /// other Entrypoint (`[""]` too, which then means none: `--entrypoint ""`, buildpacks'
+    /// lifecycle) replaces it and drops the image's Cmd.
     static func containerConfig(_ body: JSON, image: JSON, imageRef: String, hostname: String) -> (config: [String: JSON], command: [String]) {
-        let userEntry = body["Entrypoint"]?.strings.flatMap { $0.isEmpty ? nil : $0 }
+        let userEntry = body["Entrypoint"]?.strings
         let userCmd = body["Cmd"]?.strings.flatMap { $0.isEmpty ? nil : $0 }
-        let entry = userEntry ?? image["Entrypoint"]?.strings ?? []
-        let cmd = userCmd ?? (userEntry == nil ? image["Cmd"]?.strings ?? [] : [])
+        let entry: [String], cmd: [String]
+        if let userEntry, !userEntry.isEmpty {
+            entry = userEntry == [""] ? [] : userEntry
+            cmd = userCmd ?? []
+        } else {
+            entry = userEntry == nil ? image["Entrypoint"]?.strings ?? [] : []
+            cmd = userCmd ?? image["Cmd"]?.strings ?? []
+        }
         let userEnv = body["Env"]?.strings ?? []
         let userKeys = Set(userEnv.map { $0.splitOnce("=").0 })
         let env = (image["Env"]?.strings ?? []).filter { !userKeys.contains($0.splitOnce("=").0) } + userEnv
@@ -891,6 +902,7 @@ public final class ContainerService: @unchecked Sendable {
         for m in disks where !FileManager.default.fileExists(atPath: m.source) { try volumes.formatDisk(m.volume!, content: nil) }
         try lock.withLock {
             for m in disks {
+                if editedDisks.contains(m.volume!) { throw APIError(409, "volume \(m.volume!) is being written by a copy; try again") }
                 if let holder = diskHolders[m.volume!], holder != rec.id, records[holder]?.state.running == true || starting.contains(holder) {
                     let name = records[holder]?.name ?? holder
                     throw APIError(409, "volume \(m.volume!) is a disk attached to running container \(name); a disk volume serves one container at a time. Stop \(name), or create the volume with --opt type=share to share it")
@@ -898,6 +910,18 @@ public final class ContainerService: @unchecked Sendable {
             }
             for m in disks { diskHolders[m.volume!] = rec.id }
         }
+    }
+
+    /// Runs `body` on disk volume `name`'s image while no VM has it attached nor can attach it.
+    func editingDisk<T>(_ name: String, _ body: (URL) throws -> T) throws -> T {
+        try lock.withLock {
+            if let holder = diskHolders[name], records[holder]?.state.running == true || starting.contains(holder) {
+                throw APIError(409, "volume \(name) is a disk attached to running container \(records[holder]?.name ?? holder); stop it to copy into the volume")
+            }
+            guard editedDisks.insert(name).inserted else { throw APIError(409, "volume \(name) is being written by another copy; try again") }
+        }
+        defer { lock.withLock { _ = editedDisks.remove(name) } }
+        return try body(URL(filePath: volumes.diskPath(name)))
     }
 
     private func releaseDisks(_ id: String) {
