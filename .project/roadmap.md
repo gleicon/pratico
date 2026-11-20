@@ -54,22 +54,18 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 - [x] Scans read the embedded store (exports go through the image backend)
 - [x] Registry trust you choose and can see: plain HTTP for loopback (as Docker) and listed hosts, extra CAs added to the system's roots, system proxy/PAC; `docker info`, pull/push output and the menubar say so; kept logins removable from the menubar
 - [x] Agent-native pratico, first step (D-48): MCP endpoint with image checks, throwaway runs, kept services, and changes limited to agent-made containers. Next with the own VM's flight recorder: what an agent's containers ran and connected to.
-- [ ] Agent-native pratico, the rest (to discuss with Features): an MCP server and a container manager geared towards agents, so an agent can ask whether an image is safe before using it, run a task in a throwaway isolated VM, and read scan results and SBOMs; a way for developers to use containers for tests, agents, and builds from Claude Code
+- [x] Agent-native pratico, the rest (closed 2026-11-20): whether an image is safe (`image_check`), throwaway isolated runs, scan results and SBOMs (`image_sbom`), use from Claude Code (docs/agents.md). New agent work comes as its own items
 - [x] Egress visibility and protection (D-51): flows named (DNS, SNI, Host) and recorded, threat feeds (Feodo, SSLBL, Spamhaus DROP; URLhaus and ThreatFox with a key), allowlists
-- [ ] Egress, phase 2: TLS inspection with sandwich-proxy, per-container opt-in with a per-install CA (full URLs, HAR, replay; URL-level feeds such as OpenPhish and URLhaus on shared hosts)
 - [ ] Own VM, self-contained (last in the Features discussion; decided 2026-11-15): pratico stops depending on upstream releases and binaries for what runs in and drives a VM. Containerization (Apache-2.0) is forked whole, host package and guest `vminitd`/`vmexec` at one pinned commit, since both speak one agent protocol; LICENSE, NOTICE, and modified files marked; upstream security fixes merged by us, as for the kernel.
   - [x] Build VM: `scripts/build-kernel.sh` builds in a VM of the installed pratico (the previous release's kernel and init) from pinned inputs only; `REPRO=1` builds twice and compares, and the result must match `vm/kernel/vmlinux.sha256`
   - [x] Own kernel (D-52): Linux 6.18.63 LTS with containerization's configuration plus BPF/BTF, tracepoints, uprobes, Landlock (balloon and seccomp filter were already on); configuration shipped in the app, GPL source offer in the acknowledgements; boots ≈30 ms slower than Kata's
   - [x] Own init (D-53): `vminitd` and `vmexec` built from the vendored source with Swift 6.3.3's static Linux SDK, reproducible, tagged by content; the daemon rebuilds `initfs.ext4` when it changes
   - [x] Seccomp (D-54): `vmexec` installs a filter pratico compiles itself (no runc, no libseccomp); Docker's default profile on, `seccomp=<file>` in Docker's or the OCI format, `unconfined` and `--privileged` unfiltered
   - [x] Live limits: `docker update` writes the container's cgroup in the guest (`cpu.max`, `cpu.weight`, `cpuset.cpus`, `memory.max`, `memory.low`, `memory.swap.max`, `pids.max`) within the VM's size; more vCPUs or memory than the VM booted with still needs a restart (Virtualization.framework has no vCPU hotplug, memory cannot grow past boot size)
-  - [ ] Memory balloon (deferred 2026-11-19): a virtio balloon per VM, so idle VMs give RAM back to the Mac and a lower `--memory` on a running container returns the difference. Deferred: resizing a running container is rare outside Kubernetes (and there it needs setup, HPA/VPA); live limits already cover lowering. Revisit when measured Mac memory pressure from idle VMs shows a need (kernel already has VIRTIO_BALLOON and PAGE_REPORTING; `VZInstanceExtension.configureVZ` can add the device; setting the target needs a vendored accessor)
+  - [ ] Memory balloon (deferred 2026-11-19): a virtio balloon per VM, so idle VMs give RAM back to the Mac and a lower `--memory` on a running container returns the difference. Deferred: resizing a running container is rare outside Kubernetes (and there it needs setup, HPA/VPA); live limits already cover lowering. Built only if the memory balloon gate (Next) shows a need (kernel already has VIRTIO_BALLOON and PAGE_REPORTING; `VZInstanceExtension.configureVZ` can add the device; setting the target needs a vendored accessor)
   - [ ] eBPF in the guest (decided 2026-11-15): kernel with BPF syscall, JIT, BTF, BPF LSM (`lsm=…,bpf`), `unprivileged_bpf_disabled=1`; probes in restricted C built with clang in the build VM against the shipped kernel's types, loaded by `vminitd` (Swift, its own loader: no libbpf, no CO-RE) before the container's process starts; events through a bounded ring buffer over vsock, overflow dropped and counted. Network policy stays in the Mac's switch (it holds if a guest kernel falls); eBPF is for what only the guest sees
     - [x] Flight recorder: every exec and exit (argv, uid, parent, code) and the process behind each connection, joined with the switch's flows; in the API, events, the menubar, and the MCP server. Done (D-56): exec/exit/TCP connect probes, loader in vminitd (no libbpf), per-container log, `GET /pratico/containers/{id}/activity`. Done (D-57): connections joined with the switch's flows (names, blocks), MCP `activity` tool and `run`'s activity, a short-lived container's whole record. Done (D-58): the menubar's Connections window. Done (D-59): UDP destinations. Recorder events are served by the activity endpoint, the Connections window and MCP, not Docker's `/events`
-    - [ ] File access audit on chosen paths (LSM `file_open`), and opt-in drift prevention (deny exec of binaries not in the image, deny writes to chosen paths). Needs the function tracer and the BPF LSM in the kernel (+63 ms per boot, D-52): pair with boot trimming
-    - [ ] Ask mode for agent containers: seccomp `user_notif` on chosen syscalls, decided by the daemon or the menubar
-    - [~] Boot trimming (D-53): 1000 Hz and no EFI/ACPI took the kernel from 128 to 70 ms to init; agent polled every 2 ms; vmexec's cold load measured (27 ms at a container's first start, 3 ms warm); pre-loading it at boot (`vmexec --help` from vminitd) cut that to 12 ms in the guest but showed no end-to-end gain over host noise, so it was not kept (2026-11-17), and a multi-call binary would need vmexec to run before Swift's async runtime starts threads (it unshares a user namespace); next: the agent's setup round trips
-    - [ ] On-demand profiling: CPU and off-CPU stacks per container (`perf_event`)
+    - [x] Boot trimming (D-53): 1000 Hz and no EFI/ACPI took the kernel from 128 to 70 ms to init; agent polled every 2 ms; vmexec's cold load measured (27 ms at a container's first start, 3 ms warm); pre-loading it at boot (`vmexec --help` from vminitd) cut that to 12 ms in the guest but showed no end-to-end gain over host noise, so it was not kept (2026-11-17), and a multi-call binary would need vmexec to run before Swift's async runtime starts threads (it unshares a user namespace); closed 2026-11-20 at ≈240 ms for `docker run --rm alpine true`, reopened only by a measured regression or a feature that adds boot cost
 - [x] Embedded is the default: the app bundles `pratico-shim`, the kernel and `vminit`; acknowledgements (licenses) in the app and DMG
 - [x] `container` CLI adapter, `/etc/hosts` sync, freezer agent and default-network anchor removed; SPEC and docs updated
 
@@ -128,13 +124,11 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 - [x] `--cap-add` / `--cap-drop` applied through `LinuxCapabilities`, execs included (D-45; e2e: `--cap-drop ALL`, `exec --privileged`)
 - [x] `docker cp` with a stopped container: read from its ext4 rootfs on the Mac; copies in rewrite the rootfs (no VM), and the container cannot start meanwhile
 - [x] `docker save` of several images at once; `docker load` (OCI archives, Docker 25+); request bodies of `cp` in and `load` stream to disk past the 64 MiB in-memory limit
-- [ ] A per-install CA for egress interception (with the egress task)
 - [x] `docker build` through buildx's docker-container driver: BuildKit in a pratico VM, results loaded (D-50)
-- [ ] `docker build` with no setup (deferred 2026-11-19): serve BuildKit's daemon API (`/grpc`, `/session`, the image exporter) so buildx's default driver works. Measured against buildx 0.39: once `/grpc` answers, buildx picks its docker driver, which always exports `type=moby` (dockerd's built-in exporter); a standalone buildkitd has none, so a byte proxy fails every build. It needs either rewriting Solve requests inside HTTP/2, or a pratico-built buildkitd with a `moby` exporter into pratico's store. A stored builder named after the `pratico` context is refused by buildx ("already exists as context builder"), and the context's automatic builder takes no driver options. Today's cost is two lines once (docs/build.md), and `compose build` loads without them
 - [x] Hot-connect and uplink e2e checks wait on state (`eventually`, listener and size polls), not time; pass with every core busy (the socket-mount one was a real start-order race, D-34)
 - [x] Volume copy-up: a new empty volume gets the image's files at its mount path, as in Docker; `nocopy` honored
 - [x] `tmpfs` mounts (`--tmpfs`, `--mount type=tmpfs`), Docker's default options, size and mode
-- [ ] The menubar's new windows (Settings, Scan Results) need a visual pass on a real screen
+- [x] The menubar's new windows (Settings, Scan Results, Connections) checked on a real screen (2026-11-20)
 
 ## Backlog
 
@@ -142,14 +136,28 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 - [x] Automatic image scanning: osv-scanner + grype + CISA KEV after each pull and daily; `scan_block` levels; serious findings stop and block the image's containers; menubar alerts and notifications (D-24)
 - [x] Scanning follow-ups: EPSS, syft SBOMs, Allow This Image (D-38..D-40); spotter waits on an all-files hash mode upstream; Artifact Hub undecided
 
-## Production (when pratico runs on servers; decided 2026-11-15, not before)
+## Next (decided 2026-11-20)
 
-Local developers come first: every feature above is judged by a daily local use case
-(databases and services for development and tests, Testcontainers, Compose stacks, dev
-containers, agents). These wait until pratico runs as a daemon on Linux hosts.
+- [ ] Buildpacks: `pack build` verified against pratico (lifecycle container with the socket mounted, result in pratico's store); small gaps fixed, the rest documented as not working; docs/build.md and the site mention it only once it passes
+- [ ] Exec drift tag: each exec of a file the container added or changed (flight recorder joined with `docker diff`) is marked `FromImage: false` in the activity endpoint, the menubar, and MCP `activity`/`run`; no alert (builds do this all the time) except for containers in ask mode
+- [ ] Ask mode at the switch: an opted-in container (label, or MCP `run` flag) holds a connection to a destination not yet allowed; the menubar asks allow / deny / always for this container, answers go into the allowlist; unanswered after 30 s it is refused and recorded ("not answered"); Docker clients unaffected unless they opt in
+- [ ] Memory balloon gate: the Mac's memory held by 16 idle containers, at start and after a day of use; build the balloon (above) only if idle VMs hold memory the Mac needs
 
-- [ ] pratico on Linux hosts: the daemon running VMs as a deployment target
-- [ ] Remote API with authentication
-- [ ] Backup and restore: snapshots that carry volume data, copied consistently from running containers, with retention
-- [ ] IPv6 on pratico-net: addresses, neighbour discovery, the uplink, and egress (IPv6 networks, `--ip6`, and IPv6 port binds are refused until then)
-- [ ] Local registry: pratico's store served as an OCI registry (builds load directly and Apple `container` takes OCI archives, so locally nothing needs it)
+## Remote Linux hosts (future, after Next; decided 2026-11-20)
+
+Local Mac development still comes first. When pratico runs on remote hosts:
+
+- KVM required (one VM per container, as on the Mac); hosts without it are refused, no namespaces-only fallback
+- SSH only: the docker CLI through `ssh://` contexts; the menubar through a native SSH client (swift-nio-ssh), no spawned `ssh`; no TCP API port and no authentication of pratico's own
+- The menubar is the one place to see every host (containers, scans, alerts, counters, connections from the `/pratico/*` endpoints) and sets the active host by writing the docker context; docker commands go straight to that host
+- No call forwarding, proxy, or orchestrator; several hosts, each picked explicitly
+- No pratico CLI while the docker CLI can express what pratico does
+
+## Won't do (decided 2026-11-20)
+
+- TLS inspection and a per-install CA: egress names every flow from DNS, SNI, or Host; a man-in-the-middle CA is a key to protect and new attack surface
+- BPF LSM file audit and exec/write prevention: +63 ms on every boot; the exec drift tag covers downloaded-and-run binaries
+- Seccomp `user_notif` ask mode: `execve`/`openat` prompts would be noise; `connect` is asked at the switch
+- On-demand `perf_event` profiling: stacks need unwinding and symbols across arbitrary images; language profilers work in containers
+- `docker build` with no setup: needs a BuildKit of pratico's own to maintain, for two lines typed once
+- Backup and restore with volume data, IPv6 on pratico-net (refused with an error), a local OCI registry: none serves local development

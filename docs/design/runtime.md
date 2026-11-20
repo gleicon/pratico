@@ -231,7 +231,7 @@ Learned while building:
   not the port's. Addresses come from the network's subnet (`bridge`: 172.17.0.0/16,
   gateway .1) and are recorded in the shim's spec, so a restarted daemon re-registers
   them. External A queries use `getaddrinfo` (VPN and split DNS apply), at most 32 at a
-  time; AAAA and other types get empty answers until IPv6 routing exists.
+  time; AAAA and other types get empty answers (pratico-net is IPv4 only).
 - The uplink as built (4b, `Net/Uplink.swift`, `Net/TCPSegment.swift`): one serial
   queue runs every flow. UDP flows use connected host sockets (60 s idle). Ping uses
   unprivileged ICMP datagram sockets. TCP is terminated per connection: the SYN-ACK

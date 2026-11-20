@@ -11,6 +11,7 @@
 - Embedded networking is pure Swift with no extra binaries (SPEC D-27). Kernel and `vminit` are bundled, not downloaded by users.
 - pratico runs no shell and no external program (2026-11-12): native Swift and system APIs only (tar through ContainerizationArchive, daemon start by `posix_spawn` of its own binary, stop by SIGTERM). Spawning pratico's own binaries (`pratico-daemon`, `pratico-shim`) is fine. Scanners are the exception: external tools by design (SPEC D-24), checked by the menubar's Scanners menu.
 - Every removal the user can trigger asks first (cleanup, logins, alerts).
+- Local Mac development first; production-only features stay out (2026-11-20). Won't do: TLS inspection and its CA, BPF LSM file audit and prevention, seccomp `user_notif`, `perf_event` profiling, zero-setup `docker build`, volume backup, IPv6, a local registry (`.project/roadmap.md`, Won't do). Remote Linux hosts are a later direction with fixed lines: KVM required, SSH only, the menubar sees every host, docker contexts act, no proxy and no CLI.
 
 # hazards
 
