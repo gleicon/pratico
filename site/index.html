@@ -88,6 +88,10 @@
 
   section { padding: var(--space-8) 0; border-top: 1px solid var(--line); }
   .head { max-width: var(--measure); margin-bottom: var(--space-7); }
+  .shot { margin: 0 auto var(--space-7); }
+  .shot img { display: block; width: 100%; height: auto; border-radius: var(--radius); }
+  .shot figcaption { color: var(--muted); font-size: var(--step--1); margin-top: var(--space-3); text-align: center; }
+  .hero .shot { max-width: 50rem; margin-top: var(--space-7); margin-bottom: 0; }
   .head h2 { font-size: var(--step-3); line-height: 1.2; letter-spacing: -0.025em; margin: 0 0 var(--space-3); }
   .head p:last-child { color: var(--muted); font-size: var(--step-1); margin: 0; }
   h3 { font-size: var(--step-1); letter-spacing: -0.01em; margin: 0 0 var(--space-2); }
@@ -178,6 +182,10 @@
         <a class="btn" href="https://github.com/gleicon/pratico">View source</a>
       </div>
       <p class="fine">Apple silicon · macOS 26 · Free and open source (MIT)</p>
+      <figure class="shot">
+        <img src="img/menu-alerts.png" width="1594" height="898" alt="Pratico's menubar menu with its Alerts submenu open: a container reachable from other machines on port 8080, and pulled images with findings.">
+        <figcaption>The menubar: containers, alerts, disk, scanners, and threat feeds.</figcaption>
+      </figure>
     </div>
     <div class="wrap">
       <div class="pillars">
@@ -277,6 +285,10 @@
         <h2 id="protect-h">Don't wait for the build or CI to scan</h2>
         <p>Agents, scripts, and copied commands pull and run images in seconds. Pratico scans each image, and the dependencies inside it, the moment it reaches your Mac, then again every day as new flaws are published. Malware and actively exploited flaws are stopped before they run. Containers' connections are checked too: botnet servers, malware hosts, and hijacked networks from abuse.ch and Spamhaus are refused, on your Mac, outside the container's reach.</p>
       </div>
+      <figure class="shot">
+        <img src="img/scan-results.png" width="1874" height="1122" loading="lazy" alt="Pratico's Scan Results window for nginx:latest: findings by severity, the scanners that found each one, and the odds each is exploited.">
+        <figcaption>Scan Results: every pulled image, its findings, which scanner found them, and how likely each is to be exploited.</figcaption>
+      </figure>
       <ul class="scanners">
         <li>
           <h3><a href="https://google.github.io/osv-scanner/">osv-scanner</a></h3>
