@@ -143,7 +143,7 @@ struct ConnectionsView: View {
             TableColumn("Last seen", value: \.last) { r in
                 Text(r.last.formatted(date: .omitted, time: .standard)).monospacedDigit()
             }
-            .width(min: 64, ideal: 72)
+            .width(min: 84, ideal: 88)
             TableColumn("Result", value: \.result) { r in
                 Text(r.blocked ? "⛔︎ Refused" : "✓ Allowed").foregroundStyle(r.blocked ? .red : .secondary)
             }
