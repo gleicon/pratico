@@ -103,3 +103,15 @@ private func record(kind: UInt32, pid: UInt32 = 7, ppid: UInt32 = 1, value: UInt
     #expect(found.map { $0?.command } == ["curl", "wget", nil, nil])  // exact, port-less refused, other port, not TCP
     #expect(found[0]?.pid == 9 && found[1]?.pid == 11)
 }
+
+@Test func activityReadsAUDPDestinationAndJoinsIt() throws {
+    let e = try #require(Activity.decode(record(kind: 6, daddr: [172, 17, 0, 1], sport: 51_000, dport: 53, comm: "nslookup")))
+    #expect(e["Kind"]?.string == "connect" && e["Proto"]?.string == "udp" && e["Port"]?.int == 53 && e["SourcePort"]?.int == 51_000)
+    #expect(e["Connected"] == nil && e["Command"]?.string == "nslookup")
+    let at = try #require(e["Time"]?.string.flatMap(Timestamp.parse))
+    let gateway = try #require(IPv4.parse("172.17.0.1"))
+    let dns = EgressGuard.Flow(time: at, proto: "dns", ip: gateway, port: 53, sourcePort: 51_000, name: "bad.example", blocked: true, reason: "listed")
+    let tcp = EgressGuard.Flow(time: at, proto: "tcp", ip: gateway, port: 53, sourcePort: 51_000, name: "tcp.example", blocked: false, reason: nil)
+    #expect(Activity.join([e], [tcp, dns])[0]["Name"]?.string == "bad.example")  // a UDP record meets UDP and DNS flows only
+    #expect(Activity.processes([dns, tcp], [e]).map { $0?.command } == ["nslookup", nil])
+}

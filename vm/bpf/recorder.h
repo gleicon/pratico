@@ -9,6 +9,7 @@
 #define PRATICO_EVENT_CONNECT 3
 #define PRATICO_EVENT_DROPS 4  // vminitd: `value` records dropped so far
 #define PRATICO_EVENT_ERROR 5  // vminitd: the probes could not be loaded; `text` says why
+#define PRATICO_EVENT_UDP 6    // a process's first datagram to an address and port, per source port
 
 #define PRATICO_FILE_MAX 128
 #define PRATICO_ARGS_MAX 192
@@ -20,8 +21,8 @@ struct pratico_event {
     __u32 uid;
     __u64 time_ns;  // CLOCK_BOOTTIME from the probes; vminitd sends CLOCK_REALTIME
     __u64 value;    // exit: wait status; connect: TCP state reached (1 up, 7 failed); drops: count
-    __u32 daddr;    // connect: network byte order
-    __u16 sport;    // connect: host byte order
+    __u32 daddr;    // connect, udp: network byte order
+    __u16 sport;    // connect, udp: host byte order
     __u16 dport;
     __u16 file_len; // exec: bytes of `text` that are the file (with its NUL), then argv
     __u16 args_len;

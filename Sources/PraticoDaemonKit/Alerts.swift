@@ -67,6 +67,20 @@ final class AlertLog: @unchecked Sendable {
         if kept.count != list.count { write(kept) }
     }
 
+    /// Drops port and health alerts (`port:<id>:…`, `health:<id>`) of containers not in
+    /// `ids`: ones removed while the daemon was away, or before alerts ended at removal.
+    func dropContainerAlerts(except ids: Set<String>) {
+        lock.lock()
+        defer { lock.unlock() }
+        let list = read()
+        let kept = list.filter { alert in
+            let parts = (alert["key"]?.string ?? "").split(separator: ":", maxSplits: 2).map(String.init)
+            guard parts.count >= 2, ["port", "health"].contains(parts[0]) else { return true }
+            return ids.contains(parts[1])
+        }
+        if kept.count != list.count { write(kept) }
+    }
+
     /// The menubar's Clear Alerts.
     func clear() {
         lock.lock()
@@ -89,6 +103,7 @@ final class ContainerAlerts: @unchecked Sendable {
     init(alerts: AlertLog, containers: ContainerService, events: EventBus) {
         self.alerts = alerts
         self.containers = containers
+        alerts.dropContainerAlerts(except: Set(containers.all().map(\.id)))
         _ = events.subscribe(since: nil) { [weak self] e in
             guard let self else { return false }
             if e.type == "container" { handle(e) }

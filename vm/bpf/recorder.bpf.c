@@ -1,5 +1,5 @@
 // pratico's flight recorder: every exec and exit in the container, and the process behind
-// each TCP connection it opens, into a ring buffer vminitd reads (vminitd/Sources/
+// each TCP connection it opens and each UDP destination it sends to, into a ring buffer vminitd reads (vminitd/Sources/
 // VminitdCore/Recorder.swift). Built by scripts/build-bpf.sh against the shipped kernel's
 // own types, so fields are read at fixed offsets and the loader relocates only maps.
 // Raw tracepoints: no tracefs, no kprobes, nothing the kernel config would have to add.
@@ -34,6 +34,16 @@ struct pratico_map events SEC(".maps.pratico") = { BPF_MAP_TYPE_RINGBUF, 0, 0, 1
 struct pratico_map drops SEC(".maps.pratico") = { BPF_MAP_TYPE_ARRAY, 4, 8, 1 };
 // Sockets between SYN_SENT and their next state: who connected, by socket.
 struct pratico_map connecting SEC(".maps.pratico") = { BPF_MAP_TYPE_LRU_HASH, 8, sizeof(struct pratico_event), 1024 };
+// UDP destinations already recorded: one record per process, destination and source
+// port, not per datagram (struct udp_key).
+struct pratico_map udp_seen SEC(".maps.pratico") = { BPF_MAP_TYPE_LRU_HASH, 12, 1, 4096 };
+
+struct udp_key {
+    __u32 pid;      // in the container's PID namespace
+    __u32 daddr;
+    __be16 dport;
+    __be16 sport;
+};
 
 static __always_inline struct pratico_event *reserve(void) {
     struct pratico_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
@@ -160,5 +170,34 @@ int on_tcp_state(struct bpf_raw_tracepoint_args *ctx) {
         bpf_ringbuf_submit(e, 0);
     }
     bpf_map_delete_elem(&connecting, &key);
+    return 0;
+}
+
+// IPv4 route lookups for output, which a UDP send (and connect) makes in the sender's
+// context before anything is queued: the first per process, destination and source port
+// is recorded. Lookups for received packets, loopback, and tasks outside the container
+// are not. Each output lookup may consult two tables; the second is a repeat, skipped.
+SEC("raw_tracepoint/fib_table_lookup")
+int on_route(struct bpf_raw_tracepoint_args *ctx) {
+    const struct flowi4 *flp = (void *)ctx->args[1];
+    struct flowi4 fl = {};
+    if (bpf_probe_read_kernel(&fl, sizeof(fl), flp) != 0) return 0;
+    if (fl.__fl_common.flowic_proto != 17) return 0;   // IPPROTO_UDP
+    if (fl.__fl_common.flowic_iif != 1) return 0;      // LOOPBACK_IFINDEX: an output lookup
+    if ((fl.daddr & 0xff) == 127) return 0;            // loopback
+    struct task_struct *t = (struct task_struct *)bpf_get_current_task();
+    __u32 nr = 0;
+    if (ns_level(t, &nr) == 0) return 0;
+    struct udp_key key = { nr, fl.daddr, fl.uli.ports.dport, fl.uli.ports.sport };
+    __u8 one = 1;
+    if (bpf_map_lookup_elem(&udp_seen, &key)) return 0;
+    bpf_map_update_elem(&udp_seen, &key, &one, BPF_ANY);
+    struct pratico_event *e = reserve();
+    if (!e) return 0;
+    identify(e, t, PRATICO_EVENT_UDP);
+    e->daddr = fl.daddr;
+    e->dport = __builtin_bswap16(fl.uli.ports.dport);
+    e->sport = __builtin_bswap16(fl.uli.ports.sport);
+    bpf_ringbuf_submit(e, 0);
     return 0;
 }

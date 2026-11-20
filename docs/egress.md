@@ -18,11 +18,11 @@ pratico sees which host, not which URL.
   into one row with its count, newest first; search, **Refused Only**, and for the
   selected row the refusal's reason, the addresses, the process and its PIDs, and the
   source ports.
-- API: `GET /pratico/egress[?container=NAME]`. Each TCP flow carries `Command` and `Pid`,
+- API: `GET /pratico/egress[?container=NAME]`. Each TCP, UDP and DNS flow carries `Command` and `Pid`,
   the process that opened it, where the flight recorder saw it.
 - Agents: the MCP `egress` tool, and the `connections` a `run` reports
   ([agents](agents.md)).
-- The process behind each TCP connection: the [flight recorder](vm.md#flight-recorder),
+- The process behind each TCP connection and UDP flow: the [flight recorder](vm.md#flight-recorder),
   whose connections carry these names and refusals.
 
 ## Threat feeds

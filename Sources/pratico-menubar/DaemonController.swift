@@ -104,10 +104,12 @@ final class DaemonController {
 
     /// The menubar icon: a blocked image, then images with critical or high vulnerabilities,
     /// then the daemon. Medium and low findings do not change it.
-    var menubarSymbol: String {
-        if let s = scanSummary, s.Blocked > 0 { return "exclamationmark.shield.fill" }
-        if let s = scanSummary, s.CriticalOrHigh > 0 { return "exclamationmark.shield" }
-        return isRunning ? "shippingbox.fill" : "shippingbox"
+    var menubarIcon: MenubarIcon {
+        guard isRunning else { return .stopped }
+        let blocked = (scanSummary?.Blocked ?? 0) > 0
+        let serious = alerts.contains { $0.level == "serious" }  // a blocked image, a refused destination
+        let unhealthy = containers.contains { $0.Health == "unhealthy" }
+        return blocked || serious || unhealthy ? .attention : .running
     }
 
     /// "Scan Results…" with what needs a look beside it.

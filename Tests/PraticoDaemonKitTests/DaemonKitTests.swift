@@ -896,3 +896,15 @@ private func emptyDir() throws -> URL {
     log.resolve(prefix: "port:aa:")
     #expect(JSON.parse(try Data(contentsOf: file))?.array?.map { $0["title"]?.string } == ["c"])  // another container's stays
 }
+
+@Test func alertsOfMissingContainersAreDropped() throws {
+    let file = FileManager.default.temporaryDirectory.appending(path: "alerts-\(UUID().uuidString).json")
+    defer { try? FileManager.default.removeItem(at: file) }
+    let log = AlertLog(path: file)
+    log.raise(key: "port:gone:0.0.0.0:80", level: "warning", title: "gone port", detail: "")
+    log.raise(key: "health:gone", level: "warning", title: "gone health", detail: "")
+    log.raise(key: "port:here:0.0.0.0:80", level: "warning", title: "here port", detail: "")
+    log.raise(key: "image:sha256:abc", level: "serious", title: "image", detail: "")
+    log.dropContainerAlerts(except: ["here"])
+    #expect(JSON.parse(try Data(contentsOf: file))?.array?.map { $0["title"]?.string } == ["here port", "image"])
+}

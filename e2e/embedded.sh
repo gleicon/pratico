@@ -209,14 +209,16 @@ expect_eq "20 MB download arrives intact" \
 # Flight recorder (D-56): every exec and exit in the container, and who opened each TCP
 # connection, from BPF probes in its VM; kept after it stops.
 activity() { curl -s --unix-socket "$SOCK" "http://d/pratico/containers/$1/activity" | python3 -c "import json,sys; ev=json.load(sys.stdin)['Events']; $2"; }
-docker run -d --name e-rec alpine sh -c "sleep 1; sh -c 'exit 3'; wget -qO /dev/null -T5 http://host.docker.internal:$WWW_PORT/; wget -qO /dev/null -T3 http://host.docker.internal:1/; sleep 300" >/dev/null
+docker run -d --name e-rec alpine sh -c "sleep 1; sh -c 'exit 3'; nslookup pratico.example 1.1.1.1 >/dev/null 2>&1; wget -qO /dev/null -T5 http://host.docker.internal:$WWW_PORT/; wget -qO /dev/null -T3 http://host.docker.internal:1/; sleep 300" >/dev/null
 eventually "the recorder sees the container run" sh -c "curl -s --unix-socket '$SOCK' http://d/pratico/containers/e-rec/activity | grep -q '\"Port\": *1[,}]'"
 expect_eq "its first process, as pid 1, with argv" "$(activity e-rec "e=[x for x in ev if x['Kind']=='exec'][0]; print(e['Pid'], e['Path'], e['Args'][:2])")" "1 /bin/sh ['sh', '-c']"
 expect_eq "a child's exit code" "$(activity e-rec "print([x['ExitCode'] for x in ev if x['Kind']=='exit' and x.get('ExitCode')==3])")" "[3]"
 expect_eq "the process behind a connection, and whether it connected" \
-    "$(activity e-rec "print(sorted((x['Command'], x['Port'], x['Connected'], x['SourcePort']>0) for x in ev if x['Kind']=='connect'))")" "[('wget', 1, False, False), ('wget', $WWW_PORT, True, True)]"
+    "$(activity e-rec "print(sorted((x['Command'], x['Port'], x['Connected'], x['SourcePort']>0) for x in ev if x['Kind']=='connect' and x['Proto']=='tcp'))")" "[('wget', 1, False, False), ('wget', $WWW_PORT, True, True)]"
+expect_eq "the process behind a UDP destination, named from the switch's flow" \
+    "$(activity e-rec "print(sorted({(x['Command'], x['Address'], x['Port'], x.get('Blocked')) for x in ev if x.get('Proto')=='udp' and x['Address']=='1.1.1.1'}))")" "[('nslookup', '1.1.1.1', 53, False)]"
 expect_eq "a connection named from the switch's flow for it" \
-    "$(activity e-rec "print([(x['Port'], x.get('Name'), x.get('Blocked')) for x in ev if x['Kind']=='connect' and x['Connected']])")" "[($WWW_PORT, 'host.docker.internal', False)]"
+    "$(activity e-rec "print([(x['Port'], x.get('Name'), x.get('Blocked')) for x in ev if x['Kind']=='connect' and x.get('Connected')])")" "[($WWW_PORT, 'host.docker.internal', False)]"
 expect_eq "the egress record names the process behind its flow" \
     "$(curl -s --unix-socket "$SOCK" 'http://d/pratico/egress?container=e-rec' | python3 -c "import json,sys; print([(f['Command'], f['Port']) for f in json.load(sys.stdin)[0]['Flows'] if f['Proto']=='tcp' and not f['Blocked']])")" "[('wget', $WWW_PORT)]"
 docker exec e-rec ls / >/dev/null
@@ -861,7 +863,7 @@ expect_eq "run with an egress allowlist reports its connections" "$($MCP run '{"
 agent_run=$($MCP run '{"image":"alpine","network":"bridge","egress":["example.com"],"command":["sh","-c","wget -qT10 -O /dev/null http://example.com; wget -qT5 -O /dev/null http://1.1.1.1/ || true"]}')
 expect_eq "run reports what ran" "$(echo "$agent_run" | python3 -c 'import json,sys; print(sorted({e["Path"] for e in json.load(sys.stdin)["activity"] if e["Kind"]=="exec"}))')" "['/bin/sh', '/usr/bin/wget']"
 expect_eq "and which process opened each connection, named, refused or not" \
-    "$(echo "$agent_run" | python3 -c 'import json,sys; print(sorted({(e["Command"], e.get("Name") or e["Address"], e.get("Blocked")) for e in json.load(sys.stdin)["activity"] if e["Kind"]=="connect"}))')" "[('wget', '1.1.1.1', True), ('wget', 'example.com', False)]"
+    "$(echo "$agent_run" | python3 -c 'import json,sys; print(sorted({(e["Command"], e.get("Name") or e["Address"], e.get("Blocked")) for e in json.load(sys.stdin)["activity"] if e["Kind"]=="connect" and e["Proto"]=="tcp"}))')" "[('wget', '1.1.1.1', True), ('wget', 'example.com', False)]"
 expect_has "image_check reports a verdict" "$($MCP image_check '{"image":"alpine","wait_seconds":5}')" '"Verdict"'
 $MCP start '{"image":"alpine","command":["sleep","300"],"name":"e-agent"}' >/dev/null
 expect_eq "start, then exec in it" "$($MCP exec '{"container":"e-agent","command":["echo","inside"]}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["output"].strip())')" "inside"

@@ -2,7 +2,7 @@ import Containerization
 import Foundation
 
 /// The flight recorder (D-56): every exec and exit inside a container and the process
-/// behind each TCP connection it opens, seen by BPF probes in its VM (`vm/bpf`) and sent
+/// behind each TCP connection it opens and each UDP destination it sends to, seen by BPF probes in its VM (`vm/bpf`) and sent
 /// by vminitd's Recorder over vsock. The shim keeps them in the container's directory, so
 /// they outlive the VM; the daemon serves them.
 enum Activity {
@@ -22,9 +22,11 @@ enum Activity {
         static let textCapacity = size - text
     }
 
-    /// `PRATICO_EVENT_*`.
+    /// `PRATICO_EVENT_*`. A UDP record is a `connect` with `Proto` udp, as for TCP.
     enum Kind: UInt32 {
-        case exec = 1, exit, connect, dropped, unavailable
+        case exec = 1, exit, connect, dropped, unavailable, udp
+
+        var name: String { self == .udp ? "connect" : "\(self)" }
     }
 
     /// One record as the API shows it; nil for a kind this pratico does not know.
@@ -33,10 +35,10 @@ enum Activity {
         guard let kind = Kind(rawValue: load(r, Layout.kind, UInt32.self)) else { return nil }
         let value = load(r, Layout.value, UInt64.self)
         var out: [String: JSON] = [
-            "Kind": .string("\(kind)"),
+            "Kind": .string(kind.name),
             "Time": .string(Timestamp.format(Date(timeIntervalSince1970: Double(load(r, Layout.time, UInt64.self)) / 1e9))),
         ]
-        if [.exec, .exit, .connect].contains(kind) {
+        if [.exec, .exit, .connect, .udp].contains(kind) {
             out["Pid"] = .int(Int64(load(r, Layout.pid, UInt32.self)))
             out["ParentPid"] = .int(Int64(load(r, Layout.ppid, UInt32.self)))
             out["Uid"] = .int(Int64(load(r, Layout.uid, UInt32.self)))
@@ -51,12 +53,12 @@ enum Activity {
             // A wait status: the low 7 bits are the signal that killed it, else the code.
             let status = Int(value & 0xffff)
             if status & 0x7f == 0 { out["ExitCode"] = .int(Int64(status >> 8)) } else { out["Signal"] = .int(Int64(status & 0x7f)) }
-        case .connect:
-            out["Proto"] = "tcp"
+        case .connect, .udp:
+            out["Proto"] = kind == .udp ? "udp" : "tcp"
             out["Address"] = .string(IPv4.format(UInt32(bigEndian: load(r, Layout.daddr, UInt32.self))))
             out["Port"] = .int(Int64(load(r, Layout.dport, UInt16.self)))
             out["SourcePort"] = .int(Int64(load(r, Layout.sport, UInt16.self)))
-            out["Connected"] = .bool(value == 1)  // TCP_ESTABLISHED; 7 is TCP_CLOSE
+            if kind == .connect { out["Connected"] = .bool(value == 1) }  // TCP_ESTABLISHED; 7 is TCP_CLOSE
         case .dropped:
             out["Count"] = .int(Int64(clamping: value))
         case .unavailable:
@@ -87,17 +89,21 @@ enum Activity {
     /// (D-57). A connection that never opened has no source port in the guest (the kernel
     /// clears it), so a connect with port 0 meets any flow to that address and port.
     struct ConnectionKey: Hashable {
-        var ip: UInt32, port: UInt16, sourcePort: UInt16
-
-        init(ip: UInt32, port: UInt16, sourcePort: UInt16) { (self.ip, self.port, self.sourcePort) = (ip, port, sourcePort) }
+        var udp: Bool, ip: UInt32, port: UInt16, sourcePort: UInt16
 
         init?(connect event: JSON) {
-            guard event["Kind"]?.string == "connect", let ip = event["Address"]?.string.flatMap(IPv4.parse),
+            guard event["Kind"]?.string == "connect", let proto = event["Proto"]?.string, let ip = event["Address"]?.string.flatMap(IPv4.parse),
                   let port = event["Port"]?.int, let source = event["SourcePort"]?.int else { return nil }
-            self.init(ip: ip, port: UInt16(clamping: port), sourcePort: UInt16(clamping: source))
+            (udp, self.ip, self.port, sourcePort) = (proto == "udp", ip, UInt16(clamping: port), UInt16(clamping: source))
         }
 
-        var anySource: ConnectionKey { ConnectionKey(ip: ip, port: port, sourcePort: 0) }
+        /// A flow's key; nil for ICMP, which has no ports. A DNS flow is UDP.
+        init?(flow: EgressGuard.Flow) {
+            guard ["tcp", "udp", "dns"].contains(flow.proto) else { return nil }
+            (udp, ip, port, sourcePort) = (flow.proto != "tcp", flow.ip, flow.port, flow.sourcePort)
+        }
+
+        var anySource: ConnectionKey { var k = self; k.sourcePort = 0; return k }
     }
 
     /// The candidate nearest `time`, if within `joinWindow`.
@@ -107,14 +113,14 @@ enum Activity {
         return best
     }
 
-    /// Each TCP connect named from the switch's flow for it, nearest in time. `Name`,
+    /// Each connect (TCP or UDP) named from the switch's flow for it, nearest in time. `Name`,
     /// `Blocked` and `Reason` are added only where the daemon still holds that flow
     /// (`EgressGuard.maxFlows`, since it started); the guest's own record stays as it was.
     static func join(_ events: [JSON], _ flows: [EgressGuard.Flow]) -> [JSON] {
         precondition(flows.count <= EgressGuard.maxFlows, "\(flows.count) flows, past their bound")
         var byKey: [ConnectionKey: [EgressGuard.Flow]] = [:]
-        for flow in flows where flow.proto == "tcp" {
-            let key = ConnectionKey(ip: flow.ip, port: flow.port, sourcePort: flow.sourcePort)
+        for flow in flows {
+            guard let key = ConnectionKey(flow: flow) else { continue }
             byKey[key, default: []].append(flow)
             byKey[key.anySource, default: []].append(flow)
         }
@@ -132,8 +138,8 @@ enum Activity {
         return out
     }
 
-    /// The other way: the process behind each TCP flow, as `(Command, Pid)` from the
-    /// recorder's connect for it; nil for other protocols and flows it has no record of.
+    /// The other way: the process behind each TCP, UDP or DNS flow, as `(Command, Pid)`
+    /// from the recorder's connect for it; nil for ICMP and flows it has no record of.
     static func processes(_ flows: [EgressGuard.Flow], _ events: [JSON]) -> [(command: String, pid: Int64)?] {
         precondition(flows.count <= EgressGuard.maxFlows, "\(flows.count) flows, past their bound")
         var byKey: [ConnectionKey: [(time: Date, command: String, pid: Int64)]] = [:]
@@ -143,8 +149,7 @@ enum Activity {
             byKey[key, default: []].append((time, command, pid))
         }
         let out = flows.map { flow -> (command: String, pid: Int64)? in
-            guard flow.proto == "tcp" else { return nil }
-            let key = ConnectionKey(ip: flow.ip, port: flow.port, sourcePort: flow.sourcePort)
+            guard let key = ConnectionKey(flow: flow) else { return nil }
             let candidates = (byKey[key] ?? []) + (byKey[key.anySource] ?? [])
             return nearest(candidates, to: flow.time, \.time).map { ($0.command, $0.pid) }
         }

@@ -149,17 +149,17 @@ struct ConnectionsView: View {
             }
             .width(min: 76, ideal: 84)
             TableColumn("Container", value: \.container)
-                .width(min: 60, ideal: 90)
+                .width(min: 60, ideal: 84)
             TableColumn("Process", value: \.process) { r in
                 Text(r.process.isEmpty ? "—" : r.process).foregroundStyle(r.process.isEmpty ? .secondary : .primary)
-                    .help(r.process.isEmpty ? "The flight recorder records TCP connections only" : r.process)
+                    .help(r.process.isEmpty ? "No flight-recorder record for it: ICMP has none, nor a container started before pratico 0.2.18" : r.process)
             }
-            .width(min: 60, ideal: 90)
+            .width(min: 60, ideal: 84)
             TableColumn("Destination", value: \.destination) { r in
                 Text(verbatim: "\(r.destination):\(r.port)").lineLimit(1).truncationMode(.middle)
                     .help(r.addresses.sorted().joined(separator: ", "))
             }
-            .width(min: 140, ideal: 180)
+            .width(min: 140, ideal: 170)
             TableColumn("Protocol", value: \.proto) { r in Text(r.proto) }
                 .width(min: 44, ideal: 52)
             TableColumn("Count", value: \.count) { r in Text(r.count, format: .number).monospacedDigit() }

@@ -9,9 +9,9 @@ struct PraticoMenubarApp: App {
         MenuBarExtra {
             StatusMenu(daemon: daemon)
         } label: {
-            // The running-container count beside the icon (FR-29), none when nothing runs.
-            let n = daemon.containers.count
-            Text(n > 0 ? "\(Image(systemName: daemon.menubarSymbol)) \(n)" : "\(Image(systemName: daemon.menubarSymbol))")
+            // The mark alone: a count beside it widened the item and moved it as containers
+            // came and went; the menu's first lines say how many run.
+            Image(nsImage: daemon.menubarIcon.image)
         }
         // Which scanner found what, per image.
         Window("Scan Results", id: "scan-results") {

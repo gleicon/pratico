@@ -65,15 +65,16 @@ The scripts and code behind both builds, and the seccomp compiler: [tooling](too
 
 Every container's VM records what runs in it: each program started (`exec`, with its
 path and arguments), each process that ends (its exit code, or the signal that killed
-it), and each outgoing TCP connection with the process that opened it (address, port,
-source port, and whether it connected). `docker exec` sessions and healthchecks are
-recorded too; pratico's own processes in the VM are not.
+it), each outgoing TCP connection with the process that opened it (address, port,
+source port, and whether it connected), and each UDP destination a process sends to (the
+first datagram per source port and destination, DNS queries included). `docker exec` sessions
+and healthchecks are recorded too; pratico's own processes in the VM are not.
 
 ```sh
 curl -s --unix-socket ~/.pratico/docker.sock http://d/pratico/containers/web/activity
 ```
 
-Each connection carries what the Mac's [egress](egress.md) record knows of it: `Name`
+Each connection, TCP or UDP, carries what the Mac's [egress](egress.md) record knows of it: `Name`
 (from DNS, TLS SNI, or HTTP Host), `Blocked`, and `Reason`, matched by address, port, and
 source port. A connection refused before it opened has no source port in the guest, so
 it is matched by address and port, nearest in time. The egress record is the daemon's
@@ -87,16 +88,18 @@ with it. PIDs are as the container sees them. `?limit=` returns only the newest 
 events: the shim waits for its process's exit record (at most a second) before it stops
 the VM.
 
-How: three small BPF programs on the kernel's own tracepoints (no kprobes, no tracing
-filesystem), loaded by `vminitd` at boot (about 1 ms) and built by pratico against the
+How: four small BPF programs on the kernel's own tracepoints (exec, exit, TCP state,
+and IPv4 route lookups, which a UDP send makes; no kprobes, no tracing filesystem), loaded by `vminitd` at boot (about 1 ms) and built by pratico against the
 types of the kernel it ships, so they need no relocation and no libbpf in the guest. The
 VM's kernel buffers events in 1 MiB while the shim reads them over vsock; if a burst
 outruns it, the events that did not fit are dropped and a `dropped` event says how many.
 
 What it does not see, or show:
 
-- UDP and IPv6 connections. DNS and every flow leaving the VM are recorded on the Mac
-  ([egress](egress.md)).
+- ICMP (ping) has no process; the Mac records its flows ([egress](egress.md)). IPv6
+  never leaves a VM (pratico-net is IPv4 only).
+- UDP to loopback, and a process's later datagrams from the same source port to the same
+  destination (the first is recorded).
 - Arguments past the first 192 bytes, and paths past 128 bytes, are cut.
 - A container with `--privileged` (or `CAP_SYS_ADMIN` or `CAP_BPF`) can remove the
   probes in its own VM, since it controls that kernel; others cannot use BPF at all
