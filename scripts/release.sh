@@ -4,7 +4,7 @@
 # Info.plist, the tree is clean, and the tag does not exist yet.
 # Usage: scripts/release.sh <version>    (or: make release VERSION=x.y.z)
 #   SKIP_E2E=1   skip the end-to-end suite (unit tests still run)
-#   PRERELEASE=1 mark the GitHub release as a pre-release
+#   PRERELEASE=1 mark the GitHub release as a pre-release (the Homebrew cask is not updated)
 #   SIGN_IDENTITY="Developer ID Application: …"  sign with a Developer ID instead of ad hoc
 #   NOTARY_PROFILE=<name>  notarize and staple the DMG with the credentials saved by
 #                          `xcrun notarytool store-credentials <name>` (needs SIGN_IDENTITY)
@@ -61,3 +61,7 @@ fi
 gh release create "$TAG" "$DMG" "$DMG.sha256" --title "Pratico $VERSION" --verify-tag "${flags[@]}" \
     --notes "$(printf '%s Requires macOS 26 on Apple silicon; nothing else to install.\n\nSHA-256: %s' "$open_note" "$(cut -d' ' -f1 "$DMG.sha256")")"
 echo "released $TAG"
+# The release stands either way; a failed cask update is rerun on its own.
+if [ "${PRERELEASE:-0}" != 1 ]; then
+    scripts/cask.sh "$VERSION" || echo "release: the Homebrew cask was not updated; run scripts/cask.sh $VERSION" >&2
+fi

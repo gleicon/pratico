@@ -16,6 +16,18 @@ Website: <https://gleicon.github.io/pratico/> · License: MIT
 
 ## Install
 
+With Homebrew, trust the tap once, then install:
+
+```sh
+brew trust gleicon/pratico
+brew install --cask gleicon/pratico/pratico
+```
+
+The first launch still needs the approval in step 2 below. `brew uninstall --cask pratico`
+keeps `~/.pratico` (containers, images, volumes); `--zap` deletes it too.
+
+Or by hand:
+
 1. Download `Pratico-<version>.dmg` from
    [Releases](https://github.com/gleicon/pratico/releases) and drag `Pratico.app` to
    Applications.
