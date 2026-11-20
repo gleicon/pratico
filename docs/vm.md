@@ -166,7 +166,12 @@ the guest touched stays the Mac's to back until the container stops, even after 
 guest frees it: 16 idle containers that each wrote and read 512 MiB held 13 GiB instead
 of 4.7 GiB. Virtualization.framework's memory balloon, its only way to take memory back,
 was tried and returned none of it (the guest's 4 KiB pages within the Mac's 16 KiB ones),
-so pratico has none. Stopping or restarting a container gives its memory back.
+so pratico has none. Zeroing freed guest memory (`init_on_free=1`), so macOS would store
+it for almost nothing, was measured too and made things worse: the guest zeroes all of its
+memory as it boots, and an app on the Mac that filled 8 GiB beside 16 such containers took
+4.8 s instead of 4.0 s. Under memory pressure macOS compresses and swaps what idle
+containers hold, and a program on the Mac stays close to its speed without them (4.0 s
+against 3.3 s). Stopping or restarting a container gives its memory back.
 
 ## Resource use
 

@@ -142,7 +142,7 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 - [x] Exec drift tag (D-61): each exec of a file the container added or changed, or ran from a mount, is marked `FromImage: false` in the activity endpoint and MCP `activity`/`run`; no alert (builds do this all the time) except for containers in ask mode
 - [x] Ask mode at the switch (D-62): an opted-in container (label, or MCP `run` flag) holds a connection to a destination not yet allowed; the menubar asks allow / deny / always for this container, answers go into the allowlist; unanswered after 30 s it is refused and recorded ("not answered"); Docker clients unaffected unless they opt in
 - [x] Memory balloon gate (D-63): measured; the balloon cannot return memory on Virtualization.framework with 4 KiB guest pages, so none is built
-- [ ] Host memory follows container use (criterion set 2026-11-20): with many containers, the host's memory pressure rises and falls with what they use, and the rest of the machine feels as fast as before. Kept only if measured so. macOS: try freed guest pages zeroed (`init_on_free=1`) so the host's compressor holds them at almost no cost, guest page cache bounded; measure under host pressure (swap writes, compressed memory, a foreground app's latency) and the zeroing's CPU cost
+- [x] Host memory follows container use, measured and not built (2026-11-20; D-63): zeroing freed guest pages made the Mac slower (8 GiB filled beside 16 idle containers in 4.8 s against 4.0 s without zeroing and 3.3 s with no containers), since the guest zeroes all its memory at boot; macOS's compressor and swap already keep the Mac close to its speed. Criterion was: with many containers, the host's memory pressure rises and falls with what they use, and the rest of the machine feels as fast as before. Kept only if measured so. macOS: try freed guest pages zeroed (`init_on_free=1`) so the host's compressor holds them at almost no cost, guest page cache bounded; measure under host pressure (swap writes, compressed memory, a foreground app's latency) and the zeroing's CPU cost
 
 ## Remote Linux hosts (future, after Next; decided 2026-11-20)
 
@@ -162,5 +162,5 @@ Local Mac development still comes first. When pratico runs on remote hosts:
 - Seccomp `user_notif` ask mode: `execve`/`openat` prompts would be noise; `connect` is asked at the switch
 - On-demand `perf_event` profiling: stacks need unwinding and symbols across arbitrary images; language profilers work in containers
 - `docker build` with no setup: needs a BuildKit of pratico's own to maintain, for two lines typed once
-- A memory balloon on macOS: Virtualization.framework's does not release 4 KiB guest pages (D-63); the goal it served stays in Next
+- A memory balloon or zeroed freed pages on macOS: the balloon releases nothing and zeroing made the Mac slower (D-63); a stopped container gives its memory back
 - Backup and restore with volume data, IPv6 on pratico-net (refused with an error), a local OCI registry: none serves local development
