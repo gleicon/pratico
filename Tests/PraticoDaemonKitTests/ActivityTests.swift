@@ -5,7 +5,7 @@ import Testing
 
 /// A `struct pratico_event` (vm/bpf/recorder.h) as the guest sends it.
 private func record(kind: UInt32, pid: UInt32 = 7, ppid: UInt32 = 1, value: UInt64 = 0, daddr: [UInt8] = [0, 0, 0, 0],
-                    sport: UInt16 = 0, dport: UInt16 = 0, comm: String = "sh", file: String = "", args: [String] = []) -> [UInt8] {
+                    sport: UInt16 = 0, dport: UInt16 = 0, reserved: UInt32 = 0, comm: String = "sh", file: String = "", args: [String] = []) -> [UInt8] {
     typealias L = Activity.Layout
     var r = [UInt8](repeating: 0, count: L.size)
     let fileBytes: [UInt8] = file.isEmpty ? [] : Array(file.utf8) + [0]
@@ -20,6 +20,7 @@ private func record(kind: UInt32, pid: UInt32 = 7, ppid: UInt32 = 1, value: UInt
         b.storeBytes(of: dport.littleEndian, toByteOffset: L.dport, as: UInt16.self)
         b.storeBytes(of: UInt16(fileBytes.count).littleEndian, toByteOffset: L.fileLength, as: UInt16.self)
         b.storeBytes(of: UInt16(argBytes.count).littleEndian, toByteOffset: L.argsLength, as: UInt16.self)
+        b.storeBytes(of: reserved.littleEndian, toByteOffset: L.reserved, as: UInt32.self)
     }
     r.replaceSubrange(L.daddr..<(L.daddr + 4), with: daddr)
     r.replaceSubrange(L.comm..<(L.comm + comm.utf8.count), with: comm.utf8)
@@ -32,6 +33,29 @@ private func record(kind: UInt32, pid: UInt32 = 7, ppid: UInt32 = 1, value: UInt
     #expect(e["Kind"]?.string == "exec" && e["Pid"]?.int == 7 && e["ParentPid"]?.int == 1 && e["Command"]?.string == "ls")
     #expect(e["Path"]?.string == "/bin/ls" && e["Args"]?.strings == ["ls", "-l", ""])  // an empty argument is kept
     #expect(e["Time"]?.string?.hasPrefix("2023-11-14T22:13:20") == true)
+}
+
+// The loaded file's identity at exec decides FromImage: on the root fs, and the image's
+// inode with the image's change time. Nothing else is shown of it.
+@Test func activityMarksExecsFromTheImage() throws {
+    let inode: [UInt8] = [0x2a, 0, 0, 0]  // 42, little-endian
+    let onRoot: UInt32 = 0x8000_0000 | 500
+    let exec = try #require(Activity.decode(record(kind: 1, value: 1_700_000_000, daddr: inode, reserved: onRoot, file: "/bin/ls")))
+    #expect(exec["Inode"]?.int == 42 && exec["ChangeTime"]?.int == 1_700_000_000_000_000_500 && exec["OnRootfs"]?.bool == true)
+    let image: ExecOrigin.Files = [42: 1_700_000_000_000_000_500]
+    let marked = ExecOrigin.tag([exec], image)[0]
+    #expect(marked["FromImage"]?.bool == true && marked["Inode"] == nil && marked["ChangeTime"] == nil && marked["OnRootfs"] == nil)
+    #expect(ExecOrigin.tag([exec], [42: 1_700_000_000_000_000_501])[0]["FromImage"]?.bool == false)  // changed since
+    #expect(ExecOrigin.tag([exec], [43: 1_700_000_000_000_000_500])[0]["FromImage"]?.bool == false)  // another file
+    let onVolume = try #require(Activity.decode(record(kind: 1, value: 1_700_000_000, daddr: inode, reserved: 500, file: "/data/ls")))
+    #expect(ExecOrigin.tag([onVolume], image)[0]["FromImage"]?.bool == false)
+    #expect(ExecOrigin.tag([exec], nil)[0]["FromImage"] == nil)  // image gone: unknown
+    let script = try #require(Activity.decode(record(kind: 1, value: 1_700_000_000, daddr: inode, reserved: onRoot | 0x4000_0000, file: "/tmp/x.sh")))
+    #expect(script["ChangeTime"]?.int == 1_700_000_000_000_000_500)
+    let tagged = ExecOrigin.tag([script], image)[0]  // its interpreter is the image's; the script is unknown
+    #expect(tagged["FromImage"] == nil && tagged["Interpreted"] == nil)
+    let old = try #require(Activity.decode(record(kind: 1, file: "/bin/ls")))  // a recorder before D-61
+    #expect(old["Inode"] == nil && ExecOrigin.tag([old], image)[0]["FromImage"] == nil)
 }
 
 @Test func activityReadsExitStatuses() throws {

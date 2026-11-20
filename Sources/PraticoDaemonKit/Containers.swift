@@ -67,6 +67,8 @@ public final class ContainerService: @unchecked Sendable {
     let events: EventBus
     let networks: NetworkService
     let volumes: VolumeService
+    /// `FromImage` on exec events, with its hashes cached.
+    let execOrigin = ExecOrigin()
     /// The runtime: kernel, init, and the shim that owns each VM (docs/design/runtime.md).
     let embedded: EmbeddedContainers
     /// The daemon's own API socket: what `-v /var/run/docker.sock:...` gives a container.
@@ -460,7 +462,7 @@ public final class ContainerService: @unchecked Sendable {
         let rootfs = files.dir.appending(path: "rootfs.ext4")
         if !RootfsEdit.isClean(rootfs) {
             Pratico.log("pratico-daemon: \(rec.name)'s root filesystem was not unmounted cleanly; rebuilding it from its files")
-            do { try RootfsEdit.repair(rootfs) } catch { throw APIError(500, "cannot repair the root filesystem of \(rec.name): \(error)") }
+            do { try rewritingRootfs(rec, written: []) { try RootfsEdit.repair(rootfs) } } catch { throw APIError(500, "cannot repair the root filesystem of \(rec.name): \(error)") }
         }
         let nics = try networks.allocateNICs(rec, runDir: files.socket.deletingLastPathComponent())
         do {
@@ -911,6 +913,17 @@ public final class ContainerService: @unchecked Sendable {
             for m in disks { diskHolders[m.volume!] = rec.id }
         }
     }
+
+    /// Rewrites a stopped container's rootfs with `rewrite`, keeping track of which of its
+    /// files are still the image's (`ExecOrigin.carry`); `written` are the paths replaced.
+    func rewritingRootfs(_ rec: ContainerRecord, written: Set<String>, _ rewrite: () throws -> Void) throws {
+        let dir = dir(rec.id)
+        let files = execOrigin.files(container: dir, image: imageRootfs(rec))
+        try ExecOrigin.carry(dir.appending(path: "rootfs.ext4"), files: files, written: written, rewrite: rewrite)
+    }
+
+    /// The unpacked image a container's rootfs was cloned from.
+    func imageRootfs(_ rec: ContainerRecord) -> URL { embedded.rootfsCache.appending(path: "\(rec.imageId.dropFirst(7)).ext4") }
 
     /// Runs `body` on disk volume `name`'s image while no VM has it attached nor can attach it.
     func editingDisk<T>(_ name: String, _ body: (URL) throws -> T) throws -> T {

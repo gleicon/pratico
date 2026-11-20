@@ -131,69 +131,24 @@ final class ArchiveService: @unchecked Sendable {
             throw APIError(400, "invalid tar archive")
         }
         if copyUIDGID {
-            let user = try containerUser(found, scratch: scratch)
+            let user = try containerUser(found)
             owners = owners.mapValues { _ in user }
         }
         guard let rec = try running(ref) else {
             try putStopped(ref, path: Self.trimmed(path), work: work, owners: owners, scratch: scratch)
             return
         }
-        var targets: [String] = []
-        for entry in try FileManager.default.contentsOfDirectory(atPath: work.path) {
-            let src = work.appending(path: entry)
-            let dst = (path.hasSuffix("/") ? path : path + "/") + entry
-            // lstat: a top-level symlink in the tar must never be followed on the host,
-            // or `x -> ~/.ssh/id_rsa` would copy a host file into the container.
-            var st = Darwin.stat()
-            guard lstat(src.path, &st) == 0 else { continue }
-            switch st.st_mode & S_IFMT {
-            case S_IFREG, S_IFDIR:
-                // The agent's directory copy lstat()s every entry and keeps only symlinks
-                // whose target stays inside the tree; the rest are recreated below, as links.
-                let outer = (st.st_mode & S_IFMT) == S_IFDIR ? try Self.escapingLinks(in: src) : []
-                let mode = Int(st.st_mode & 0o7777)
-                try embedded.shim.call(files, "POST", "/copy-in?src=\(Self.query(src.path))&dst=\(Self.query(dst))&mode=\(String(mode, radix: 8))")
-                for (rel, target) in outer {
-                    let body: JSON = ["args": JSON(["ln", "-sfn", target, dst + "/" + rel]), "timeout": 10]
-                    _ = try? embedded.shim.request(files, "POST", "/exec", body: body.encoded())
-                }
-            case S_IFLNK:
-                let target = try FileManager.default.destinationOfSymbolicLink(atPath: src.path)
-                let body: JSON = ["args": JSON(["ln", "-sfn", target, dst]), "timeout": 10]
-                let r = try embedded.shim.request(files, "POST", "/exec", body: body.encoded())
-                guard JSON.parse(r.body)?["exitCode"]?.int == 0 else {
-                    throw APIError(500, "cannot create symlink \(dst) in container \(rec.name) (the image needs ln)")
-                }
-            default:
-                throw APIError(400, "unsupported file type in archive: \(entry)")
-            }
-            targets.append(dst)
-        }
-        try chownInGuest(rec, files, base: path.hasSuffix("/") ? path : path + "/", owners: owners, top: targets)
-    }
-
-    /// Gives what the agent copied in (as root) the owners the archive asked for, with the
-    /// image's `chown`: one call for the common single-owner case, else one per owner, in
-    /// batches that keep each command line short.
-    private func chownInGuest(_ rec: ContainerRecord, _ files: ShimFiles, base: String, owners: [String: Tar.Owner], top: [String]) throws {
-        guard !top.isEmpty else { return }
-        let distinct = Set(owners.values)
-        if distinct.count <= 1 {
-            let o = distinct.first ?? .root
-            let body: JSON = ["args": JSON(["chown", "-hR", "\(o.uid):\(o.gid)"] + top), "timeout": 30]
-            _ = try? embedded.shim.request(files, "POST", "/exec", body: body.encoded())
-            return
-        }
-        let byOwner = Dictionary(grouping: owners.keys.sorted(), by: { owners[$0]! })
-        for (o, paths) in byOwner {
-            for start in stride(from: 0, to: paths.count, by: 256) {
-                let batch = paths[start..<min(start + 256, paths.count)].map { base + $0 }
-                let body: JSON = ["args": JSON(["chown", "-h", "\(o.uid):\(o.gid)"] + batch), "timeout": 30]
-                let r = try embedded.shim.request(files, "POST", "/exec", body: body.encoded())
-                guard JSON.parse(r.body)?["exitCode"]?.int == 0 else {
-                    throw APIError(500, "cannot set owners in container \(rec.name) (the image needs chown)")
-                }
-            }
+        // The tree goes to the guest as one tar+gzip with the archive's links and owners,
+        // extracted there relative to directory descriptors: a process in the container
+        // swapping a directory for a link mid-copy cannot redirect a write or an owner.
+        let names = try FileManager.default.contentsOfDirectory(atPath: work.path)
+        guard !names.isEmpty else { return }
+        let tar = scratch.appending(path: "in.tar.gz")
+        try Tar.create(tar, base: work, names: names, gzip: true, owner: { owners[$0] ?? .root })
+        do {
+            try embedded.shim.call(files, "POST", "/copy-in-archive?src=\(Self.query(tar.path))&dst=\(Self.query(Self.trimmed(path)))")
+        } catch let e as APIError where e.status == 404 {
+            throw APIError(409, "pratico: the VM of \(rec.name) was started by an older pratico, which copies without the archive's owners; restart it to copy into it")
         }
     }
 
@@ -231,7 +186,8 @@ final class ArchiveService: @unchecked Sendable {
         }
         for (mount, file) in pieces {
             guard let mount else {
-                try containers.whileStopped(ref) { _, rootfs in try RootfsEdit.add(file, to: rootfs) }
+                let written = try ExecOrigin.members(file)
+                try containers.whileStopped(ref) { rec, rootfs in try containers.rewritingRootfs(rec, written: written) { try RootfsEdit.add(file, to: rootfs) } }
                 continue
             }
             guard !mount.readOnly else { throw APIError(400, "mounted volume is marked read-only") }
@@ -271,20 +227,15 @@ final class ArchiveService: @unchecked Sendable {
     }
 
     /// The uid and gid of the container's `User`, as `docker cp -a` uses them: names
-    /// looked up in the container's `/etc/passwd` and `/etc/group`, read on the Mac when it
-    /// is stopped and through the agent when it runs.
-    private func containerUser(_ rec: ContainerRecord, scratch: URL) throws -> Tar.Owner {
+    /// looked up in the container's `/etc/passwd` and `/etc/group`, read from its rootfs on
+    /// the Mac (after the guest's writes are flushed, when it runs).
+    private func containerUser(_ rec: ContainerRecord) throws -> Tar.Owner {
         let user = rec.config["User"]?.string ?? ""
         guard !user.isEmpty else { return .root }
-        func read(_ file: String) -> String {
-            if let live = try? running(rec.id) {
-                let copy = scratch.appending(path: "id-\((file as NSString).lastPathComponent)")
-                guard (try? copyOut(live, file, to: copy)) != nil, let d = try? Data(contentsOf: copy) else { return "" }
-                return String(decoding: d.prefix(1 << 20), as: UTF8.self)
-            }
-            return (try? containers.whileStopped(rec.id) { _, rootfs in CopyUp.read(rootfs: rootfs, path: file) }).flatMap { $0 }
-                .map { String(decoding: $0, as: UTF8.self) } ?? ""
-        }
+        // Read on the Mac, capped, as a regular file only: the container writes these.
+        if rec.state.running { _ = try? embedded.shim.call(containers.shimFiles(rec.id), "POST", "/sync") }
+        let rootfs = containers.shimFiles(rec.id).dir.appending(path: "rootfs.ext4")
+        func read(_ file: String) -> String { CopyUp.read(rootfs: rootfs, path: file).map { String(decoding: $0, as: UTF8.self) } ?? "" }
         guard let owner = Self.owner(of: user, passwd: read("/etc/passwd"), group: read("/etc/group")) else {
             throw APIError(400, "unable to find user \(user): no matching entries in passwd file")
         }
@@ -316,32 +267,6 @@ final class ArchiveService: @unchecked Sendable {
 
     /// `/a/b/` is `/a/b`; `/` stays.
     static func trimmed(_ path: String) -> String { path.count > 1 && path.hasSuffix("/") ? String(path.dropLast()) : path }
-
-    /// Walks an extracted tree without following links. Returns symlinks whose target
-    /// leaves the tree (relative path, target text); refuses devices, sockets, and fifos.
-    static func escapingLinks(in root: URL) throws -> [(String, String)] {
-        let base = root.standardizedFileURL.path
-        var out: [(String, String)] = []
-        guard let walk = FileManager.default.enumerator(atPath: base) else { return [] }
-        for case let rel as String in walk {
-            let full = base + "/" + rel
-            var st = Darwin.stat()
-            guard lstat(full, &st) == 0 else { continue }
-            switch st.st_mode & S_IFMT {
-            case S_IFREG, S_IFDIR:
-                continue
-            case S_IFLNK:
-                let target = try FileManager.default.destinationOfSymbolicLink(atPath: full)
-                let parent = (full as NSString).deletingLastPathComponent
-                let resolved = (target.hasPrefix("/") ? target : parent + "/" + target) as NSString
-                let normalized = resolved.standardizingPath
-                if !(normalized == base || normalized.hasPrefix(base + "/")) { out.append((rel, target)) }
-            default:
-                throw APIError(400, "unsupported file type in archive: \(rel)")
-            }
-        }
-        return out
-    }
 
     /// A base name that is safe as one host path component: never empty, `.`, or `..`
     /// (`work/..` would land outside the temporary directory).

@@ -47,7 +47,7 @@ you. So:
 | `start` | a container that keeps running (`name`, `ports` in `-p` form) |
 | `exec` | a command in a running container the agent made |
 | `egress` | where a container's connections went (the last 500): each destination's name and address, whether pratico refused it and why, and the process that opened each TCP connection and UDP flow ([egress](egress.md)) |
-| `activity` | what ran in a container, from its VM's [flight recorder](vm.md#flight-recorder): each exec and exit, and each TCP connection and UDP destination with the process that opened it, named and marked refused from the egress record (`limit`, default 500, at most 10,000) |
+| `activity` | what ran in a container, from its VM's [flight recorder](vm.md#flight-recorder): each exec (with `FromImage`: whether its file came with the image) and exit, and each TCP connection and UDP destination with the process that opened it, named and marked refused from the egress record (`limit`, default 500, at most 10,000) |
 | `logs` | the last lines of a container's output (`tail`, default 200) |
 | `list` | containers with image, state, ports, and whether an agent made them |
 | `stop`, `remove` | for containers the agent made |

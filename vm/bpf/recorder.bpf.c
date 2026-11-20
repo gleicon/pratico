@@ -121,6 +121,38 @@ int on_exec(struct bpf_raw_tracepoint_args *ctx) {
     __u32 len = end > start ? (__u32)(end - start) : 0;
     if (len > PRATICO_ARGS_MAX) len = PRATICO_ARGS_MAX;
     if (len > 0 && bpf_probe_read_user(e->text + file_len, len, (void *)start) == 0) e->args_len = len;
+    // The file the kernel loaded, as it was at exec: its inode number and change time, and
+    // whether it is on the container's root filesystem. The daemon compares them with the
+    // image's, so nothing the container does later (putting a file back) changes what this
+    // exec ran. For a script (binfmt_script, binfmt_misc) the loaded file is its
+    // interpreter, and the script itself has been let go: `interp` no longer points at
+    // `filename`, and the event says so, as the file named is then unknown.
+    struct file *f = 0;
+    struct inode *inode = 0;
+    bpf_probe_read_kernel(&f, sizeof(f), &bprm->file);
+    if (f) bpf_probe_read_kernel(&inode, sizeof(inode), &f->f_inode);
+    if (inode) {
+        unsigned long ino = 0;
+        __s64 sec = 0;
+        __u32 nsec = 0;
+        struct super_block *sb = 0, *root_sb = 0;
+        struct fs_struct *fs = 0;
+        struct dentry *root = 0;
+        bpf_probe_read_kernel(&ino, sizeof(ino), &inode->i_ino);
+        bpf_probe_read_kernel(&sec, sizeof(sec), &inode->i_ctime_sec);
+        bpf_probe_read_kernel(&nsec, sizeof(nsec), &inode->i_ctime_nsec);
+        bpf_probe_read_kernel(&sb, sizeof(sb), &inode->i_sb);
+        bpf_probe_read_kernel(&fs, sizeof(fs), &t->fs);
+        if (fs) bpf_probe_read_kernel(&root, sizeof(root), &fs->root.dentry);
+        if (root) bpf_probe_read_kernel(&root_sb, sizeof(root_sb), &root->d_sb);
+        e->daddr = (__u32)ino;
+        e->value = (__u64)sec;
+        // Bit 31 of i_ctime_nsec is the kernel's I_CTIME_QUERIED flag; nanoseconds fit below.
+        const char *interp = 0;
+        bpf_probe_read_kernel(&interp, sizeof(interp), &bprm->interp);
+        e->reserved = (nsec & ~(PRATICO_EXEC_ON_ROOT | PRATICO_EXEC_INTERPRETED)) | (sb && sb == root_sb ? PRATICO_EXEC_ON_ROOT : 0) |
+                      (interp != file ? PRATICO_EXEC_INTERPRETED : 0);
+    }
     bpf_ringbuf_submit(e, 0);
     return 0;
 }

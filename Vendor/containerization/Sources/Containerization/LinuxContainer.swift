@@ -15,6 +15,7 @@
 //
 // Modified by the Pratico project (2026-11-17): vmexec installs the seccomp filter, so a
 // profile no longer needs an OCI runtime; it is compiled at init (Vendor/README.md).
+// 2026-11-20: copyIn(archive:into:), a caller's tar extracted as it is.
 //===----------------------------------------------------------------------===//
 
 import ContainerizationArchive
@@ -1448,6 +1449,59 @@ extension LinuxContainer {
                     }
                 }
 
+                try await group.waitForAll()
+            }
+        }
+    }
+
+    /// Extracts `archive`, a tar+gzip the caller made, into the existing directory
+    /// `directory` in the container, as written: every member, links included whatever
+    /// they point at, with the owners and modes its headers give. The guest extracts it
+    /// relative to directory descriptors without following links, so nothing in the
+    /// container can redirect a write or an owner change while it runs.
+    /// (Added by the Pratico project, 2026-11-20: `docker cp` keeps the archive's owners.)
+    public func copyIn(archive: URL, into directory: String) async throws {
+        try await self.state.withLock {
+            let state = try $0.startedState("copyIn")
+            let root = self.root
+            let port = self.hostVsockPorts.allocate()
+            defer { self.hostVsockPorts.release(port) }
+            let listener = try state.vm.listen(port)
+            defer { try? listener.finish() }
+
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                group.addTask {
+                    try await state.vm.withAgent { agent in
+                        guard let vminitd = agent as? Vminitd else {
+                            throw ContainerizationError(.unsupported, message: "copyIn requires Vminitd agent")
+                        }
+                        try await vminitd.copy(
+                            direction: .copyIn, root: root, path: directory, vsockPort: port,
+                            mode: 0, createParents: false, isArchive: true
+                        )
+                    }
+                }
+                group.addTask {
+                    guard let conn = await listener.first(where: { _ in true }) else {
+                        throw ContainerizationError(.internalError, message: "copyIn: vsock connection not established")
+                    }
+                    try listener.finish()
+                    try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+                        self.copyQueue.async {
+                            do {
+                                defer { conn.closeFile() }
+                                let source = try FileHandle(forReadingFrom: archive)
+                                defer { try? source.close() }
+                                while let chunk = try source.read(upToCount: Self.defaultCopyChunkSize), !chunk.isEmpty {
+                                    try conn.write(contentsOf: chunk)
+                                }
+                                continuation.resume()
+                            } catch {
+                                continuation.resume(throwing: error)
+                            }
+                        }
+                    }
+                }
                 try await group.waitForAll()
             }
         }

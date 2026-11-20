@@ -1,1 +1,1 @@
-fc8b2680d857650caa8c2ad0144ada37e310a9592e9f3a8064b198823b5b94e5  recorder.bpf.o  # vm/bpf, against vm/kernel/vmlinux.sha256's kernel
+476f3d687730b908268553eeb54118a23eec716d66f22cefe2f40559b972dd73  recorder.bpf.o  # vm/bpf, against vm/kernel/vmlinux.sha256's kernel

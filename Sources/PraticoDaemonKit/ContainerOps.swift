@@ -176,25 +176,34 @@ enum RootfsTree {
     static let maxDepth = 128
 
     static func read(_ rootfs: URL) throws -> [String: Entry] {
-        let reader = try EXT4.EXT4Reader(blockDevice: FilePath(rootfs.path))
         var out: [String: Entry] = [:]
+        try walk(rootfs) { reader, path, _, inode in
+            let isLink = inode.mode & CopyUp.typeMask == CopyUp.linkType
+            let size = Int64(inode.sizeLow) | (Int64(inode.sizeHigh) << 32)
+            out[path] = Entry(mode: inode.mode, uid: UInt32(inode.uidHigh) << 16 | UInt32(inode.uid), gid: UInt32(inode.gidHigh) << 16 | UInt32(inode.gid), size: size, mtime: inode.mtime,
+                              link: isLink ? (CopyUp.linkTarget(reader, FilePath(path), inode) ?? "") : "")
+        }
+        return out
+    }
+
+    /// Every entry of the filesystem, links not followed, at most `maxEntries`.
+    static func walk(_ rootfs: URL, _ visit: (EXT4.EXT4Reader, String, EXT4.InodeNumber, EXT4.Inode) throws -> Void) throws {
+        let reader = try EXT4.EXT4Reader(blockDevice: FilePath(rootfs.path))
+        var count = 0
         var pending: [(path: String, depth: Int)] = [("/", 0)]
         while let (dir, depth) = pending.popLast() {
             precondition(depth <= maxDepth, "walk deeper than its bound")
             for name in try reader.listDirectory(FilePath(dir)) where !name.isEmpty && name != "." && name != ".." && !name.contains("/") {
                 let path = dir == "/" ? "/" + name : dir + "/" + name
-                guard out.count < maxEntries else { throw APIError(500, "pratico: more than \(maxEntries) files to compare") }
-                let (_, inode) = try reader.stat(FilePath(path), followSymlinks: false)
-                let isLink = inode.mode & CopyUp.typeMask == CopyUp.linkType
-                let size = Int64(inode.sizeLow) | (Int64(inode.sizeHigh) << 32)
-                out[path] = Entry(mode: inode.mode, uid: UInt32(inode.uidHigh) << 16 | UInt32(inode.uid), gid: UInt32(inode.gidHigh) << 16 | UInt32(inode.gid), size: size, mtime: inode.mtime,
-                                  link: isLink ? (CopyUp.linkTarget(reader, FilePath(path), inode) ?? "") : "")
+                count += 1
+                guard count <= maxEntries else { throw APIError(500, "pratico: more than \(maxEntries) files to walk") }
+                let (number, inode) = try reader.stat(FilePath(path), followSymlinks: false)
+                try visit(reader, path, number, inode)
                 if inode.mode & CopyUp.typeMask == CopyUp.dirType && depth < maxDepth && path != "/lost+found" {
                     pending.append((path, depth + 1))
                 }
             }
         }
-        return out
     }
 
     /// Files pratico writes into every container, which Docker bind-mounts and never lists.

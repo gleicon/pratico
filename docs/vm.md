@@ -81,6 +81,20 @@ it is matched by address and port, nearest in time. The egress record is the dae
 (the last 2,000 flows per container since it started), so after a daemon restart older
 connections have the guest's fields only.
 
+Each exec also says whether the file it ran came with the image: `FromImage` is `false`
+for a binary the container downloaded, built, or changed, and for one run from a volume
+or a bind mount. The probe notes, at exec, the loaded file's inode number and change
+time and whether it is on the container's root file system; the daemon checks them
+against the image's files. A container's root file system is a clone of its image's, so
+an untouched file keeps the image's inode and change time, and the guest kernel sets a
+new change time on any write, rename, or metadata change, which nothing in the guest can
+set back: putting a file back afterwards does not change what an exec ran. A script run
+by its `#!` line has no `FromImage`: the kernel has let go of the script by the time it
+loads the interpreter, so only the interpreter is known (its own exec is not a separate
+event). Builds run
+what they just wrote, so this is a mark to read, not an alert. Events from containers
+started before pratico 0.2.25 have no `FromImage`.
+
 The events are kept in the container's directory, up to 16 MiB (about 50,000 events;
 older ones roll off), so they can be read after the container stops, and are removed
 with it. PIDs are as the container sees them. `?limit=` returns only the newest (up to

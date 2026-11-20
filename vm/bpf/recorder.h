@@ -10,6 +10,8 @@
 #define PRATICO_EVENT_DROPS 4  // vminitd: `value` records dropped so far
 #define PRATICO_EVENT_ERROR 5  // vminitd: the probes could not be loaded; `text` says why
 #define PRATICO_EVENT_UDP 6    // a process's first datagram to an address and port, per source port
+#define PRATICO_EXEC_ON_ROOT 0x80000000u // exec: the file is on the container's root filesystem
+#define PRATICO_EXEC_INTERPRETED 0x40000000u // exec: the file is a script's interpreter, not the file named
 
 #define PRATICO_FILE_MAX 128
 #define PRATICO_ARGS_MAX 192
@@ -20,13 +22,14 @@ struct pratico_event {
     __u32 ppid;     // 0 when the parent is outside it
     __u32 uid;
     __u64 time_ns;  // CLOCK_BOOTTIME from the probes; vminitd sends CLOCK_REALTIME
-    __u64 value;    // exit: wait status; connect: TCP state reached (1 up, 7 failed); drops: count
-    __u32 daddr;    // connect, udp: network byte order
+    __u64 value;    // exit: wait status; connect: TCP state reached (1 up, 7 failed); drops: count;
+                    // exec: the loaded file's ctime, seconds
+    __u32 daddr;    // connect, udp: network byte order; exec: the loaded file's inode number
     __u16 sport;    // connect, udp: host byte order
     __u16 dport;
     __u16 file_len; // exec: bytes of `text` that are the file (with its NUL), then argv
     __u16 args_len;
-    __u32 reserved;
+    __u32 reserved; // exec: the ctime's nanoseconds, PRATICO_EXEC_ON_ROOT, PRATICO_EXEC_INTERPRETED
     char comm[16];
     char text[PRATICO_FILE_MAX + PRATICO_ARGS_MAX];
 };

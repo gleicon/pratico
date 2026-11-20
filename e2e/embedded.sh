@@ -234,6 +234,20 @@ docker run --name e-short alpine true
 expect_eq "a container that exits at once keeps its whole record" \
     "$(activity e-short "print([(x['Kind'], x['Pid'], x.get('Path') or x.get('ExitCode')) for x in ev])")" "[('exec', 1, '/bin/true'), ('exit', 1, 0)]"
 docker rm e-short >/dev/null
+# FromImage: whether the file an exec loaded was the image's, as it was at exec. A copy,
+# a file on a volume, and an image binary the container changed are not; a script is unknown.
+docker run --name e-drift -v e-drift-v:/data alpine sh -c \
+    'cp /bin/busybox /tmp/true && /tmp/true && cp /bin/busybox /data/true && /data/true && echo "#!/bin/sh" >/tmp/s.sh && echo true >>/tmp/s.sh && chmod +x /tmp/s.sh && /tmp/s.sh && printf x >>/sbin/apk && /sbin/apk --version' >/dev/null
+expect_eq "execs are marked with whether their file came with the image" \
+    "$(activity e-drift "print(sorted({(x['Path'], x.get('FromImage')) for x in ev if x['Kind']=='exec'}))")" \
+    "[('/bin/chmod', True), ('/bin/cp', True), ('/bin/sh', True), ('/data/true', False), ('/sbin/apk', False), ('/tmp/s.sh', None), ('/tmp/true', False)]"
+docker rm e-drift >/dev/null; docker volume rm e-drift-v >/dev/null
+# After pratico rewrote the rootfs (cp into a stopped container), contents decide.
+docker create --name e-drift2 alpine /bin/true >/dev/null
+docker cp "$CP/in" e-drift2:/etc/ >/dev/null
+docker start -a e-drift2 >/dev/null
+expect_eq "a rewritten rootfs still knows the image's files" "$(activity e-drift2 "print([x.get('FromImage') for x in ev if x['Kind']=='exec'])")" "[True]"
+docker rm e-drift2 >/dev/null
 (nc -l 127.0.0.1 18094 >"$HOME_DIR/up.bin" &)
 for _ in $(seq 50); do lsof -nP -iTCP:18094 -sTCP:LISTEN >/dev/null 2>&1 && break; sleep 0.1; done
 docker exec e-c1 sh -c 'nc host.docker.internal 18094 < /tmp/big.bin'

@@ -42,7 +42,7 @@ struct MCPTools: Sendable {
              ["container", "command"]),
         tool("egress", "Where a container's connections went: each destination's name and address, and whether pratico refused it (threat feeds, or the container's egress allowlist).",
              ["container": str("Name or ID")], ["container"]),
-        tool("activity", "What ran in a container and what each process connected to, from its VM's flight recorder: every exec (path, arguments, uid, parent) and exit (code or signal), and each TCP connection with its destination's name and whether pratico refused it.",
+        tool("activity", "What ran in a container and what each process connected to, from its VM's flight recorder: every exec (path, arguments, uid, parent, and FromImage: false when the container downloaded, built, or changed that file) and exit (code or signal), and each TCP connection with its destination's name and whether pratico refused it.",
              ["container": str("Name or ID"), "limit": int("The newest events, default 500, at most 10000")], ["container"]),
         tool("logs", "The last lines of a container's output.", ["container": str("Name or ID"), "tail": int("Lines, default 200, at most 5000")], ["container"]),
         tool("list", "Containers, running or not, with image, state, ports, and whether this server made them.", ["all": bool("Include stopped ones (default true)")], []),

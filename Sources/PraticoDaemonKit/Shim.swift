@@ -521,12 +521,12 @@ final class ShimControl: Sendable {
                 throw APIError(400, "copy-out needs src and a dst in the container directory")
             }
             try blocking { try await c.copyOut(from: URL(filePath: src), to: URL(filePath: dst)) }
-        case ("POST", "copy-in"):
+        case ("POST", "copy-in-archive"):
+            // A tar+gzip the daemon made → extracted into the existing directory dst.
             guard let src = req.query["src"], Self.inside(src, files.dir), let dst = req.query["dst"] else {
-                throw APIError(400, "copy-in needs a src in the container directory and dst")
+                throw APIError(400, "copy-in-archive needs a src in the container directory and dst")
             }
-            let mode = UInt32(req.query["mode"] ?? "", radix: 8) ?? 0o644
-            try blocking { try await c.copyIn(from: URL(filePath: src), to: URL(filePath: dst), mode: mode) }
+            try blocking { try await c.copyIn(archive: URL(filePath: src), into: dst) }
         case ("GET", "stats"):
             let st = try blocking { try await c.statistics() }
             conn.json(200, Self.statsRecord(st))

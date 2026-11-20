@@ -139,7 +139,7 @@ v0.1.0 ships functional, buildable from Makefiles, and packaged as a `.dmg`.
 ## Next (decided 2026-11-20)
 
 - [x] Buildpacks (D-60): `pack build` verified against pratico (lifecycle container with the socket mounted, result in pratico's store); small gaps fixed, the rest documented as not working; docs/build.md and the site mention it only once it passes
-- [ ] Exec drift tag: each exec of a file the container added or changed (flight recorder joined with `docker diff`) is marked `FromImage: false` in the activity endpoint, the menubar, and MCP `activity`/`run`; no alert (builds do this all the time) except for containers in ask mode
+- [x] Exec drift tag (D-61): each exec of a file the container added or changed, or ran from a mount, is marked `FromImage: false` in the activity endpoint and MCP `activity`/`run`; no alert (builds do this all the time) except for containers in ask mode
 - [ ] Ask mode at the switch: an opted-in container (label, or MCP `run` flag) holds a connection to a destination not yet allowed; the menubar asks allow / deny / always for this container, answers go into the allowlist; unanswered after 30 s it is refused and recorded ("not answered"); Docker clients unaffected unless they opt in
 - [ ] Memory balloon gate: the Mac's memory held by 16 idle containers, at start and after a day of use; build the balloon (above) only if idle VMs hold memory the Mac needs
 

@@ -31,6 +31,8 @@ git subtree pull --prefix Vendor/containerization https://github.com/apple/conta
 - `Sources/Containerization/LinuxContainer.swift`: a seccomp profile no longer needs an
   OCI runtime, as vmexec installs it; it is compiled at init, so one that cannot be
   installed fails before a VM boots.
+  `copyIn(archive:into:)` (2026-11-20) streams a tar+gzip the caller made to the guest's
+  extraction as it is, so `docker cp` keeps the archive's links and owners.
 - `vminitd/Sources/vmexec/vmexec.swift`, `RunCommand.swift`, `ExecCommand.swift`:
   `installSeccomp`, where runc installs it; `exec` takes `--bundle-path` for the
   container's filter.

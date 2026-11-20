@@ -17,7 +17,7 @@ enum Activity {
     /// vminitd's Recorder writes `time`, `value`, `fileLength` and `text` at the same ones.
     enum Layout {
         static let kind = 0, pid = 4, ppid = 8, uid = 12, time = 16, value = 24
-        static let daddr = 32, sport = 36, dport = 38, fileLength = 40, argsLength = 42
+        static let daddr = 32, sport = 36, dport = 38, fileLength = 40, argsLength = 42, reserved = 44
         static let comm = 48, text = 64, size = 384
         static let textCapacity = size - text
     }
@@ -49,6 +49,15 @@ enum Activity {
             let (path, args) = text(r)
             out["Path"] = .string(path)
             out["Args"] = .array(args.map(JSON.string))
+            // The loaded file as it was at exec (recorders since D-61): what `FromImage`
+            // is decided from, then taken out of the event (ExecOrigin.tag).
+            let inode = load(r, Layout.daddr, UInt32.self), extra = load(r, Layout.reserved, UInt32.self)
+            if inode != 0 {
+                out["Inode"] = .int(Int64(inode))
+                out["ChangeTime"] = .int(Int64(clamping: load(r, Layout.value, UInt64.self)) &* 1_000_000_000 &+ Int64(extra & 0x3fff_ffff))
+                out["OnRootfs"] = .bool(extra & 0x8000_0000 != 0)
+                if extra & 0x4000_0000 != 0 { out["Interpreted"] = true }
+            }
         case .exit:
             // A wait status: the low 7 bits are the signal that killed it, else the code.
             let status = Int(value & 0xffff)
@@ -170,10 +179,13 @@ enum Activity {
 }
 
 extension ContainerService {
-    /// A container's newest `limit` events, oldest first, named from the switch's flows:
-    /// what the API and the MCP server return.
+    /// A container's newest `limit` events, oldest first, named from the switch's flows,
+    /// each exec marked with whether its file came with the image: what the API and the
+    /// MCP server return.
     func activity(_ id: String, limit: Int = Activity.maxListed) -> [JSON] {
-        Activity.join(Activity.read(shimFiles(id), limit: limit), networks.netSwitch.egress.flows(id))
+        let events = Activity.join(Activity.read(shimFiles(id), limit: limit), networks.netSwitch.egress.flows(id))
+        let files = (try? resolve(id)).flatMap { execOrigin.files(container: shimFiles(id).dir, image: imageRootfs($0)) }
+        return ExecOrigin.tag(events, files)
     }
 
     /// A container's newest `limit` egress flows, oldest first, each with the process that
