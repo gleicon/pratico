@@ -1007,15 +1007,17 @@ private func emptyDir() throws -> URL {
     let g = EgressGuard(blockThreats: true)
     g.askMode = { _ in true }
     g.allowlist = { _ in ["pypi.org"] }
+    g.questions.load = { _ in ["1.1.1.1", "files.example"] }  // answered `always`, matched exactly
     var feeds = ThreatSet()
     feeds.names["evil.example"] = "URLhaus"
     g.setFeeds(feeds)
     #expect(g.checkName("c1", "pypi.org") == .allow)
     #expect(g.checkName("c1", "example.com") == .ask("example.com"))
-    #expect(g.checkAddress("c1", 0x0101_0101, port: 53, isMac: false) == .ask("1.1.1.1"))
-    g.allowlist = { _ in ["pypi.org", "1.1.1.1"] }  // an address answered `always`
+    #expect(g.checkAddress("c1", 0x0808_0808, port: 53, isMac: false) == .ask("8.8.8.8"))
     #expect(g.checkAddress("c1", 0x0101_0101, port: 53, isMac: false) == .allow)
-    g.allowlist = { _ in ["pypi.org"] }
+    #expect(g.checkName("c1", "files.example") == .allow && g.checkName("c1", "a.files.example") == .ask("a.files.example"))
+    #expect(g.checkName("c1", "*.example.com") == .block("*.example.com is not a host name pratico asks about"))
+    #expect(!EgressGuard.isAskable("-a.com") && !EgressGuard.isAskable("a..com") && EgressGuard.isAskable("_svc.example.com"))
     #expect(g.checkName("c1", "evil.example") == .block("evil.example is listed by URLhaus"))  // listed: never asked
     g.questions.ask("c1", "evil.example", port: 80) { _ in }
     g.questions.answer(g.questions.list()[0].id, .allow)

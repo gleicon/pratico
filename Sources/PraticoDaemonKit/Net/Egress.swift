@@ -76,9 +76,7 @@ final class EgressGuard: @unchecked Sendable {
     func checkAddress(_ container: String, _ ip: UInt32, port: UInt16, isMac: Bool) -> Verdict {
         let known = lock.withLock { names[container]?[ip] }
         let feed = isMac ? nil : lock.withLock { feeds.listing(ip: ip, port: port) }
-        // An address is allowed through a name pratico resolved for it, or listed itself
-        // (as ask mode's `always` keeps a bare address).
-        if let allowed = allowlist(container), !allowed.contains(IPv4.format(ip)),
+        if let allowed = allowlist(container),
             !(known.map { Self.matches($0, allowed) } ?? false), !(isMac && Self.matches("host.docker.internal", allowed)) {
             if let feed, blockThreats { return threat(container, known ?? IPv4.format(ip), feed) }
             switch asked(container, known ?? IPv4.format(ip)) {
@@ -95,6 +93,10 @@ final class EgressGuard: @unchecked Sendable {
     /// container runs, else a question. Nil outside ask mode.
     private func asked(_ container: String, _ destination: String) -> Verdict? {
         guard askMode(container) else { return nil }
+        // The container chooses what it asks for: only a plain name or address is a
+        // question, so no answer can stand for a pattern (`*.example.com`).
+        guard Self.isAskable(destination) else { return .block("\(destination) is not a host name pratico asks about") }
+        if questions.alwaysAllowed(container).contains(destination) { return .allow }  // exact, never a pattern
         switch questions.decided(container, destination) {
         case true?: return .allow
         case false?: return .block("\(destination) was refused when asked")
@@ -156,6 +158,18 @@ final class EgressGuard: @unchecked Sendable {
     }
 
     /// `pypi.org` matches itself; `*.example.com` and `.example.com` match its subdomains.
+    /// A host name of letters, digits, and hyphens in dot-separated labels (an underscore
+    /// too, as service names use), or an IPv4 address: what ask mode asks about.
+    static func isAskable(_ s: String) -> Bool {
+        if IPv4.parse(s) != nil { return true }
+        guard (1...253).contains(s.utf8.count) else { return false }
+        let labels = s.split(separator: ".", omittingEmptySubsequences: false)
+        return labels.allSatisfy { l in
+            (1...63).contains(l.utf8.count) && l.first != "-" && l.last != "-"
+                && l.utf8.allSatisfy { ($0 >= 0x61 && $0 <= 0x7a) || ($0 >= 0x30 && $0 <= 0x39) || $0 == 0x2d || $0 == 0x5f }
+        }
+    }
+
     static func matches(_ name: String, _ patterns: [String]) -> Bool {
         let n = normalized(name)
         return patterns.contains { raw in

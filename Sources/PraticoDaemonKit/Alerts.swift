@@ -102,6 +102,9 @@ final class ContainerAlerts: @unchecked Sendable {
     /// Ask-mode containers' activity, read again when it grows: what alerts for drift.
     private let drift = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "pratico.alerts.drift"))
     private var activitySize: [String: Int] = [:]  // container → its activity log's size when last read
+    private var drifted: [String: Set<String>] = [:]  // container → paths alerted
+    /// Drift alerts one container raises at most; its activity has every one.
+    static let maxDriftAlerts = 16
     static let driftEvery: DispatchTimeInterval = .seconds(2)
     /// Events read from an ask-mode container's activity each time it grows.
     static let driftWindow = 500
@@ -134,12 +137,22 @@ final class ContainerAlerts: @unchecked Sendable {
             guard size != activitySize[rec.id] else { continue }
             activitySize[rec.id] = size
             for e in containers.activity(rec.id, limit: Self.driftWindow) where e["Kind"]?.string == "exec" && e["FromImage"]?.bool == false {
-                let path = e["Path"]?.string ?? "?"
+                // The path and command are the container's to choose: shown plain and short.
+                let path = Self.shown(e["Path"]?.string ?? "?"), command = Self.shown(e["Command"]?.string ?? "")
+                guard !drifted[rec.id, default: []].contains(path), drifted[rec.id, default: []].count < Self.maxDriftAlerts else { continue }
+                drifted[rec.id, default: []].insert(path)
                 alerts.raise(key: "drift:\(rec.id):\(path)", level: "serious", title: "\(rec.name) ran \(path), which is not from its image",
-                             detail: "\(rec.name) is in ask mode, and ran \(path) (\(e["Command"]?.string ?? "")), a file it downloaded, built, or changed, or one on a volume. Its activity has the arguments and the process that started it.")
+                             detail: "\(rec.name) is in ask mode, and ran \(path) (\(command)), a file it downloaded, built, or changed, or one on a volume. Its activity has the arguments and the process that started it.")
             }
         }
         activitySize = activitySize.filter { live.contains($0.key) }
+        drifted = drifted.filter { live.contains($0.key) }
+    }
+
+    /// Text from a container, fit for an alert: no control characters, at most 120 characters.
+    static func shown(_ s: String) -> String {
+        let plain = String(s.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }.map(Character.init))
+        return plain.count > 120 ? String(plain.prefix(119)) + "…" : plain
     }
 
     static func isLoopback(_ ip: String) -> Bool { ip.hasPrefix("127.") || ip == "::1" || ip == "localhost" }

@@ -29,8 +29,10 @@ final class EgressQuestions: @unchecked Sendable {
     init(wait: TimeInterval = ProcessInfo.processInfo.environment["PRATICO_EGRESS_ASK_SECONDS"].flatMap(TimeInterval.init) ?? EgressQuestions.timeout) {
         self.wait = min(max(wait, 0.1), Self.timeout)  // an environment value: clamped, never trusted
     }
-    /// Questions open at once, all containers: past it, a new one is refused at once.
+    /// Questions open at once, all containers, and per container: past either, a new one
+    /// is refused at once, so one container cannot crowd out another's.
     static let maxPending = 64
+    static let maxPendingPerContainer = 8
     /// Waiters on one question: connections to the same destination share it.
     static let maxWaiters = 256
 
@@ -79,6 +81,10 @@ final class EgressQuestions: @unchecked Sendable {
             }
             guard pending.count < Self.maxPending else {
                 queue.async { done(.refused("more than \(Self.maxPending) questions open")) }
+                return nil
+            }
+            guard pending.values.filter({ $0.question.container == container }).count < Self.maxPendingPerContainer else {
+                queue.async { done(.refused("more than \(Self.maxPendingPerContainer) of this container's questions open")) }
                 return nil
             }
             let q = Question(id: randomHexID().prefix(16).description, container: container, destination: destination, port: port, asked: Date())

@@ -82,9 +82,10 @@ public final class Daemon: @unchecked Sendable {
             let listed = rec.labels[MCPTools.egressLabel].map { raw in
                 raw.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
             }
-            // Ask mode: an allowlist, empty to start, that grows with the answers `always`.
+            // Ask mode: an allowlist, empty without the label; answers `always` are matched
+            // exactly beside it (EgressGuard.asked), never as patterns.
             guard rec.labels[MCPTools.askLabel] == "true" else { return listed }
-            return (listed ?? []) + guardian.questions.alwaysAllowed(id)
+            return listed ?? []
         }
         guardian.questions.load = { [containers] id in
             let file = containers.shimFiles(id).dir.appending(path: "egress-always.json")
