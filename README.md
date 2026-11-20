@@ -66,8 +66,8 @@ vminitd ───────── guest agent: process, exec, cp, stats, healt
 - **[VMs](docs/vm.md).** One VM per container, each with its own kernel and init, both
   built by pratico from pinned sources, reproducibly ([tooling](docs/tooling.md)). A shim owns the
   VM and outlives the daemon, so restarts keep running containers, output, and exit
-  codes. `docker run --rm alpine true`: P99 316 ms; ≈ 250 MB of memory per running
-  container; no VMs when nothing runs.
+  codes. `docker run --rm alpine true`: median 237 ms, P99 243 ms; ≈ 320 MB of memory
+  per running container; no VMs when nothing runs.
 - **[CPU](docs/cpu.md).** `linux/arm64`, native. `--cpus` is the VM's vCPU count
   (default 4).
 - **[Networking](docs/network.md).** pratico-net, a user-space switch in the daemon,

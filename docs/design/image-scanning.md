@@ -65,9 +65,8 @@ Configurable with `scan_block` (default `kev`):
 | `critical` | the above + Critical CVEs (CVSS ≥ 9.0) |
 
 Anything found below the threshold, plus High CVEs, is a **warning**. The default does not
-block on Critical alone: at the time of writing `alpine:latest` carries a Critical zlib CVE
-(fix released upstream, not yet in the image, not in KEV), and blocking it would stop most
-containers. **ok**: nothing found above Medium. **unknown**: no scanner ran.
+block on Critical alone: base images often carry a Critical CVE whose fix has not reached
+the image yet and that is not in KEV, and blocking those would stop most containers. **ok**: nothing found above Medium. **unknown**: no scanner ran.
 
 ## Storage
 

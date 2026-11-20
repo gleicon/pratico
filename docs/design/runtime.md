@@ -1,14 +1,14 @@
 # Embedded runtime — design
 
-Status: in progress. Steps 1–4 of the migration are done behind
-pratico's only runtime since 2026-11-12, when the `container` CLI backend was removed (SPEC D-26–D-28).
+pratico's only runtime since 2026-11-12, when the `container` CLI backend was removed
+(SPEC D-26–D-28). This note records why, how it is built, and what was learned building it.
 
 ## Why
 
-Up to v0.1.0-alpha.1 the daemon drives Apple's `container` CLI. That forces users to
-install `container`, and every limit of the CLI became a pratico limit:
+Before it, the daemon drove Apple's `container` CLI. That made users install
+`container`, and every limit of the CLI was a pratico limit:
 
-| Limit of the CLI backend | Effect today |
+| Limit of the CLI backend | Effect |
 |---|---|
 | Exit codes come only from an attached `container start` child | lost when the daemon restarts |
 | No container-name DNS without an admin-created domain | `/etc/hosts` rewritten inside each container via `exec sh`; none for distroless |
@@ -19,8 +19,7 @@ install `container`, and every limit of the CLI became a pratico limit:
 | `container stats` takes ~2 s | background sampler |
 | 50–300 ms per CLI call | ~1.2 s `docker run` |
 
-The goal: pratico ships its own runtime, needs nothing installed, and each of these rows
-disappears.
+The embedded runtime needs nothing installed, and removed each of these.
 
 ## Building blocks
 
@@ -50,14 +49,13 @@ pratico-menubar ──► pratico-daemon ──(unix socket per container)──
                     pratico-net: switch + DNS ◄──(datagram fds)────── VM NICs
 ```
 
-1. **pratico-daemon**: keeps the Docker API, records, events, health, scanning. The
-   `AppleContainer` adapter is replaced by a `Runtime` protocol, with the shim client
-   as the only implementation.
+1. **pratico-daemon**: keeps the Docker API, records, events, health, scanning, and
+   drives shims through `ShimClient`.
 2. **pratico-shim** (one process per running container, like `containerd-shim` or
    `container-runtime-linux`): owns the VM, stdio, and log files. It writes the exit
-   status to `~/.pratico/containers/<id>/exit` and serves a small control API (start,
-   stop, kill, pause, exec, resize, stats, fs ops, net config) on
-   `~/.pratico/containers/<id>/shim.sock`. It outlives daemon restarts: on startup the
+   status to `~/.pratico/containers/<id>/exit.json` and serves a small control API
+   (start, stop, kill, pause, exec, resize, stats, limits, copies, NICs) on
+   `~/.pratico/run/<short id>.sock`. It outlives daemon restarts: on startup the
    daemon reconnects to every live shim, and reads exit files for the rest. No exit code
    is ever lost.
 3. **pratico-net**: a user-space Ethernet switch in the daemon. VM NICs are
@@ -123,35 +121,24 @@ networks cannot exchange a frame, because the switch never forwards one.
     up (which clears the old default route and keeps the addresses), adds the default
     via the next network's gateway, and points `resolv.conf` at it.
   - Every pratico gateway answers DNS as the asker's own networks.
-  - VMs started by an older pratico keep a card per network (with spare cards) until
-    restarted; connecting one beyond its cards answers 409.
 - **Internet (uplink)**, in Swift, no extra binaries (decided 2026-11-09): the switch
   routes off-network traffic to pratico's own user-space stack, in the style of slirp.
   - It answers ARP, ICMP echo, and DNS.
   - It relays UDP flows over host sockets.
   - It terminates guest TCP with a minimal TCP endpoint: handshake, sequence numbers and
-    ACKs, window, retransmission, FIN and RST. Each flow becomes a SwiftNIO channel to a
-    host socket.
-- **Egress intercept** (new, from [sandwich-proxy](https://github.com/gleicon/sandwich-proxy),
-  MIT, same author): since every container connection is a NIO channel inside pratico,
-  HTTP and HTTPS flows can pass through sandwich's engine transparently. The container
-  needs no `HTTP_PROXY` setting.
-  - Per container: log, replay, breakpoint, and filter requests, and export HAR.
-  - Threat feeds (URLhaus, PhishTank, OpenPhish) can block malicious destinations.
-  - HTTPS inspection mints certificates per SNI, and is opt-in per container: pratico
-    injects its CA into that container's trust store only when asked.
-  - Agents get a record of everything a container fetched or sent.
-  - The parts embedded are sandwich's proxy pipeline, certificate manager, threat
-    feeds, and HAR code, as a library target.
+    ACKs, window, retransmission, FIN and RST. Each flow is a host socket, run on the
+    uplink's one serial queue.
+- **Egress** (D-51): every flow through the uplink is named (pratico's DNS answers, TLS
+  SNI, HTTP `Host`), recorded per container, and checked against threat feeds and the
+  container's allowlist; see [egress](../egress.md). Content is not decrypted.
 - **`--internal` networks** have no uplink port: real isolation from the internet.
 - **Port publishing**: the daemon listens on the host address and port, and relays
-  each connection through the uplink to the container's address. Loopback-only
-  publishing becomes the safe default per config.
+  each connection through the uplink to the container's address.
 - **`none`**: no NIC. **`host`**: still unsupported (a VM has its own kernel).
 
 ## Docker operations on the new runtime
 
-| Docker | Today (CLI) | Embedded |
+| Docker | CLI backend (removed) | Embedded |
 |---|---|---|
 | create | `container create` | unpack rootfs → ext4 clone; record only, no VM yet |
 | start | attached `container start` child | spawn shim; VM boots; logs written by shim |
@@ -163,7 +150,7 @@ networks cannot exchange a frame, because the switch never forwards one.
 | logs | daemon pipes | shim-owned files, survive daemon restarts |
 | images | `container image …` + Apple Keychain | `ContainerizationOCI` store in `~/.pratico/store`; `docker login` credentials in pratico's own Keychain item |
 | networks | Apple vmnet networks + `/etc/hosts` | pratico-net + embedded DNS |
-| volumes | — | ext4 volume images or virtiofs directories (volumes task) |
+| volumes | — | ext4 disk images, or virtiofs shares (D-49) |
 
 ## Licenses
 
@@ -172,37 +159,21 @@ networks cannot exchange a frame, because the switch never forwards one.
 | apple/containerization (incl. vminitd) | Apache-2.0 | ship LICENSE + NOTICE text, mark modified files, no Apple trademarks/logos |
 | SwiftNIO, grpc-swift, swift-protobuf, swift-crypto, … (its dependencies) | Apache-2.0 | same |
 | zstd | BSD-3 (dual BSD/GPLv2; use BSD) | keep copyright notice |
-| sandwich-proxy (embedded parts) | MIT | keep copyright notice |
-| SQLite.swift (sandwich's dependency) | MIT | keep copyright notice |
 | Linux kernel binary | GPL-2.0 | offer the exact source + config for the shipped binary (link to the tagged source and our config in the release) |
 | Flight recorder probes (`vm/bpf`, pratico's own) | MIT, declared `Dual MIT/GPL` to the kernel | source in this repository at the release's tag; built against the kernel's types (`vmlinux.btf`) |
 
 The app gets an "Acknowledgements" file in the DMG and in About. Naming stays
 "pratico"; Apple names are not used.
 
-## Migration (vertical slices, e2e green after each)
+## Migration
 
-1. ✅ Assets and image store: pull, list, inspect, tag, rm, save on `ContainerizationOCI`.
-2. ✅ Shim and lifecycle: create/start/stop/kill/wait/logs/rm and VM pause; exit codes
-   survive daemon restart; stdin (`run -i`, `-it`, attach), TTY resize, healthchecks.
-3. ✅ Exec (TTY, stdin, detach, env/workdir/user), cp both ways, stats, pause on the
-   agent. The freezer agent and `container stats` sampler leave with the CLI backend.
-4. pratico-net: ✅ 4a switch, IPAM, gateway, embedded DNS (+ `.pratico.internal`,
-   `host.docker.internal`), bridge/none/custom; ✅ 4b Swift uplink (UDP/ping/TCP);
-   ✅ 4c published ports.
-5. ✅ Custom networks with hot connect/disconnect (e2e: disconnect cuts traffic by IP,
-   even when the guest revives its link).
-6. ✅ Registry auth and push on the OCI client (`docker login` checks the registry and
-   keeps the login in pratico's Keychain items); scanning reads the store directly.
-7. Egress intercept: sandwich engine on container flows, per-container opt-in, menubar view.
-8. ✅ (2026-11-12) Embedded is the default; the app bundles the shim, kernel and `vminit`,
-   and ships acknowledgements. ✅ (2026-11-12) Removed `AppleContainer`, the `/etc/hosts` sync, and the anchor; update SPEC
-   (D-10/D-11/D-15/D-21/D-25) and docs.
+Eight vertical slices, 2026-11-09 to 2026-11-12, each with the Docker API unchanged and
+e2e green: the image store, the shim and lifecycle, exec/cp/stats, pratico-net (switch,
+DNS, uplink, published ports), custom networks with hot connect, registry logins and
+push, then the embedded runtime as the default and the CLI backend removed. Egress
+naming and threat feeds came after (D-51).
 
-Each slice keeps the Docker API unchanged; the CLI backend stays until slice 8, so a
-slice can switch over per operation group.
-
-## As built (steps 1–2)
+## As built
 
 | Piece | Where |
 |---|---|
@@ -214,12 +185,12 @@ slice can switch over per operation group.
 | Socket mounts | `ContainerService.shimMount` (maps `/var/run/docker.sock` to the daemon's socket, marks Unix sockets) in `Containers.swift`; the shim relays them with `UnixSocketConfiguration(direction: .into)` |
 | `/var/run/docker.sock` link | `DefaultSocket` in `Sources/PraticoCore/DefaultSocket.swift` (the `/bin/ln` launchd job and the install and remove scripts the menubar runs through an admin prompt) |
 | Shim (VM owner) | `ShimHost`, `ShimControl` in `Shim.swift`; executable `Sources/pratico-shim` |
-| Daemon side | `ShimClient` (spawn in its own session, control socket, exit watch via `DispatchSource` on the pid); `ContainerService` branches on `embedded` |
-| Tests | `make e2e-embedded` (`e2e/embedded.sh`): fake `container` binary that fails the suite if called |
+| Daemon side | `ShimClient` (spawn in its own session, control socket, exit watch via `DispatchSource` on the pid), used by `ContainerService` |
+| Tests | `make e2e-embedded` (`e2e/embedded.sh`) |
 
 Per-container files in `<home>/containers/<id>/`: `config.json` (Docker record),
 `rootfs.ext4`, `spec.json` (what the shim runs), `state.json` (pid, running/paused),
-`log` (+ `log.1`), `exit.json` (code, time, error), `shim.log`. The control socket is
+`log` (+ `log.1`), `activity.jsonl` (+ `activity.1.jsonl`, the flight recorder, D-56), `exit.json` (code, time, error; written last), `shim.log`. The control socket is
 `<home>/run/<short id>.sock`.
 
 Shim control API (HTTP over the socket, one request per connection): `POST /kill?signal=N`,
@@ -229,7 +200,7 @@ EOF), `POST /exec` (`{"args", "timeout"}` → `{"exitCode", "output"}`, used by
 healthchecks and stat), `POST /exec-stream` (hijacked; Docker's raw or multiplexed
 framing), `GET /exec-status?id=`, `POST /exec-resize?id=&h=&w=`, `POST /copy-out?src=&dst=`
 and `POST /copy-in?src=&dst=&mode=` (host paths must be inside the container directory),
-`GET /stats` (agent counters under the CLI backend's keys), `POST /nic` (a `NICChange`:
+`GET /stats` (agent counters under the CLI backend's keys), `POST /limits` (cgroup limits of a running container, D-55), `POST /nic` (a `NICChange`:
 `up` with card, address and an optional gateway, `down`, or `route`; the shim remembers
 which addresses each card holds, since it outlives daemon restarts and the agent cannot
 delete one). SIGTERM to a shim stops its
@@ -297,15 +268,16 @@ Learned while building:
     falls back to HTTP.
   - Awareness: `docker info` warnings and `RegistryConfig`, a note in pull and push
     output, the daemon log, `registries.json` and the menubar.
-- Limits: IPv4 only (IPv6 port binds are ignored); one NIC per VM, so no network count limit (Virtualization.framework refuses a fifth network device, which capped the earlier card-per-network design at 4).
+- Limits: IPv4 only (IPv6 networks, `--ip6`, and IPv6 port binds are refused); one NIC per VM, so no network count limit (Virtualization.framework refuses a fifth network device, which capped the earlier card-per-network design at 4).
 
 ## Risks and costs
 
 - Each shim process holds a VM; memory per idle container is the VM's (as today).
 - macOS 26 only (unchanged).
-- The Containerization API is pre-1.0 and changes; pin a version and track releases.
-- The Swift TCP endpoint is the largest new piece; it needs a soak test (bulk
-  transfers, many short connections, packet loss) before it replaces anything.
+- Containerization is forked whole at one commit (`Vendor/README.md`); upstream
+  security fixes are pratico's to merge.
+- The Swift TCP endpoint is the largest piece pratico owns; e2e covers bulk transfers
+  both ways and many short connections.
 - Kernel updates are pratico's responsibility (security fixes ship with app releases).
 
 ## Decisions (2026-11-09)
@@ -313,8 +285,7 @@ Learned while building:
 1. Default `bridge` matches Docker; pratico adds `.pratico.internal` names and
    `host.docker.internal` (see Networking).
 2. Kernel and `vminit` are bundled; no pratico download infrastructure.
-3. The uplink is pure Swift; no extra binaries. sandwich-proxy parts are embedded for
-   egress intercept.
+3. The uplink is pure Swift; no extra binaries.
 
 ## Start order (2026-11-14)
 

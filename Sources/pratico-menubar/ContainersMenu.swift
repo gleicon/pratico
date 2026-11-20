@@ -77,7 +77,7 @@ private struct ContainerItems: View {
         }
         Divider()
         ForEach(c.Ports.filter { $0.Type == "tcp" }, id: \.self) { p in
-            Button("Open localhost:\(p.PublicPort)") {
+            Button("Open localhost:" + String(p.PublicPort)) {  // a String: a port takes no locale grouping
                 if let url = URL(string: "http://localhost:\(p.PublicPort)") { NSWorkspace.shared.open(url) }
             }
         }

@@ -39,7 +39,7 @@ apple/containerization's configuration for Virtualization.framework
 - 1000 Hz, as virtio's device reset waits out whole timer ticks (8 ms per device at
   250 Hz), and no EFI or ACPI: the boot loader starts the kernel with a device tree.
 
-The kernel reaches init in about 70 ms (128 ms in 0.2.14).
+The kernel reaches init in about 70 ms.
 
 `scripts/build-kernel.sh` runs the build in a pratico VM from pinned inputs: the tarball
 by SHA-256, the Debian build image by digest, its packages from a fixed
@@ -154,20 +154,19 @@ latency and daemon bounds on every run.
 
 | | |
 |---|---|
-| `docker run --rm alpine true` | P99 316 ms over 50 runs, VM boot included |
-| Memory per running container | ≈ 250 MB (VM process ≈ 215 MB, shim ≈ 33 MB) |
+| `docker run --rm alpine true` | median 237 ms, P99 243 ms over 50 runs, VM boot included |
+| Memory per running container | ≈ 320 MB physical footprint (VM process ≈ 300 MB, shim ≈ 20 MB) |
 | No containers running | no VMs |
-| Daemon | ≈ 45 MB; 48 MB with 32 containers running |
-| Daemon CPU, 16 idle containers | 0.5% of a core |
+| Daemon | ≈ 31 MB physical footprint with 16 containers running |
+| Daemon CPU, 16 idle containers | 0.3% of a core |
 | `/_ping`, `/version`, `ps -a` with 100 containers | P99 ≤ 3 ms |
 
 Most of a start is the VM itself. Profiled with `PRATICO_TRACE=1` (step timings in the
-daemon log and `shim.log`, the guest console in `boot.log`), in 0.2.15: about 75 ms is
+daemon log and `shim.log`, the guest console in `boot.log`): about 75 ms is
 Virtualization.framework starting the VM, whatever the kernel or memory size; the kernel
 reaches init in about 70 ms; vminitd serves its agent about 15 ms later; the agent's
 setup (rootfs, interface, DNS) takes about 15 ms; the process start about 50 ms, 30 of
-them `vmexec` loading. The Docker CLI adds about 80 ms of its own. Measured against
-0.2.14 over interleaved runs of `docker run -d`, a start is about 70 ms shorter.
+them `vmexec` loading. The Docker CLI adds about 80 ms of its own.
 
 ## Why one VM per container
 
