@@ -193,6 +193,8 @@ final class ScanService: @unchecked Sendable {
     let alerts: AlertLog
     let events: EventBus
     let dbDir: URL
+    /// Archives being scanned; one daemon per home, so what a stopped one left is cleared at start.
+    let work: URL
     private let queue = DispatchQueue(label: "pratico.scan")
     private let lock = NSLock()
     private var pending: Set<String> = []
@@ -216,7 +218,10 @@ final class ScanService: @unchecked Sendable {
         self.events = events
         dir = home.appending(path: "scans", directoryHint: .isDirectory)
         dbDir = home.appending(path: "scan-db", directoryHint: .isDirectory)
+        work = home.appending(path: "scan-work", directoryHint: .isDirectory)
         self.alerts = alerts
+        try? FileManager.default.removeItem(at: work)
+        try? FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: dbDir, withIntermediateDirectories: true)
         loadBlocked()
@@ -371,7 +376,7 @@ final class ScanService: @unchecked Sendable {
 
     private func scan(_ img: LocalImage) {
         let fm = FileManager.default
-        let archive = fm.temporaryDirectory.appending(path: "pratico-scan-\(UUID().uuidString).tar")
+        let archive = work.appending(path: "\(UUID().uuidString).tar")
         defer { try? fm.removeItem(at: archive) }
         do { try images.exportArchive(img.id, to: archive) } catch { return }
 

@@ -547,9 +547,17 @@ private let grypeSample = Data(#"""
     #expect(ScanParsers.custom(Data("not json".utf8), source: "mine") == nil)
 }
 
+/// Where the helpers below put their files: one directory per test run, gone at exit.
+private let scratch: URL = {
+    let dir = FileManager.default.temporaryDirectory.appending(path: "pratico-tests-\(UUID().uuidString)")
+    try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    atexit { try? FileManager.default.removeItem(at: scratch) }
+    return dir
+}()
+
 /// An archive of `members`: (path, kind) with kind "d", "f:<content>", or "l:<target>".
 private func tarFile(_ members: [(String, String)]) throws -> URL {
-    let file = FileManager.default.temporaryDirectory.appending(path: "pratico-tar-\(UUID().uuidString).tar")
+    let file = scratch.appending(path: "tar-\(UUID().uuidString).tar")
     let w = try ArchiveWriter(configuration: ArchiveWriterConfiguration(format: .pax, filter: .none))
     try w.open(file: file)
     for (path, kind) in members {
@@ -578,7 +586,7 @@ private func tarFile(_ members: [(String, String)]) throws -> URL {
 }
 
 private func emptyDir() throws -> URL {
-    let dir = FileManager.default.temporaryDirectory.appending(path: "pratico-x-\(UUID().uuidString)")
+    let dir = scratch.appending(path: "x-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     return dir
 }
