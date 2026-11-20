@@ -161,9 +161,12 @@ rebuilds the image from its own files first (the daemon log says so).
 `--memory` (default `default_memory`, 1024 MiB) sets the guest's RAM, plus 128 MiB for
 the guest kernel and init, and the container's `memory.max`. It is a ceiling: the Mac
 backs only the pages the guest touches. `--memory-reservation`, `--memory-swap`, and
-`--pids-limit` are the cgroup's `memory.low`, `memory.swap.max`, and `pids.max`. There
-is no memory balloon, so page cache the guest fills comes back when the container
-stops, not while it runs.
+`--pids-limit` are the cgroup's `memory.low`, `memory.swap.max`, and `pids.max`. Memory
+the guest touched stays the Mac's to back until the container stops, even after the
+guest frees it: 16 idle containers that each wrote and read 512 MiB held 13 GiB instead
+of 4.7 GiB. Virtualization.framework's memory balloon, its only way to take memory back,
+was tried and returned none of it (the guest's 4 KiB pages within the Mac's 16 KiB ones),
+so pratico has none. Stopping or restarting a container gives its memory back.
 
 ## Resource use
 
