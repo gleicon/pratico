@@ -180,6 +180,8 @@ other output is a failed run and keeps that scanner's earlier findings. Design:
 
 - **Containers**: running containers with image, CPU, memory, health, and ports; open a
   published port, stop, restart. The icon shows the count.
+- **Connections**: where every container connected, which process opened each
+  connection, and what pratico refused and why ([egress](docs/egress.md)).
 - **Alerts**: blocked images, ports published beyond loopback, containers turning
   unhealthy. Each becomes one notification.
 - **Disk**: allocated size of images, leftover layers, running and stopped containers,

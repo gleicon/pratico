@@ -7,7 +7,30 @@ final class AlertLog: @unchecked Sendable {
     private let lock = NSLock()
     static let limit = 50
 
-    init(path: URL) { self.path = path }
+    init(path: URL) {
+        self.path = path
+        mergeUnkeyed()
+    }
+
+    /// Alerts written before alerts had a `key` repeat each rescan's verdict: each gets its
+    /// title as key, and the newest of a title is kept.
+    private func mergeUnkeyed() {
+        lock.lock()
+        defer { lock.unlock() }
+        let list = read()
+        guard list.contains(where: { $0["key"] == nil }) else { return }
+        var seen = Set<String>()
+        var kept: [JSON] = []
+        for alert in list.reversed() {
+            guard case .object(var fields) = alert else { continue }
+            let key = fields["key"]?.string ?? "title:" + (fields["title"]?.string ?? "")
+            guard seen.insert(key).inserted else { continue }
+            fields["key"] = .string(key)
+            kept.append(.object(fields))
+        }
+        assert(kept.count <= list.count, "merging added alerts")
+        write(kept.reversed())
+    }
 
     /// Records the alert unless one with `key` is already there. With `replace`, the new
     /// one takes its place instead (a rescan's verdict supersedes the last one).

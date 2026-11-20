@@ -90,3 +90,16 @@ private func record(kind: UInt32, pid: UInt32 = 7, ppid: UInt32 = 1, value: UInt
     #expect(Activity.join([connect], []) == [connect])
     #expect(Activity.join([connect], [flow(-Activity.joinWindow - 1, name: "stale.example")]) == [connect])
 }
+
+@Test func activityNamesTheProcessBehindEachFlow() throws {
+    let open = try #require(Activity.decode(record(kind: 3, pid: 9, value: 1, daddr: [1, 2, 3, 4], sport: 40_000, dport: 443, comm: "curl")))
+    let refused = try #require(Activity.decode(record(kind: 3, pid: 11, value: 7, daddr: [5, 6, 7, 8], dport: 80, comm: "wget")))
+    let at = try #require(open["Time"]?.string.flatMap(Timestamp.parse))
+    func flow(_ ip: String, _ port: UInt16, _ source: UInt16, proto: String = "tcp") throws -> EgressGuard.Flow {
+        .init(time: at.addingTimeInterval(1), proto: proto, ip: try #require(IPv4.parse(ip)), port: port, sourcePort: source, name: nil, blocked: false, reason: nil)
+    }
+    let flows = [try flow("1.2.3.4", 443, 40_000), try flow("5.6.7.8", 80, 50_000), try flow("1.2.3.4", 443, 40_001), try flow("9.9.9.9", 53, 40_000, proto: "udp")]
+    let found = Activity.processes(flows, [open, refused])
+    #expect(found.map { $0?.command } == ["curl", "wget", nil, nil])  // exact, port-less refused, other port, not TCP
+    #expect(found[0]?.pid == 9 && found[1]?.pid == 11)
+}

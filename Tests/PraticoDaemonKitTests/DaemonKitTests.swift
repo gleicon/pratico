@@ -871,3 +871,17 @@ private func emptyDir() throws -> URL {
     let parts = line?.dropFirst("KERNEL_VERSION=".count).split(separator: ".").compactMap { Int($0) } ?? []
     #expect(parts.count == 3 && parts[0] == RunOptions.guestKernel.major && parts[1] == RunOptions.guestKernel.minor)
 }
+
+@Test func alertsWithoutKeysMergeByTitle() throws {
+    let file = FileManager.default.temporaryDirectory.appending(path: "alerts-\(UUID().uuidString).json")
+    defer { try? FileManager.default.removeItem(at: file) }
+    let old: JSON = [["time": "1", "level": "warning", "title": "nginx: 264 finding(s)", "detail": "a"],
+                     ["time": "2", "level": "warning", "title": "alpine: 1 finding(s)", "detail": "b"],
+                     ["time": "3", "level": "warning", "title": "nginx: 264 finding(s)", "detail": "c"],
+                     ["time": "4", "level": "warning", "key": "port:x", "title": "web is reachable", "detail": "d"]]
+    try old.encoded().write(to: file)
+    _ = AlertLog(path: file)
+    let list = try #require(JSON.parse(try Data(contentsOf: file))?.array)
+    #expect(list.map { $0["detail"]?.string } == ["b", "c", "d"])  // newest of each title, order kept
+    #expect(list.allSatisfy { $0["key"] != nil })
+}

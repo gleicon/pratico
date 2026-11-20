@@ -13,8 +13,13 @@ ClientHello's server name (SNI) for HTTPS, or from the HTTP `Host` header, so it
 there even when the container resolved the name elsewhere. Traffic is not decrypted:
 pratico sees which host, not which URL.
 
-- Menubar: **Containers › (a container) › Network Activity…**
-- API: `GET /pratico/egress?container=NAME`
+- Menubar: **Connections…** (or **Containers › (a container) › Connections…**): a table of
+  every container's connections, the same process reaching the same destination folded
+  into one row with its count, newest first; search, **Refused Only**, and for the
+  selected row the refusal's reason, the addresses, the process and its PIDs, and the
+  source ports.
+- API: `GET /pratico/egress[?container=NAME]`. Each TCP flow carries `Command` and `Pid`,
+  the process that opened it, where the flight recorder saw it.
 - Agents: the MCP `egress` tool, and the `connections` a `run` reports
   ([agents](agents.md)).
 - The process behind each TCP connection: the [flight recorder](vm.md#flight-recorder),

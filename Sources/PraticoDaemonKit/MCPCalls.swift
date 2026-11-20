@@ -59,7 +59,7 @@ extension MCPTools {
         }
         let lines = containers.logLines(rec.id)
         // Read before the container (and its records of connections and activity) is removed.
-        let connections = containers.networks.netSwitch.egress.flows(rec.id).suffix(200).map(Daemon.flowJSON)
+        let connections = containers.connections(rec.id, limit: 200)
         let activity = containers.activity(rec.id, limit: Self.runActivity)
         return ["exit_code": code.map { .int(Int64($0)) } ?? .null, "timed_out": .bool(timedOut),
                 "seconds": .double((Date().timeIntervalSince(started) * 10).rounded() / 10),
@@ -105,9 +105,8 @@ extension MCPTools {
 
     func egress(_ args: JSON) throws -> JSON {
         let rec = try containers.resolve(try Self.required(args, "container"))
-        let flows = containers.networks.netSwitch.egress.flows(rec.id).suffix(500)
         return ["container": .string(rec.name), "allowlist": rec.labels[Self.egressLabel].map(JSON.string) ?? .null,
-                "flows": .array(flows.map(Daemon.flowJSON))]
+                "flows": .array(containers.connections(rec.id, limit: 500))]
     }
 
     func activity(_ args: JSON) throws -> JSON {

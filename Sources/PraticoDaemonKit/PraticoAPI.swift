@@ -76,9 +76,8 @@ extension Daemon {
     /// `GET /pratico/egress?container=`: where a container's connections went, newest last.
     func egress(_ ref: String?) throws -> JSON {
         let recs = try ref.map { [try containers.resolve($0)] } ?? containers.all()
-        let guardian = networks.netSwitch.egress
         return .array(recs.map { rec in
-            ["Id": .string(rec.id), "Name": .string(rec.name), "Flows": .array(guardian.flows(rec.id).map(Self.flowJSON))]
+            ["Id": .string(rec.id), "Name": .string(rec.name), "Flows": .array(containers.connections(rec.id))]
         })
     }
 
@@ -95,10 +94,11 @@ extension Daemon {
         return ["Id": .string(rec.id), "Name": .string(rec.name), "Events": .array(containers.activity(rec.id, limit: n))]
     }
 
-    static func flowJSON(_ f: EgressGuard.Flow) -> JSON {
+    static func flowJSON(_ f: EgressGuard.Flow, process: (command: String, pid: Int64)?) -> JSON {
         ["Time": .string(Timestamp.format(f.time)), "Proto": .string(f.proto), "Address": .string(IPv4.format(f.ip)),
          "Port": .int(Int64(f.port)), "SourcePort": .int(Int64(f.sourcePort)), "Name": f.name.map(JSON.string) ?? .null, "Blocked": .bool(f.blocked),
-         "Reason": f.reason.map(JSON.string) ?? .null]
+         "Reason": f.reason.map(JSON.string) ?? .null,
+         "Command": process.map { .string($0.command) } ?? .null, "Pid": process.map { .int($0.pid) } ?? .null]
     }
 
     /// `GET /pratico/containers`: the menubar's list of running containers (FR-31, FR-40),

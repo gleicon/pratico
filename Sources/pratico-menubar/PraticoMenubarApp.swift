@@ -18,6 +18,11 @@ struct PraticoMenubarApp: App {
             ScanResultsView(daemon: daemon)
         }
         .defaultLaunchBehavior(.suppressed)  // only from the menu
+        // Where containers connected, and which process opened each connection.
+        Window("Connections", id: "connections") {
+            ConnectionsView(daemon: daemon)
+        }
+        .defaultLaunchBehavior(.suppressed)
         // ⌘, (SPEC FR-34): config.toml as a form.
         Settings {
             SettingsView(daemon: daemon)
@@ -70,6 +75,7 @@ struct StatusMenu: View {
         if daemon.isRunning {
             Divider()
             ScanResultsButton(title: daemon.scanResultsTitle)
+            ConnectionsButton(daemon: daemon)
         }
         // D-29: trust beyond the system's roots, and kept logins, in plain view.
         if daemon.isRunning {

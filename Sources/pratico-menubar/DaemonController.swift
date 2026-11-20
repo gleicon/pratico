@@ -20,6 +20,8 @@ final class DaemonController {
     private(set) var disk: DiskUsage?
     var scanners: ScannerReport?
     var egress: EgressReport?
+    /// The container the Connections window shows, set by the menu that opens it.
+    var connectionsFocus: String?
     private(set) var scanSummary: ScanSummary?
     private(set) var containers: [RunningContainer] = []
     /// Whether one of the app's menus is open, tracked from AppKit's menu notifications.

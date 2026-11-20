@@ -79,8 +79,10 @@ struct SettingsView: View {
                 LabeledContent(Self.labels[key.name] ?? key.name) {
                     VStack(alignment: .leading, spacing: 2) {
                         control(key)
-                        Text(key.summary).font(.caption).foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
+                        if key.summary != Self.toggleTitles[key.name] {  // a caption that only repeats the toggle is noise
+                            Text(key.summary).font(.caption).foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                         // FR-34: where the value comes from.
                         if model.isOverridden(key.name) {
                             HStack(spacing: 6) {

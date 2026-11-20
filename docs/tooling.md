@@ -21,6 +21,7 @@ repository. None of it is part of the app; the app ships what these produce.
 | [`vm/init/vminit.sha256`](../vm/init/vminit.sha256) | The init image's manifest the source must build into. |
 | [`scripts/fetch-runtime-assets.sh`](../scripts/fetch-runtime-assets.sh) | `make assets`: builds both once (then uses `.cache`), checks them against their hashes, and puts them where the app and tests take them. |
 | [`scripts/acknowledgements.sh`](../scripts/acknowledgements.sh) | The app's Acknowledgements: licenses, and the kernel's GPL-2.0 source offer naming the tarball, its hash, and these build files. |
+| [`scripts/app-icon.swift`](../scripts/app-icon.swift) | Draws `Support/AppIcon.icns`, the app's icon, from pratico's mark (the site's logo). Run it when the mark changes; the result is committed. |
 | [`Vendor/README.md`](../Vendor/README.md) | Where apple/containerization comes from, how upstream fixes are merged, and every file pratico changed. |
 
 Both builds need a running pratico (they build in its VMs): the first build of each

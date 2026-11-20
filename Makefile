@@ -59,6 +59,7 @@ app: build assets
 	rm -rf "$(APP)"
 	mkdir -p "$(APP)/Contents/MacOS" "$(APP)/Contents/Resources"
 	cp Support/Info.plist "$(APP)/Contents/Info.plist"
+	cp Support/AppIcon.icns "$(APP)/Contents/Resources/"
 	cp "$(BIN_DIR)/pratico-menubar" "$(BIN_DIR)/pratico-daemon" "$(BIN_DIR)/pratico-shim" "$(APP)/Contents/MacOS/"
 	cp -R "$(ASSETS_DIR)" "$(APP)/Contents/Resources/runtime"
 	scripts/acknowledgements.sh "$(APP)/Contents/Resources/Acknowledgements.txt"

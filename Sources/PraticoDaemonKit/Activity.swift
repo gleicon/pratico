@@ -83,26 +83,45 @@ enum Activity {
     /// records an allowed TCP flow at its first bytes, which a server-first protocol delays.
     static let joinWindow: TimeInterval = 600
 
-    /// Each TCP connect named from the switch's flow for it (D-56): the one with the same
-    /// address, port, and source port nearest in time. A connection that never opened has
-    /// no source port (the kernel clears it), so it is matched on address and port alone.
-    /// `Name`, `Blocked` and `Reason` are added only where the daemon still holds that flow
+    /// The recorder's connects and the switch's flows meet on address, port, and source port
+    /// (D-57). A connection that never opened has no source port in the guest (the kernel
+    /// clears it), so a connect with port 0 meets any flow to that address and port.
+    struct ConnectionKey: Hashable {
+        var ip: UInt32, port: UInt16, sourcePort: UInt16
+
+        init(ip: UInt32, port: UInt16, sourcePort: UInt16) { (self.ip, self.port, self.sourcePort) = (ip, port, sourcePort) }
+
+        init?(connect event: JSON) {
+            guard event["Kind"]?.string == "connect", let ip = event["Address"]?.string.flatMap(IPv4.parse),
+                  let port = event["Port"]?.int, let source = event["SourcePort"]?.int else { return nil }
+            self.init(ip: ip, port: UInt16(clamping: port), sourcePort: UInt16(clamping: source))
+        }
+
+        var anySource: ConnectionKey { ConnectionKey(ip: ip, port: port, sourcePort: 0) }
+    }
+
+    /// The candidate nearest `time`, if within `joinWindow`.
+    static func nearest<T>(_ candidates: [T], to time: Date, _ timeOf: (T) -> Date) -> T? {
+        guard let best = candidates.min(by: { abs(timeOf($0).timeIntervalSince(time)) < abs(timeOf($1).timeIntervalSince(time)) }),
+              abs(timeOf(best).timeIntervalSince(time)) <= joinWindow else { return nil }
+        return best
+    }
+
+    /// Each TCP connect named from the switch's flow for it, nearest in time. `Name`,
+    /// `Blocked` and `Reason` are added only where the daemon still holds that flow
     /// (`EgressGuard.maxFlows`, since it started); the guest's own record stays as it was.
     static func join(_ events: [JSON], _ flows: [EgressGuard.Flow]) -> [JSON] {
-        struct Key: Hashable { var ip: UInt32, port: UInt16, sourcePort: UInt16 }
         precondition(flows.count <= EgressGuard.maxFlows, "\(flows.count) flows, past their bound")
-        var byKey: [Key: [EgressGuard.Flow]] = [:]
+        var byKey: [ConnectionKey: [EgressGuard.Flow]] = [:]
         for flow in flows where flow.proto == "tcp" {
-            byKey[Key(ip: flow.ip, port: flow.port, sourcePort: flow.sourcePort), default: []].append(flow)
-            byKey[Key(ip: flow.ip, port: flow.port, sourcePort: 0), default: []].append(flow)  // source port 0: any
+            let key = ConnectionKey(ip: flow.ip, port: flow.port, sourcePort: flow.sourcePort)
+            byKey[key, default: []].append(flow)
+            byKey[key.anySource, default: []].append(flow)
         }
         let out = events.map { event -> JSON in
-            guard event["Kind"]?.string == "connect", case .object(var fields) = event,
-                  let ip = event["Address"]?.string.flatMap(IPv4.parse), let port = event["Port"]?.int, let source = event["SourcePort"]?.int,
+            guard let key = ConnectionKey(connect: event), case .object(var fields) = event,
                   let time = event["Time"]?.string.flatMap(Timestamp.parse),
-                  let candidates = byKey[Key(ip: ip, port: UInt16(clamping: port), sourcePort: UInt16(clamping: source))],
-                  let flow = candidates.min(by: { abs($0.time.timeIntervalSince(time)) < abs($1.time.timeIntervalSince(time)) }),
-                  abs(flow.time.timeIntervalSince(time)) <= joinWindow
+                  let flow = nearest(byKey[key] ?? [], to: time, \.time)
             else { return event }
             fields["Name"] = flow.name.map(JSON.string) ?? .null
             fields["Blocked"] = .bool(flow.blocked)
@@ -110,6 +129,26 @@ enum Activity {
             return .object(fields)
         }
         assert(out.count == events.count, "the join dropped or added events")
+        return out
+    }
+
+    /// The other way: the process behind each TCP flow, as `(Command, Pid)` from the
+    /// recorder's connect for it; nil for other protocols and flows it has no record of.
+    static func processes(_ flows: [EgressGuard.Flow], _ events: [JSON]) -> [(command: String, pid: Int64)?] {
+        precondition(flows.count <= EgressGuard.maxFlows, "\(flows.count) flows, past their bound")
+        var byKey: [ConnectionKey: [(time: Date, command: String, pid: Int64)]] = [:]
+        for event in events {
+            guard let key = ConnectionKey(connect: event), let time = event["Time"]?.string.flatMap(Timestamp.parse),
+                  let command = event["Command"]?.string, let pid = event["Pid"]?.int else { continue }
+            byKey[key, default: []].append((time, command, pid))
+        }
+        let out = flows.map { flow -> (command: String, pid: Int64)? in
+            guard flow.proto == "tcp" else { return nil }
+            let key = ConnectionKey(ip: flow.ip, port: flow.port, sourcePort: flow.sourcePort)
+            let candidates = (byKey[key] ?? []) + (byKey[key.anySource] ?? [])
+            return nearest(candidates, to: flow.time, \.time).map { ($0.command, $0.pid) }
+        }
+        assert(out.count == flows.count, "a process per flow")
         return out
     }
 
@@ -130,6 +169,15 @@ extension ContainerService {
     /// what the API and the MCP server return.
     func activity(_ id: String, limit: Int = Activity.maxListed) -> [JSON] {
         Activity.join(Activity.read(shimFiles(id), limit: limit), networks.netSwitch.egress.flows(id))
+    }
+
+    /// A container's newest `limit` egress flows, oldest first, each with the process that
+    /// opened it where the recorder saw it: what the API, the menubar and MCP list.
+    func connections(_ id: String, limit: Int = EgressGuard.maxFlows) -> [JSON] {
+        precondition(limit > 0 && limit <= EgressGuard.maxFlows, "limit \(limit) outside 1...\(EgressGuard.maxFlows)")
+        let flows = Array(networks.netSwitch.egress.flows(id).suffix(limit))
+        let processes = Activity.processes(flows, Activity.read(shimFiles(id)))
+        return zip(flows, processes).map { Daemon.flowJSON($0, process: $1) }
     }
 }
 

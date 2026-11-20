@@ -217,6 +217,8 @@ expect_eq "the process behind a connection, and whether it connected" \
     "$(activity e-rec "print(sorted((x['Command'], x['Port'], x['Connected'], x['SourcePort']>0) for x in ev if x['Kind']=='connect'))")" "[('wget', 1, False, False), ('wget', $WWW_PORT, True, True)]"
 expect_eq "a connection named from the switch's flow for it" \
     "$(activity e-rec "print([(x['Port'], x.get('Name'), x.get('Blocked')) for x in ev if x['Kind']=='connect' and x['Connected']])")" "[($WWW_PORT, 'host.docker.internal', False)]"
+expect_eq "the egress record names the process behind its flow" \
+    "$(curl -s --unix-socket "$SOCK" 'http://d/pratico/egress?container=e-rec' | python3 -c "import json,sys; print([(f['Command'], f['Port']) for f in json.load(sys.stdin)[0]['Flows'] if f['Proto']=='tcp' and not f['Blocked']])")" "[('wget', $WWW_PORT)]"
 docker exec e-rec ls / >/dev/null
 eventually "docker exec is recorded" sh -c "curl -s --unix-socket '$SOCK' http://d/pratico/containers/e-rec/activity | grep -q '\"Path\": *\"/bin/ls\"'"
 expect_eq "nothing from outside the container (vminitd, vmexec, kernel threads)" "$(activity e-rec "print([x['Path'] for x in ev if x['Kind']=='exec' and 'vm' in x['Path']])")" "[]"

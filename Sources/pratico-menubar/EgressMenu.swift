@@ -82,37 +82,3 @@ extension DaemonController {
         alert.runModal()
     }
 }
-
-/// `GET /pratico/egress?container=`: one container's connections.
-struct EgressFlows: Decodable {
-    struct Flow: Decodable {
-        var Time: String
-        var Proto: String
-        var Address: String
-        var Port: Int
-        var Name: String?
-        var Blocked: Bool
-        var Reason: String?
-    }
-    var Flows: [Flow]
-}
-
-extension DaemonController {
-    /// Where a container connected, newest first, refused ones marked: the 40 latest.
-    func showNetworkActivity(_ c: RunningContainer) {
-        Task {
-            let path = "/pratico/egress?container=" + (c.Id.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? c.Id)
-            let flows = await DaemonProbe.fetch(path, as: [EgressFlows].self, timeout: 5)?.first?.Flows ?? []
-            let lines = flows.suffix(40).reversed().map { f in
-                let target = (f.Name.map { "\($0) (\(f.Address))" } ?? f.Address) + ":\(f.Port)"
-                let mark = f.Blocked ? "✗" : "✓"
-                return "\(mark) \(f.Proto) \(target)" + (f.Reason.map { " — \($0)" } ?? "")
-            }
-            let alert = NSAlert()
-            alert.messageText = "\(c.Name): network activity"
-            alert.informativeText = lines.isEmpty ? "No connections beyond its networks yet." : lines.joined(separator: "\n")
-            NSApp.activate()
-            alert.runModal()
-        }
-    }
-}

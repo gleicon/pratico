@@ -104,7 +104,8 @@ What it does not see, or show:
 - Containers started by pratico 0.2.17 or earlier have no recorder until restarted.
 
 Agents read the same events through the MCP server's `activity` tool, and `run` returns
-them with its result ([agents](agents.md)).
+them with its result ([agents](agents.md)). The menubar's **Connections** window shows the
+process beside each connection ([egress](egress.md)).
 
 ## Lifecycle
 
