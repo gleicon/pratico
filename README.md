@@ -103,7 +103,8 @@ vminitd ───────── guest agent: process, exec, cp, stats, healt
   started in its container (path and arguments), every exit, and the process behind each
   TCP connection and UDP destination, named from the egress record, from BPF probes pratico builds for its
   kernel; kept after the container stops (`GET /pratico/containers/{id}/activity`, and
-  the MCP server's `activity` tool).
+  the MCP server's `activity` tool). A program that did not come with the image is
+  marked `FromImage: false`.
 - **[Agents](docs/agents.md).** An MCP endpoint on 127.0.0.1 (off until `mcp = true`,
   bearer token): agents check images before using them, run commands in throwaway VMs,
   and start services, and can change only the containers they made.
