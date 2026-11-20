@@ -13,7 +13,7 @@ repository. None of it is part of the app; the app ships what these produce.
 | [`vm/kernel/vmlinux.sha256`](../vm/kernel/vmlinux.sha256) | The kernel the source must build into; `make assets` checks it. The build also writes the kernel's types (`vmlinux.btf`) for the probes. |
 | [`vm/snapshot.sh`](../vm/snapshot.sh) | Points a build container's apt at Debian's archive as of a fixed date; the kernel and probe builds share it. |
 | [`scripts/build-bpf.sh`](../scripts/build-bpf.sh) | Builds the flight recorder's probes in a pratico VM with clang and bpftool from that snapshot, against the shipped kernel's `vmlinux.btf` (checked by the kernel's hash). Same `REPRO` and `UPDATE`. |
-| [`vm/bpf/recorder.bpf.c`](../vm/bpf/recorder.bpf.c), [`recorder.h`](../vm/bpf/recorder.h) | The probes (exec, exit, TCP connect on raw tracepoints) and the record they write, which vminitd and the shim read at the same offsets. |
+| [`vm/bpf/recorder.bpf.c`](../vm/bpf/recorder.bpf.c), [`recorder.h`](../vm/bpf/recorder.h) | The probes (exec, exit, TCP connect, UDP destination, on raw tracepoints) and the record they write, which vminitd and the shim read at the same offsets. |
 | [`vm/bpf/build.sh`](../vm/bpf/build.sh) | Runs inside that VM: writes the kernel's types as C, compiles without debug info, so two builds match. |
 | [`vm/bpf/recorder.sha256`](../vm/bpf/recorder.sha256) | The probe object the source must build into; the init build checks it before putting it in the image. |
 | [`scripts/build-init.sh`](../scripts/build-init.sh) | Builds the guest init (`vminitd`, `vmexec`) in a pratico VM with Swift 6.3.3 and its static Linux SDK (image by digest, SDK by SHA-256). Same `REPRO` and `UPDATE`. |
@@ -22,6 +22,7 @@ repository. None of it is part of the app; the app ships what these produce.
 | [`scripts/fetch-runtime-assets.sh`](../scripts/fetch-runtime-assets.sh) | `make assets`: builds both once (then uses `.cache`), checks them against their hashes, and puts them where the app and tests take them. |
 | [`scripts/acknowledgements.sh`](../scripts/acknowledgements.sh) | The app's Acknowledgements: licenses, and the kernel's GPL-2.0 source offer naming the tarball, its hash, and these build files. |
 | [`scripts/app-icon.swift`](../scripts/app-icon.swift) | Draws `Support/AppIcon.icns`, the app's icon, from pratico's mark (the site's logo). Run it when the mark changes; the result is committed. |
+| [`scripts/dmg.sh`](../scripts/dmg.sh), [`scripts/dmg-background.swift`](../scripts/dmg-background.swift) | The disk image: the app, Applications, the read-me (`Support/dmg-README.txt`) and the acknowledgements, laid out by Finder over a background the Swift script draws (`Support/dmg-background.tiff`, committed) at the icon positions `dmg.sh` uses. |
 | [`Vendor/README.md`](../Vendor/README.md) | Where apple/containerization comes from, how upstream fixes are merged, and every file pratico changed. |
 
 Both builds need a running pratico (they build in its VMs): the first build of each

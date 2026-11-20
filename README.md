@@ -19,12 +19,25 @@ Website: <https://gleicon.github.io/pratico/> · License: MIT
 1. Download `Pratico-<version>.dmg` from
    [Releases](https://github.com/gleicon/pratico/releases) and drag `Pratico.app` to
    Applications.
-2. The app is ad-hoc signed, not notarized. Approve the first launch with **Open Anyway**
-   in System Settings › Privacy & Security, or:
+2. The app is not notarized by Apple yet, so macOS stops its first launch. Approve it
+   once, either way:
+   - **Without Terminal:** open Pratico, click **Done** when macOS says it cannot check
+     it, then in System Settings › Privacy & Security click **Open Anyway** (under
+     Security), enter your password, and confirm with **Open Anyway**.
+   - **With Terminal, before opening the disk image:** remove the download's quarantine,
+     then open it and drag Pratico to Applications; it opens without a prompt.
 
-   ```sh
-   xattr -dr com.apple.quarantine /Applications/Pratico.app
-   ```
+     ```sh
+     xattr -d com.apple.quarantine ~/Downloads/Pratico-*.dmg
+     ```
+
+     With Pratico already in Applications, `xattr -dr com.apple.quarantine
+     /Applications/Pratico.app` does the same, unless macOS answers "Operation not
+     permitted" (it protects apps from Terminal unless Terminal has **App Management** in
+     Privacy & Security); then use the way without Terminal.
+
+   Each release has a `.sha256` beside the DMG: `shasum -a 256 -c Pratico-<version>.dmg.sha256`
+   in the download folder checks it.
 
 3. Open Pratico. The menubar item starts the daemon, which then starts at login
    (`start_at_login`). Status › View Daemon Log opens `~/.pratico/daemon.log`.
@@ -86,7 +99,7 @@ vminitd ───────── guest agent: process, exec, cp, stats, healt
   key) are refused; a label limits a container to the names it lists.
 - **[Flight recorder](docs/vm.md#flight-recorder).** Each VM records every program
   started in its container (path and arguments), every exit, and the process behind each
-  TCP connection, named from the egress record, from BPF probes pratico builds for its
+  TCP connection and UDP destination, named from the egress record, from BPF probes pratico builds for its
   kernel; kept after the container stops (`GET /pratico/containers/{id}/activity`, and
   the MCP server's `activity` tool).
 - **[Agents](docs/agents.md).** An MCP endpoint on 127.0.0.1 (off until `mcp = true`,
@@ -153,8 +166,9 @@ the scanners that reported it.
 - Scan Results (menubar) lists findings per image with severity, CVSS, EPSS, KEV and
   malware flags, fixed versions, and the reporting scanners. It exports SBOMs and offers
   **Allow This Image…**, which adds the image ID to `scan_allow` and unblocks it.
-- The menubar icon changes for blocked images and for images with critical or high
-  findings, malware, or KEV entries. Medium and low findings are listed, not flagged.
+- The menubar's mark turns its fourth tile into a dot for a blocked image (and for refused
+  destinations and unhealthy containers). Other findings are listed in the menu and Scan
+  Results, not flagged on the icon.
 - The Scanners menu shows what is installed and gives the Homebrew command for the rest.
 
 ### Custom scanners
@@ -179,7 +193,10 @@ other output is a failed run and keeps that scanner's earlier findings. Design:
 ## Menubar
 
 - **Containers**: running containers with image, CPU, memory, health, and ports; open a
-  published port, stop, restart. The icon shows the count.
+  published port, stop, restart.
+- **The icon**: pratico's mark, outlined when the daemon is stopped, filled when it runs,
+  its fourth tile a dot when something needs action (a blocked image, a refused
+  destination, an unhealthy container). Nothing is drawn beside it.
 - **Connections**: where every container connected, which process opened each
   connection, and what pratico refused and why ([egress](docs/egress.md)).
 - **Alerts**: blocked images, ports published beyond loopback, containers turning

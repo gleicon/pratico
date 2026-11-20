@@ -371,8 +371,8 @@
       <ol>
         <li>
           <h3>1. Download and open</h3>
-          <p>Get the <a href="https://github.com/gleicon/pratico/releases/latest">latest release</a> and drag Pratico to Applications. The app is not notarized: approve it once with <strong>Open Anyway</strong> in System Settings › Privacy &amp; Security, or run:</p>
-          <div class="code"><button class="copy" type="button" hidden>Copy</button><pre><code>xattr -dr com.apple.quarantine /Applications/Pratico.app</code></pre></div>
+          <p>Get the <a href="https://github.com/gleicon/pratico/releases/latest">latest release</a> and drag Pratico to Applications. It is not notarized by Apple yet, so approve the first launch once: open Pratico, click <strong>Done</strong>, then <strong>Open Anyway</strong> in System Settings › Privacy &amp; Security. Or, before opening the download, remove its quarantine in Terminal:</p>
+          <div class="code"><button class="copy" type="button" hidden>Copy</button><pre><code>xattr -d com.apple.quarantine ~/Downloads/Pratico-*.dmg</code></pre></div>
         </li>
         <li>
           <h3>2. Start it from the menubar</h3>

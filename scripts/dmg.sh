@@ -29,16 +29,17 @@ tell application "Finder"
         set current view of container window to icon view
         set toolbar visible of container window to false
         set statusbar visible of container window to false
+        -- 640 x 420 of content (the background's size, scripts/dmg-background.swift) under a 28-point title bar.
         set the bounds of container window to {200, 120, 840, 568}
         set opts to the icon view options of container window
         set arrangement of opts to not arranged
-        set icon size of opts to 96
+        set icon size of opts to 80
         set text size of opts to 12
         set background picture of opts to file ".background:background.tiff"
-        set position of item "Pratico.app" of container window to {170, 196}
-        set position of item "Applications" of container window to {470, 196}
-        set position of item "READ ME FIRST.txt" of container window to {250, 330}
-        set position of item "Acknowledgements.txt" of container window to {390, 330}
+        set position of item "Pratico.app" of container window to {170, 140}
+        set position of item "Applications" of container window to {470, 140}
+        set position of item "READ ME FIRST.txt" of container window to {250, 315}
+        set position of item "Acknowledgements.txt" of container window to {390, 315}
         close
         open
         update without registering applications
