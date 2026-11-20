@@ -183,8 +183,8 @@
       </div>
       <p class="fine">Apple silicon · macOS 26 · Free and open source (MIT)</p>
       <figure class="shot">
-        <img src="img/menu-alerts.png" width="1594" height="898" alt="Pratico's menubar menu with its Alerts submenu open: a container reachable from other machines on port 8080, and pulled images with findings.">
-        <figcaption>The menubar: containers, alerts, disk, scanners, and threat feeds.</figcaption>
+        <img src="img/menu-alerts.png" width="1594" height="946" alt="Pratico's menubar menu with its Alerts submenu open: a container reachable from other machines on port 8080, and pulled images with findings.">
+        <figcaption>The menubar: containers, alerts, disk, scanners, threat feeds, scan results, and connections.</figcaption>
       </figure>
     </div>
     <div class="wrap">
@@ -274,7 +274,12 @@
         <div><h3>Names, not addresses</h3><p>Each network answers DNS for its containers and aliases, and passes other names to your Mac's resolver.</p></div>
         <div><h3>Ports you can see</h3><p>Published ports are opened on your Mac by pratico. The menubar warns when one is reachable from your network, not only from this Mac.</p></div>
         <div><h3>Disconnect means disconnected</h3><p>Taking a running container off a network cuts that address at the switch. Nothing inside the VM can bring it back.</p></div>
+        <div><h3>Every connection, and who made it</h3><p>The Connections window lists where each container connected, the process inside it that opened each connection, and what pratico refused and why.</p></div>
       </div>
+      <figure class="shot spaced">
+        <img src="img/connections.png" width="1920" height="1064" loading="lazy" alt="Pratico's Connections window: two containers' connections with the process behind each, pip and python3 in one, curl in the other, and two refused by the container's egress allowlist, with the reason shown below.">
+        <figcaption>Connections: each destination, the process that reached it, and the refusals with their reason.</figcaption>
+      </figure>
     </div>
   </section>
 
