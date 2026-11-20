@@ -57,6 +57,16 @@ final class AlertLog: @unchecked Sendable {
         if kept.count != list.count { write(kept) }
     }
 
+    /// Drops every alert whose key starts with `prefix`: all of one container's.
+    func resolve(prefix: String) {
+        precondition(!prefix.isEmpty, "an empty prefix would drop every alert")
+        lock.lock()
+        defer { lock.unlock() }
+        let list = read()
+        let kept = list.filter { !($0["key"]?.string ?? "").hasPrefix(prefix) }
+        if kept.count != list.count { write(kept) }
+    }
+
     /// The menubar's Clear Alerts.
     func clear() {
         lock.lock()
@@ -69,7 +79,8 @@ final class AlertLog: @unchecked Sendable {
 }
 
 /// Alerts about running containers (FR-33): a port published on an address other than
-/// loopback, which other machines can reach, and a healthcheck turning `unhealthy`.
+/// loopback, which other machines can reach, and a healthcheck turning `unhealthy`; both
+/// end when the container is removed.
 /// Driven by the container events, so it sees every start whoever made it.
 final class ContainerAlerts: @unchecked Sendable {
     let alerts: AlertLog
@@ -104,6 +115,9 @@ final class ContainerAlerts: @unchecked Sendable {
             alerts.raise(key: "health:\(e.id)", level: "warning", title: "\(name) is unhealthy",
                          detail: "Container \(name)'s healthcheck is failing. docker inspect \(name) shows its last checks.")
         case "health_status: healthy":
+            alerts.resolve(key: "health:\(e.id)")
+        case "destroy":  // not at stop: a restart would raise and notify it again
+            alerts.resolve(prefix: "port:\(e.id):")
             alerts.resolve(key: "health:\(e.id)")
         default:
             break

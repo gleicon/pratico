@@ -214,6 +214,7 @@ check "a restart does not repeat it" python3 -c "import json,sys; assert len([x 
 running=$(curl -s --unix-socket "$SOCK" http://d/pratico/containers)
 check "the menubar's list shows running containers with their ports" python3 -c "import json,sys; c={x['Name']: x for x in json.loads(sys.argv[1])}; assert c['e2e-p1']['Ports'][0]['PublicPort']==18080 and c['e2e-p2']['Ports'][0]['IP']=='127.0.0.1' and c['e2e-p1']['Image']=='busybox:latest'" "$running"
 docker rm -f e2e-p1 e2e-p2 >/dev/null
+check "removing the container ends its port alert" python3 -c "import json,sys; assert not [x for x in json.loads(sys.argv[1]) if x.get('key','').startswith('port:')]" "$(alerts)"
 check "Clear Alerts empties the list" sh -c "curl -s -o /dev/null -w '%{http_code}' -X DELETE --unix-socket '$SOCK' http://d/pratico/alerts | grep -q 204 && test \"\$(cat '$HOME_DIR/alerts.json')\" = '[]'"
 
 docker run -d --name e2e-web -l a=1 -v "$MNT:/x:ro" alpine sleep 300 >/dev/null

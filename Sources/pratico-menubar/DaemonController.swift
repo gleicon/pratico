@@ -420,11 +420,10 @@ final class DaemonController {
                 if changed || tick % 30 == 0 { await self.refreshAfterChange() }
                 // Usage moves without events; the daemon samples it every 4 s.
                 if changed || tick % 2 == 0 { await self.refreshContainers() }
-                // Each check runs every scanner's --version: once a minute is plenty.
-                if tick % 60 == 0 {
-                    await self.refreshScanners()
-                    await self.refreshEgress()
-                }
+                // Each check runs every scanner's --version: once a minute is plenty, and
+                // each second until the daemon first answers (it starts after the menubar).
+                if tick % 60 == 0 || (self.isRunning && self.scanners == nil) { await self.refreshScanners() }
+                if tick % 60 == 0 || (self.isRunning && self.egress == nil) { await self.refreshEgress() }
                 // Follows start_at_login as Settings or a hand edit changes it, no restart.
                 if tick % 5 == 0 && self.isRunning { self.agent.startAtLogin(Self.startAtLogin) }
                 tick += 1

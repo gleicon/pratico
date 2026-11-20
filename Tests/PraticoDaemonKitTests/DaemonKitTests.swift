@@ -885,3 +885,14 @@ private func emptyDir() throws -> URL {
     #expect(list.map { $0["detail"]?.string } == ["b", "c", "d"])  // newest of each title, order kept
     #expect(list.allSatisfy { $0["key"] != nil })
 }
+
+@Test func alertsResolveByPrefix() throws {
+    let file = FileManager.default.temporaryDirectory.appending(path: "alerts-\(UUID().uuidString).json")
+    defer { try? FileManager.default.removeItem(at: file) }
+    let log = AlertLog(path: file)
+    log.raise(key: "port:aa:0.0.0.0:80", level: "warning", title: "a", detail: "")
+    log.raise(key: "port:aa:0.0.0.0:443", level: "warning", title: "b", detail: "")
+    log.raise(key: "port:aab:0.0.0.0:80", level: "warning", title: "c", detail: "")
+    log.resolve(prefix: "port:aa:")
+    #expect(JSON.parse(try Data(contentsOf: file))?.array?.map { $0["title"]?.string } == ["c"])  // another container's stays
+}

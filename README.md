@@ -183,7 +183,7 @@ other output is a failed run and keeps that scanner's earlier findings. Design:
 - **Connections**: where every container connected, which process opened each
   connection, and what pratico refused and why ([egress](docs/egress.md)).
 - **Alerts**: blocked images, ports published beyond loopback, containers turning
-  unhealthy. Each becomes one notification.
+  unhealthy. Each becomes one notification; a container's alerts end when it is removed.
 - **Disk**: allocated size of images, leftover layers, running and stopped containers,
   logs, volumes, and scan data, adding up to the total. Cleanup actions list what they
   remove, ask, then call the matching prune endpoint.
