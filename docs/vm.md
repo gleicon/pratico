@@ -73,10 +73,19 @@ recorded too; pratico's own processes in the VM are not.
 curl -s --unix-socket ~/.pratico/docker.sock http://d/pratico/containers/web/activity
 ```
 
+Each connection carries what the Mac's [egress](egress.md) record knows of it: `Name`
+(from DNS, TLS SNI, or HTTP Host), `Blocked`, and `Reason`, matched by address, port, and
+source port. A connection refused before it opened has no source port in the guest, so
+it is matched by address and port, nearest in time. The egress record is the daemon's
+(the last 2,000 flows per container since it started), so after a daemon restart older
+connections have the guest's fields only.
+
 The events are kept in the container's directory, up to 16 MiB (about 50,000 events;
 older ones roll off), so they can be read after the container stops, and are removed
 with it. PIDs are as the container sees them. `?limit=` returns only the newest (up to
-10,000, the most one call returns).
+10,000, the most one call returns). A container that exits at once still has all its
+events: the shim waits for its process's exit record (at most a second) before it stops
+the VM.
 
 How: three small BPF programs on the kernel's own tracepoints (no kprobes, no tracing
 filesystem), loaded by `vminitd` at boot (about 1 ms) and built by pratico against the
@@ -93,6 +102,9 @@ What it does not see, or show:
   probes in its own VM, since it controls that kernel; others cannot use BPF at all
   (`kernel.unprivileged_bpf_disabled` is 2).
 - Containers started by pratico 0.2.17 or earlier have no recorder until restarted.
+
+Agents read the same events through the MCP server's `activity` tool, and `run` returns
+them with its result ([agents](agents.md)).
 
 ## Lifecycle
 

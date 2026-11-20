@@ -15,12 +15,14 @@ struct MCPTools: Sendable {
     /// Output an agent gets back per stream: the last 64 KiB, as a log tail.
     static let outputBytes = 64 * 1024
     static let maxTimeout = 3600
+    /// Flight-recorder events `run` returns, the newest, and `activity`'s default.
+    static let runActivity = 500
 
     static let instructions = """
         pratico runs each container in its own lightweight VM on this Mac and scans every image it pulls. \
         Check an image with image_check before running it; use run for a one-off command in a throwaway VM \
         (network off unless asked; with egress, only the names listed), start for a service that keeps running. \
-        egress shows where a container connected. exec, stop, and remove act only on containers made through this server.
+        egress shows where a container connected, activity what it ran and which process opened each connection. exec, stop, and remove act only on containers made through this server.
         """
 
     static let catalog: [JSON] = [
@@ -30,7 +32,7 @@ struct MCPTools: Sendable {
               "wait_seconds": int("How long to wait for a scan in progress (default 120, at most 600)")], ["image"]),
         tool("image_sbom", "The image's SBOM (needs syft), SPDX or CycloneDX JSON.",
              ["image": str("Image reference or ID"), "format": .object(["type": "string", "enum": ["spdx", "cyclonedx"]])], ["image"]),
-        tool("run", "Run one command in a throwaway VM and return its exit code and output; the container is removed after.",
+        tool("run", "Run one command in a throwaway VM and return its exit code, output, connections, and activity (each exec and exit in it); the container is removed after.",
              runProperties.merging(["timeout_seconds": int("Kill it after this long (default 300, at most 3600)")]) { a, _ in a }, ["image"]),
         tool("start", "Start a container that keeps running (a database for tests, a server); returns its ID.",
              runProperties.merging(["name": str("Container name"), "ports": .object(["type": "array", "items": ["type": "string"],
@@ -40,6 +42,8 @@ struct MCPTools: Sendable {
              ["container", "command"]),
         tool("egress", "Where a container's connections went: each destination's name and address, and whether pratico refused it (threat feeds, or the container's egress allowlist).",
              ["container": str("Name or ID")], ["container"]),
+        tool("activity", "What ran in a container and what each process connected to, from its VM's flight recorder: every exec (path, arguments, uid, parent) and exit (code or signal), and each TCP connection with its destination's name and whether pratico refused it.",
+             ["container": str("Name or ID"), "limit": int("The newest events, default 500, at most 10000")], ["container"]),
         tool("logs", "The last lines of a container's output.", ["container": str("Name or ID"), "tail": int("Lines, default 200, at most 5000")], ["container"]),
         tool("list", "Containers, running or not, with image, state, ports, and whether this server made them.", ["all": bool("Include stopped ones (default true)")], []),
         tool("stop", "Stop a container made through this server.", ["container": str("Name or ID")], ["container"]),
@@ -83,6 +87,7 @@ struct MCPTools: Sendable {
         case "exec": return try exec(args)
         case "logs": return try logs(args)
         case "egress": return try egress(args)
+        case "activity": return try activity(args)
         case "list": return list(args)
         case "stop": return try stop(args)
         case "remove": return try remove(args)

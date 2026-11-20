@@ -79,6 +79,40 @@ enum Activity {
         r.withUnsafeBytes { T(littleEndian: $0.loadUnaligned(fromByteOffset: at, as: T.self)) }
     }
 
+    /// How far apart in time a connect and the switch's flow for it may be: the switch
+    /// records an allowed TCP flow at its first bytes, which a server-first protocol delays.
+    static let joinWindow: TimeInterval = 600
+
+    /// Each TCP connect named from the switch's flow for it (D-56): the one with the same
+    /// address, port, and source port nearest in time. A connection that never opened has
+    /// no source port (the kernel clears it), so it is matched on address and port alone.
+    /// `Name`, `Blocked` and `Reason` are added only where the daemon still holds that flow
+    /// (`EgressGuard.maxFlows`, since it started); the guest's own record stays as it was.
+    static func join(_ events: [JSON], _ flows: [EgressGuard.Flow]) -> [JSON] {
+        struct Key: Hashable { var ip: UInt32, port: UInt16, sourcePort: UInt16 }
+        precondition(flows.count <= EgressGuard.maxFlows, "\(flows.count) flows, past their bound")
+        var byKey: [Key: [EgressGuard.Flow]] = [:]
+        for flow in flows where flow.proto == "tcp" {
+            byKey[Key(ip: flow.ip, port: flow.port, sourcePort: flow.sourcePort), default: []].append(flow)
+            byKey[Key(ip: flow.ip, port: flow.port, sourcePort: 0), default: []].append(flow)  // source port 0: any
+        }
+        let out = events.map { event -> JSON in
+            guard event["Kind"]?.string == "connect", case .object(var fields) = event,
+                  let ip = event["Address"]?.string.flatMap(IPv4.parse), let port = event["Port"]?.int, let source = event["SourcePort"]?.int,
+                  let time = event["Time"]?.string.flatMap(Timestamp.parse),
+                  let candidates = byKey[Key(ip: ip, port: UInt16(clamping: port), sourcePort: UInt16(clamping: source))],
+                  let flow = candidates.min(by: { abs($0.time.timeIntervalSince(time)) < abs($1.time.timeIntervalSince(time)) }),
+                  abs(flow.time.timeIntervalSince(time)) <= joinWindow
+            else { return event }
+            fields["Name"] = flow.name.map(JSON.string) ?? .null
+            fields["Blocked"] = .bool(flow.blocked)
+            fields["Reason"] = flow.reason.map(JSON.string) ?? .null
+            return .object(fields)
+        }
+        assert(out.count == events.count, "the join dropped or added events")
+        return out
+    }
+
     /// The container's events, oldest first: the rolled-over log, then the current one.
     static func read(_ files: ShimFiles, limit: Int = maxListed) -> [JSON] {
         precondition(limit > 0 && limit <= maxListed, "limit \(limit) outside 1...\(maxListed)")
@@ -88,6 +122,14 @@ enum Activity {
             for line in data.split(separator: UInt8(ascii: "\n")) { if let j = JSON.parse(Data(line)) { out.append(j) } }
         }
         return Array(out.suffix(limit))
+    }
+}
+
+extension ContainerService {
+    /// A container's newest `limit` events, oldest first, named from the switch's flows:
+    /// what the API and the MCP server return.
+    func activity(_ id: String, limit: Int = Activity.maxListed) -> [JSON] {
+        Activity.join(Activity.read(shimFiles(id), limit: limit), networks.netSwitch.egress.flows(id))
     }
 }
 
@@ -127,29 +169,69 @@ final class ActivityLog {
     }
 }
 
-extension ShimHost {
-    /// Reads the guest's recorder until the VM stops, into the container's activity log.
-    /// Started after the VM boots and before the process runs, so its first exec is seen.
-    static func recordActivity(_ container: LinuxContainer, _ files: ShimFiles) {
+/// Reads the guest's recorder into the container's activity log until the VM stops.
+/// Dialled while the VM boots, before the process runs, so its first exec is seen; the
+/// shim waits on it at exit, so a short-lived container's last records are kept.
+final class ActivityReader: Sendable {
+    /// How long the shim waits for the process's exit record, then for the rest after the
+    /// VM stops: the guest's pump wakes on each record, so both come in milliseconds.
+    static let drainTimeout: DispatchTimeInterval = .seconds(1)
+
+    private let sawExit = DispatchSemaphore(value: 0)
+    private let finished = DispatchSemaphore(value: 0)
+
+    /// Dials the guest's recorder and starts reading; an `unavailable` event if it does not answer.
+    static func start(_ container: LinuxContainer, _ files: ShimFiles) async -> ActivityReader {
+        let reader = ActivityReader()
+        guard let handle = try? await container.withVirtualMachineInstance({ try await $0.dial(Activity.port) }) else {
+            ActivityLog(files).append(["Time": .string(Timestamp.format(Date())), "Kind": "unavailable", "Message": "the VM's recorder did not answer"])
+            reader.sawExit.signal()
+            reader.finished.signal()
+            return reader
+        }
         Thread {
-            let log = ActivityLog(files)
-            guard let handle = try? blocking({ try await container.withVirtualMachineInstance { try await $0.dial(Activity.port) } }) else {
-                log.append(["Time": .string(Timestamp.format(Date())), "Kind": "unavailable", "Message": "the VM's recorder did not answer"])
-                return
-            }
-            defer { try? handle.close() }
-            var pending: [UInt8] = []
-            var buffer = [UInt8](repeating: 0, count: 64 * Activity.Layout.size)
-            // read(2), not FileHandle.read(upToCount:), which waits for the whole count.
-            while case let n = read(handle.fileDescriptor, &buffer, buffer.count), n > 0 || (n < 0 && errno == EINTR) {
-                guard n > 0 else { continue }
-                pending.append(contentsOf: buffer[0..<n])
-                let whole = pending.count / Activity.Layout.size * Activity.Layout.size
-                for at in stride(from: 0, to: whole, by: Activity.Layout.size) {
-                    if let event = Activity.decode(Array(pending[at..<(at + Activity.Layout.size)])) { log.append(event) }
-                }
-                pending.removeFirst(whole)
-            }
+            reader.copy(handle, into: ActivityLog(files))
+            try? handle.close()
+            reader.finished.signal()
         }.start()
+        return reader
+    }
+
+    private func copy(_ handle: FileHandle, into log: ActivityLog) {
+        var pending: [UInt8] = []
+        var buffer = [UInt8](repeating: 0, count: 64 * Activity.Layout.size)
+        var exited = false
+        // read(2), not FileHandle.read(upToCount:), which waits for the whole count.
+        while case let n = read(handle.fileDescriptor, &buffer, buffer.count), n > 0 || (n < 0 && errno == EINTR) {
+            guard n > 0 else { continue }
+            pending.append(contentsOf: buffer[0..<n])
+            let whole = pending.count / Activity.Layout.size * Activity.Layout.size
+            for at in stride(from: 0, to: whole, by: Activity.Layout.size) {
+                guard let event = Activity.decode(Array(pending[at..<(at + Activity.Layout.size)])) else { continue }
+                log.append(event)
+                // The container's first process is pid 1 in its namespace: its exit is the last record that matters.
+                if !exited, event["Kind"]?.string == "exit", event["Pid"]?.int == 1 {
+                    exited = true
+                    sawExit.signal()
+                }
+            }
+            pending.removeFirst(whole)
+            assert(pending.count < Activity.Layout.size, "a whole record left unread")
+        }
+    }
+
+    /// After the process exits, before the VM stops: its exit record, or the timeout.
+    func awaitExitRecord() async { await Self.wait(sawExit) }
+
+    /// After the VM stops: the reader at the end of the guest's stream, or the timeout.
+    func awaitFinish() async { await Self.wait(finished) }
+
+    private static func wait(_ s: DispatchSemaphore) async {
+        await withCheckedContinuation { done in
+            DispatchQueue.global().async {
+                if s.wait(timeout: .now() + drainTimeout) == .success { s.signal() }  // later waits see it too
+                done.resume()
+            }
+        }
     }
 }

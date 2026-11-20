@@ -220,7 +220,7 @@
         <div><h3>Fast where you feel it</h3><p>CPU runs natively on Apple silicon, each root file system is its own disk image, and control calls answer in under 3 ms with 100 containers.</p></div>
         <div><h3>A VM you can rebuild</h3><p>The guest kernel and init are built by Pratico from pinned sources, and two builds give the same bytes, so the ones in the app can be checked against the source.</p></div>
         <div><h3>Syscalls filtered, as on Docker</h3><p>Every container runs Docker's default seccomp profile, or yours, compiled by Pratico and installed inside its VM.</p></div>
-        <div><h3>A record of what ran</h3><p>Every program a container starts, with its arguments, every exit, and which process opened each connection, recorded inside its VM and kept after it stops.</p></div>
+        <div><h3>A record of what ran</h3><p>Every program a container starts, with its arguments, every exit, and which process opened each connection and the host it reached, recorded inside its VM and kept after it stops.</p></div>
       </div>
     </div>
   </section>
@@ -339,6 +339,7 @@
         <div><h3>Throwaway by default</h3><p>A one-off command gets a new VM with no network unless asked, your folders mounted read-only unless asked, and a time limit. Nothing is left behind.</p></div>
         <div><h3>Your containers stay yours</h3><p>Agents can see every container, and change only the ones they made.</p></div>
         <div><h3>Know where it connects</h3><p>Every connection a container makes is named and recorded on your Mac. Pass an allowlist and an agent's code reaches only the hosts you name.</p></div>
+        <div><h3>See what it ran</h3><p>Every program an agent's command started, every exit code, and which process opened each connection, with the host it reached and whether it was refused, returned with the result.</p></div>
         <div><h3>Off until you turn it on</h3><p>The endpoint listens on this Mac only, answers only with your token, and refuses requests a web page could make.</p></div>
       </div>
     </div>

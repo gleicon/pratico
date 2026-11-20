@@ -8,7 +8,7 @@ the container has an allowlist the destination is not on.
 ## What is recorded
 
 For each container, its last 2,000 connections and refused lookups: time, protocol,
-address, port, and name. The name comes from pratico's own DNS answers, from the TLS
+address, port, the container's source port, and name. The name comes from pratico's own DNS answers, from the TLS
 ClientHello's server name (SNI) for HTTPS, or from the HTTP `Host` header, so it is
 there even when the container resolved the name elsewhere. Traffic is not decrypted:
 pratico sees which host, not which URL.
@@ -17,6 +17,8 @@ pratico sees which host, not which URL.
 - API: `GET /pratico/egress?container=NAME`
 - Agents: the MCP `egress` tool, and the `connections` a `run` reports
   ([agents](agents.md)).
+- The process behind each TCP connection: the [flight recorder](vm.md#flight-recorder),
+  whose connections carry these names and refusals.
 
 ## Threat feeds
 

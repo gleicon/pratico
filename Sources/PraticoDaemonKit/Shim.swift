@@ -136,6 +136,8 @@ public enum ShimHost {
         // The VM is up; the process waits for the daemon's `POST /start`, so its ports are
         // bound and it reads as running before its first instruction, as in Docker.
         trace.mark("extra addresses, spare NICs down")
+        let activity = await ActivityReader.start(container, files)
+        trace.mark("flight recorder dialled")
         writeJSON(["pid": .int(Int64(getpid())), "status": "created"], to: files.state)
 
         let term = stopOnSIGTERM(container, spec)
@@ -169,8 +171,14 @@ public enum ShimHost {
 
         let code: Int32
         do { code = try await container.wait().exitCode } catch { code = 137 }
+        trace.mark("exited")
+        await activity.awaitExitRecord()
+        trace.mark("exit record")
         log.finish()
         try? await container.stop()
+        trace.mark("stopped")
+        await activity.awaitFinish()
+        trace.mark("reader done")  // exit.json, last, says the activity log is whole
         server.stop()
         term.cancel()
         writeExit(files, code: code, error: "")
@@ -204,7 +212,6 @@ public enum ShimHost {
         trace.mark("container configured")
         try await container.create()
         trace.mark("VM booted, container created")
-        recordActivity(container, files)
         try await addCardAddresses(container, spec.nics)
         return container
     }

@@ -67,3 +67,26 @@ private func record(kind: UInt32, pid: UInt32 = 7, ppid: UInt32 = 1, value: UInt
     #expect(Activity.read(files).count == lines)
     #expect(Activity.read(files, limit: 5).count == 5)
 }
+
+@Test func activityJoinsConnectionsWithTheSwitchsFlows() throws {
+    let connect = try #require(Activity.decode(record(kind: 3, value: 7, daddr: [1, 2, 3, 4], sport: 40_000, dport: 443)))
+    let exec = try #require(Activity.decode(record(kind: 1, file: "/bin/ls")))
+    let at = try #require(connect["Time"]?.string.flatMap(Timestamp.parse))
+    let ip = try #require(IPv4.parse("1.2.3.4"))
+    func flow(_ offset: TimeInterval, sourcePort: UInt16 = 40_000, proto: String = "tcp", name: String, blocked: Bool = false) -> EgressGuard.Flow {
+        .init(time: at.addingTimeInterval(offset), proto: proto, ip: ip, port: 443, sourcePort: sourcePort, name: name, blocked: blocked, reason: blocked ? "listed" : nil)
+    }
+    let flows = [flow(-300, name: "older.example"), flow(1, name: "bad.example", blocked: true), flow(0, sourcePort: 40_001, name: "other.example"),
+                 flow(0, proto: "udp", name: "udp.example")]
+    let joined = Activity.join([exec, connect], flows)
+    #expect(joined[0] == exec)  // only connections are named
+    #expect(joined[1]["Name"]?.string == "bad.example" && joined[1]["Blocked"]?.bool == true && joined[1]["Reason"]?.string == "listed")
+    #expect(joined[1]["Address"]?.string == "1.2.3.4" && joined[1]["Connected"]?.bool == false)  // the guest's record kept
+    // Refused before it opened: no source port in the guest, matched on address and port.
+    let refused = try #require(Activity.decode(record(kind: 3, value: 7, daddr: [1, 2, 3, 4], dport: 443)))
+    let refusedFlows = [flow(-300, name: "older.example"), flow(2, sourcePort: 50_000, name: "refused.example", blocked: true)]
+    #expect(Activity.join([refused], refusedFlows)[0]["Name"]?.string == "refused.example")
+    // No flow for it, or none near enough in time: left as the guest recorded it.
+    #expect(Activity.join([connect], []) == [connect])
+    #expect(Activity.join([connect], [flow(-Activity.joinWindow - 1, name: "stale.example")]) == [connect])
+}

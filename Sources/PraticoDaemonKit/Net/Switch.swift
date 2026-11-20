@@ -233,7 +233,7 @@ final class NetSwitch: @unchecked Sendable {
             return
         }
         if case .block(let why) = egress.checkName(port.containerId, q.name) {
-            egress.record(port.containerId, .init(time: Date(), proto: "dns", ip: 0, port: 53, name: q.name, blocked: true, reason: why))
+            egress.record(port.containerId, .init(time: Date(), proto: "dns", ip: 0, port: 53, sourcePort: udp.srcPort, name: q.name, blocked: true, reason: why))
             respond(nil)  // no such name, as far as the container can tell
             return
         }

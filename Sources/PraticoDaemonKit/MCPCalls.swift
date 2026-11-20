@@ -58,12 +58,13 @@ extension MCPTools {
             code = exit.wait(seconds: 10)
         }
         let lines = containers.logLines(rec.id)
-        // Read before the container (and its record of connections) is removed.
+        // Read before the container (and its records of connections and activity) is removed.
         let connections = containers.networks.netSwitch.egress.flows(rec.id).suffix(200).map(Daemon.flowJSON)
+        let activity = containers.activity(rec.id, limit: Self.runActivity)
         return ["exit_code": code.map { .int(Int64($0)) } ?? .null, "timed_out": .bool(timedOut),
                 "seconds": .double((Date().timeIntervalSince(started) * 10).rounded() / 10),
                 "stdout": .string(Self.tail(lines, stream: 1)), "stderr": .string(Self.tail(lines, stream: 2)),
-                "connections": .array(connections)]
+                "connections": .array(connections), "activity": .array(activity)]
     }
 
     func start(_ args: JSON) throws -> JSON {
@@ -107,6 +108,12 @@ extension MCPTools {
         let flows = containers.networks.netSwitch.egress.flows(rec.id).suffix(500)
         return ["container": .string(rec.name), "allowlist": rec.labels[Self.egressLabel].map(JSON.string) ?? .null,
                 "flows": .array(flows.map(Daemon.flowJSON))]
+    }
+
+    func activity(_ args: JSON) throws -> JSON {
+        let rec = try containers.resolve(try Self.required(args, "container"))
+        let limit = Self.bounded(args["limit"]?.int, default: Self.runActivity, max: Activity.maxListed)
+        return ["container": .string(rec.name), "events": .array(containers.activity(rec.id, limit: limit))]
     }
 
     func stop(_ args: JSON) throws -> JSON {

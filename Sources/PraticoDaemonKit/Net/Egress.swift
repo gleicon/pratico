@@ -11,6 +11,8 @@ final class EgressGuard: @unchecked Sendable {
         var proto: String  // tcp, udp, dns
         var ip: UInt32
         var port: UInt16
+        /// The container's side: with the address and port, the connection the recorder saw.
+        var sourcePort: UInt16
         var name: String?
         var blocked: Bool
         var reason: String?

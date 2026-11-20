@@ -86,8 +86,9 @@ vminitd ───────── guest agent: process, exec, cp, stats, healt
   key) are refused; a label limits a container to the names it lists.
 - **[Flight recorder](docs/vm.md#flight-recorder).** Each VM records every program
   started in its container (path and arguments), every exit, and the process behind each
-  TCP connection, from BPF probes pratico builds for its kernel; kept after the container
-  stops (`GET /pratico/containers/{id}/activity`).
+  TCP connection, named from the egress record, from BPF probes pratico builds for its
+  kernel; kept after the container stops (`GET /pratico/containers/{id}/activity`, and
+  the MCP server's `activity` tool).
 - **[Agents](docs/agents.md).** An MCP endpoint on 127.0.0.1 (off until `mcp = true`,
   bearer token): agents check images before using them, run commands in throwaway VMs,
   and start services, and can change only the containers they made.

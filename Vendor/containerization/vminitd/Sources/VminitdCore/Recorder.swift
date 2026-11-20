@@ -53,6 +53,9 @@ package final class Recorder: Sendable {
     /// The reader's socket, and replaced ones for `pump`, the only closer, to close
     /// between writes (closing one under a write could hand its number to the next).
     private let readers = Mutex<(current: Int32, retired: [Int32])>((-1, []))
+    /// Wakes `pump` when a reader arrives: the host dials just before the container's
+    /// process starts, and a short-lived one's records should not wait out a sleep.
+    private let readerArrived = DispatchSemaphore(value: 0)
     private let log: Logger
 
     private init(probes: Result<Probes, Swift.Error>, log: Logger) {
@@ -102,6 +105,7 @@ package final class Recorder: Sendable {
                 if r.current >= 0 { r.retired.append(r.current) }
                 r.current = fd
             }
+            readerArrived.signal()
         }
     }
 
@@ -120,7 +124,8 @@ package final class Recorder: Sendable {
             }
             for old in retired { close(old) }
             guard fd >= 0 else {
-                usleep(250_000)  // no reader: records wait, and the probes count what does not fit
+                // No reader: records wait, and the probes count what does not fit.
+                _ = readerArrived.wait(timeout: .now() + .milliseconds(250))
                 continue
             }
             var p = pollfd(fd: ring.fd, events: Int16(POLLIN), revents: 0)

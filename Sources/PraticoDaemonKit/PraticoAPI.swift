@@ -83,7 +83,8 @@ extension Daemon {
     }
 
     /// `GET /pratico/containers/{id}/activity`: the flight recorder's events (D-56), the
-    /// newest `limit` (default and most `Activity.maxListed`), oldest first.
+    /// newest `limit` (default and most `Activity.maxListed`), oldest first, connections
+    /// named from the switch's flows.
     func activity(_ ref: String, limit: String?) throws -> JSON {
         let rec = try containers.resolve(ref)
         var n = Activity.maxListed
@@ -91,12 +92,12 @@ extension Daemon {
             guard let v = Int(limit), (1...Activity.maxListed).contains(v) else { throw APIError(400, "limit is 1 to \(Activity.maxListed)") }
             n = v
         }
-        return ["Id": .string(rec.id), "Name": .string(rec.name), "Events": .array(Activity.read(containers.shimFiles(rec.id), limit: n))]
+        return ["Id": .string(rec.id), "Name": .string(rec.name), "Events": .array(containers.activity(rec.id, limit: n))]
     }
 
     static func flowJSON(_ f: EgressGuard.Flow) -> JSON {
         ["Time": .string(Timestamp.format(f.time)), "Proto": .string(f.proto), "Address": .string(IPv4.format(f.ip)),
-         "Port": .int(Int64(f.port)), "Name": f.name.map(JSON.string) ?? .null, "Blocked": .bool(f.blocked),
+         "Port": .int(Int64(f.port)), "SourcePort": .int(Int64(f.sourcePort)), "Name": f.name.map(JSON.string) ?? .null, "Blocked": .bool(f.blocked),
          "Reason": f.reason.map(JSON.string) ?? .null]
     }
 

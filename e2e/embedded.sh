@@ -215,6 +215,8 @@ expect_eq "its first process, as pid 1, with argv" "$(activity e-rec "e=[x for x
 expect_eq "a child's exit code" "$(activity e-rec "print([x['ExitCode'] for x in ev if x['Kind']=='exit' and x.get('ExitCode')==3])")" "[3]"
 expect_eq "the process behind a connection, and whether it connected" \
     "$(activity e-rec "print(sorted((x['Command'], x['Port'], x['Connected'], x['SourcePort']>0) for x in ev if x['Kind']=='connect'))")" "[('wget', 1, False, False), ('wget', $WWW_PORT, True, True)]"
+expect_eq "a connection named from the switch's flow for it" \
+    "$(activity e-rec "print([(x['Port'], x.get('Name'), x.get('Blocked')) for x in ev if x['Kind']=='connect' and x['Connected']])")" "[($WWW_PORT, 'host.docker.internal', False)]"
 docker exec e-rec ls / >/dev/null
 eventually "docker exec is recorded" sh -c "curl -s --unix-socket '$SOCK' http://d/pratico/containers/e-rec/activity | grep -q '\"Path\": *\"/bin/ls\"'"
 expect_eq "nothing from outside the container (vminitd, vmexec, kernel threads)" "$(activity e-rec "print([x['Path'] for x in ev if x['Kind']=='exec' and 'vm' in x['Path']])")" "[]"
@@ -223,6 +225,10 @@ docker stop -t 0 e-rec >/dev/null
 expect_eq "the record outlives the VM" "$(activity e-rec "print(any(x['Kind']=='exit' and x['Pid']==1 for x in ev))")" "True"
 expect_has "a bad limit is refused" "$(curl -s --unix-socket "$SOCK" "http://d/pratico/containers/e-rec/activity?limit=0")" "limit is 1 to"
 docker rm e-rec >/dev/null
+docker run --name e-short alpine true
+expect_eq "a container that exits at once keeps its whole record" \
+    "$(activity e-short "print([(x['Kind'], x['Pid'], x.get('Path') or x.get('ExitCode')) for x in ev])")" "[('exec', 1, '/bin/true'), ('exit', 1, 0)]"
+docker rm e-short >/dev/null
 (nc -l 127.0.0.1 18094 >"$HOME_DIR/up.bin" &)
 for _ in $(seq 50); do lsof -nP -iTCP:18094 -sTCP:LISTEN >/dev/null 2>&1 && break; sleep 0.1; done
 docker exec e-c1 sh -c 'nc host.docker.internal 18094 < /tmp/big.bin'
@@ -850,6 +856,10 @@ expect_eq "with no network unless asked" "$($MCP run '{"image":"alpine","command
 expect_eq "a timeout kills it" "$($MCP run '{"image":"alpine","command":["sleep","60"],"timeout_seconds":2}' | python3 -c 'import json,sys; r=json.load(sys.stdin); print(r["timed_out"])')" "True"
 expect_eq "and nothing is left behind" "$(docker ps -aq --filter label=dev.pratico.mcp | wc -l | tr -d ' ')" "0"
 expect_eq "run with an egress allowlist reports its connections" "$($MCP run '{"image":"alpine","network":"bridge","egress":["example.com"],"command":["sh","-c","wget -qT10 -O /dev/null https://example.com; nslookup example.org || true"]}' | python3 -c 'import json,sys; r=json.load(sys.stdin); print(sorted({(c["Name"], c["Blocked"]) for c in r["connections"]}))')" "[('example.com', False), ('example.org', True)]"
+agent_run=$($MCP run '{"image":"alpine","network":"bridge","egress":["example.com"],"command":["sh","-c","wget -qT10 -O /dev/null http://example.com; wget -qT5 -O /dev/null http://1.1.1.1/ || true"]}')
+expect_eq "run reports what ran" "$(echo "$agent_run" | python3 -c 'import json,sys; print(sorted({e["Path"] for e in json.load(sys.stdin)["activity"] if e["Kind"]=="exec"}))')" "['/bin/sh', '/usr/bin/wget']"
+expect_eq "and which process opened each connection, named, refused or not" \
+    "$(echo "$agent_run" | python3 -c 'import json,sys; print(sorted({(e["Command"], e.get("Name") or e["Address"], e.get("Blocked")) for e in json.load(sys.stdin)["activity"] if e["Kind"]=="connect"}))')" "[('wget', '1.1.1.1', True), ('wget', 'example.com', False)]"
 expect_has "image_check reports a verdict" "$($MCP image_check '{"image":"alpine","wait_seconds":5}')" '"Verdict"'
 $MCP start '{"image":"alpine","command":["sleep","300"],"name":"e-agent"}' >/dev/null
 expect_eq "start, then exec in it" "$($MCP exec '{"container":"e-agent","command":["echo","inside"]}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["output"].strip())')" "inside"

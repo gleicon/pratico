@@ -125,7 +125,7 @@ final class Uplink: @unchecked Sendable {
         // Each query to an outside DNS server, not only a flow's first: a later one could ask
         // for a listed name, or carry data out in names (DNS tunnelling).
         if d.dstPort == 53, let q = DNSQuery(d.payload), case .block(let why) = sw.egress.checkName(port.containerId, q.name) {
-            sw.egress.record(port.containerId, .init(time: Date(), proto: "dns", ip: key.dstIP, port: 53, name: q.name, blocked: true, reason: why))
+            sw.egress.record(port.containerId, .init(time: Date(), proto: "dns", ip: key.dstIP, port: 53, sourcePort: key.srcPort, name: q.name, blocked: true, reason: why))
             return
         }
         flow.last = Date()
@@ -225,10 +225,10 @@ final class Uplink: @unchecked Sendable {
         if verdict == .allow, let q = dnsQuery, !isMac { verdict = guardian.checkName(port.containerId, q.name) }
         let name = dnsQuery?.name ?? guardian.name(port.containerId, key.dstIP)
         if case .block(let why) = verdict {
-            guardian.record(port.containerId, .init(time: Date(), proto: tcp ? "tcp" : proto, ip: key.dstIP, port: key.dstPort, name: name, blocked: true, reason: why))
+            guardian.record(port.containerId, .init(time: Date(), proto: tcp ? "tcp" : proto, ip: key.dstIP, port: key.dstPort, sourcePort: key.srcPort, name: name, blocked: true, reason: why))
             return false
         }
-        if !tcp { guardian.record(port.containerId, .init(time: Date(), proto: proto, ip: key.dstIP, port: key.dstPort, name: name, blocked: false, reason: nil)) }
+        if !tcp { guardian.record(port.containerId, .init(time: Date(), proto: proto, ip: key.dstIP, port: key.dstPort, sourcePort: key.srcPort, name: name, blocked: false, reason: nil)) }
         return true
     }
 
@@ -664,12 +664,12 @@ final class TCPConn {
             verdict = .block("TLS or HTTP to \(resolved ?? IPv4.format(key.dstIP)) without a name pratico can read; this container's egress allowlist needs one")
         }
         if case .block(let why) = verdict {
-            guardian.record(container, .init(time: Date(), proto: "tcp", ip: key.dstIP, port: key.dstPort, name: carried, blocked: true, reason: why))
+            guardian.record(container, .init(time: Date(), proto: "tcp", ip: key.dstIP, port: key.dstPort, sourcePort: key.srcPort, name: carried, blocked: true, reason: why))
             toHost.removeAll()
             close(reset: true)
             return false
         }
-        guardian.record(container, .init(time: Date(), proto: "tcp", ip: key.dstIP, port: key.dstPort, name: carried ?? resolved, blocked: false, reason: nil))
+        guardian.record(container, .init(time: Date(), proto: "tcp", ip: key.dstIP, port: key.dstPort, sourcePort: key.srcPort, name: carried ?? resolved, blocked: false, reason: nil))
         watchHTTP = carried != nil && toHost.first != 0x16 && guardian.hasAllowlist(container)
         // Requests pipelined behind the first, in these same bytes, are checked before any goes.
         if watchHTTP {
@@ -688,7 +688,7 @@ final class TCPConn {
             var verdict = guardian.checkCarried(port.containerId, host)
             if hosts == nil { verdict = .block("an HTTP line pratico cannot read (folded, or past \(FirstBytes.maxLine) bytes); this container's egress allowlist needs every request named") }
             guard case .block(let why) = verdict else { continue }
-            guardian.record(port.containerId, .init(time: Date(), proto: "tcp", ip: key.dstIP, port: key.dstPort, name: host, blocked: true, reason: why))
+            guardian.record(port.containerId, .init(time: Date(), proto: "tcp", ip: key.dstIP, port: key.dstPort, sourcePort: key.srcPort, name: host, blocked: true, reason: why))
             toHost.removeAll()
             close(reset: true)
             return false
@@ -807,7 +807,7 @@ final class TCPConn {
         if inspecting && state == .established {  // closed before sending anything: still a flow
             inspecting = false
             let g = uplink.sw.egress
-            g.record(port.containerId, .init(time: Date(), proto: "tcp", ip: key.dstIP, port: key.dstPort,
+            g.record(port.containerId, .init(time: Date(), proto: "tcp", ip: key.dstIP, port: key.dstPort, sourcePort: key.srcPort,
                                               name: g.name(port.containerId, key.dstIP), blocked: false, reason: nil))
         }
         if reset && state != .connecting && state != .synSent { uplink.send(seg(TCPSegment.rst | TCPSegment.ack), for: self) }
