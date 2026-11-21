@@ -33,9 +33,15 @@ scanning, and the flight recorder are the same code.
   `--runtime pratico-testhost`, which only a daemon started with `PRATICO_TESTHOST=1`
   accepts; its guest logs `Hyp nVHE mode initialized successfully` (2026-11-21).
 - Nested virtualization is slow: in the test host a VM boots in about 15 s and starts its
-  process in about 9 more (`PRATICO_TRACE=1`), against well under a second on the Mac. The
-  test host proves behavior, not speed; timing checks there measure the nesting, and with
-  several VMs booting at once a boot can pass Cloud Hypervisor's 60 s wait for the agent.
+  process in about 9 more (`PRATICO_TRACE=1`), against well under a second on the Mac.
+  A `docker run alpine true` takes 23 to 36 s (twenty in a row, test host at 4 CPUs, the
+  Mac otherwise idle); other work on the Mac stretches one to 100 s, and past Cloud
+  Hypervisor's 60 s wait for the agent once several boot at once. It proves behavior, not
+  speed: timing checks there (CPU sampled within 5 s, a boot within 60 s) measure the
+  nesting.
+- Shims outlive their daemon, as containers do, so an e2e run killed outright leaves its
+  VMs holding memory: seven left test hosts (6 GB each) made a later VM fail to start
+  (`VZErrorDomain Code=1`). `e2e/reap.sh` stops those of earlier runs whose daemon is gone.
 - `docker` over `ssh://` runs `docker system dial-stdio` on the host: the host needs the
   docker CLI (only the CLI package, no engine), with `DOCKER_HOST` pointing at pratico's socket.
 - Most VPSes do not expose `/dev/kvm`. KVM is there on bare-metal servers and on clouds
@@ -102,9 +108,10 @@ scanning, and the flight recorder are the same code.
    `exec_command`), with offloads off so frames reach the switch whole; its sockets live in
    `<home>/run/ch`, not a directory every daemon on the host shares. `make e2e-testhost`
    checks DNS, egress, user networks, published ports, bind mounts and volumes (21 checks);
-   `e2e/run.sh` runs inside the test host as well. A shim that has not booted its VM
-   within 120 s is killed and the start fails, instead of the daemon going on to a shim
-   not yet listening.
+   `e2e/run.sh` runs inside the test host as well, as a record rather than a gate: its
+   failures there were Mac-only checks (Time Machine) and nesting's timing (below), each
+   looked at. A shim that has not booted its VM within 120 s is killed and the start fails,
+   instead of the daemon going on to a shim not yet listening.
 4. Install over SSH: one documented command, systemd unit, `pratico` user. The binaries
    go static (musl) here, with no libcurl: FoundationNetworking goes from the Linux build.
 5. Menubar: hosts list over swift-nio-ssh, `/pratico/*` from each, active host written to

@@ -15,6 +15,8 @@ ASSETS="${PRATICO_RUNTIME_ASSETS:-$(pwd)/.build/runtime-assets}"
 [ -f "$ASSETS/vmlinux" ] || { echo "runtime assets missing: run make assets"; exit 1; }
 export PRATICO_RUNTIME_ASSETS="$ASSETS"
 
+. "$(dirname "$0")/reap.sh"
+reap_stale pratico-e2e
 # $TMPDIR keeps the socket path under the 104-byte sun_path limit.
 HOME_DIR="$(mktemp -d "${TMPDIR:-/tmp}/pratico-e2e.XXXXXX")"
 SOCK="$HOME_DIR/docker.sock"
@@ -60,6 +62,7 @@ cleanup() {
         docker network prune -f >/dev/null 2>&1
     fi
     stop_daemon
+    reap_own "$HOME_DIR"
     # Images live in its store too; kept when a check failed, for its logs.
     if [ "$fail" -eq 0 ]; then rm -rf "$HOME_DIR"; else echo "kept $HOME_DIR"; fi
 }

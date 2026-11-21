@@ -35,6 +35,8 @@ install -m 755 "$CACHE/virtiofsd/virtiofsd" "$STAGE/virtiofsd"
 echo "building pratico for Linux (scripts/linux-check.sh host)"
 "$ROOT/scripts/linux-check.sh" host "$STAGE" >"$CACHE/build.log" 2>&1 || { tail -20 "$CACHE/build.log"; exit 1; }
 
+. "$ROOT/e2e/reap.sh"
+reap_stale pratico-testhost
 # $TMPDIR keeps the socket path under the 104-byte sun_path limit.
 HOME_DIR="$(mktemp -d -t pratico-testhost)"
 SOCK="$HOME_DIR/docker.sock"
@@ -91,6 +93,7 @@ cleanup() {
         [ -n "$ids" ] && docker rm -f $ids >/dev/null 2>&1
     fi
     [ -n "$DAEMON_PID" ] && kill "$DAEMON_PID" 2>/dev/null && wait "$DAEMON_PID" 2>/dev/null
+    reap_own "$HOME_DIR"
     if [ "$fail" -eq 0 ]; then rm -rf "$HOME_DIR"; else echo "kept $HOME_DIR (daemon.log, testhost.log)"; fi
 }
 trap cleanup EXIT
@@ -102,7 +105,7 @@ for _ in $(seq 50); do [ -S "$SOCK" ] && break; sleep 0.1; done
 
 docker buildx create --name pratico-build --driver docker-container --driver-opt default-load=true >/dev/null
 BUILDX_BUILDER=pratico-build docker build -q -t pratico-testhost "$ROOT/e2e/testhost" >/dev/null || { echo "cannot build the test host image"; exit 1; }
-docker run -d --name testhost --runtime pratico-testhost --privileged --cpus 8 -m 8g \
+docker run -d --name testhost --runtime pratico-testhost --privileged --cpus 4 -m 6g \
     -p "127.0.0.1:$PORT:22" -v "$STAGE:/opt/pratico:ro" -v "$ROOT/e2e:/e2e:ro" pratico-testhost >/dev/null || { echo "cannot start the test host"; exit 1; }
 for _ in $(seq 100); do onhost test -S /var/run/docker.sock 2>/dev/null && break; sleep 0.3; done
 
