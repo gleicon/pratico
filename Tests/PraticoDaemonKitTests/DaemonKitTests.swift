@@ -1,8 +1,5 @@
 import ContainerizationArchive
 import Foundation
-#if canImport(FoundationNetworking)
-import FoundationNetworking
-#endif
 import Testing
 
 import PraticoCore
@@ -451,13 +448,13 @@ private let grypeSample = Data(#"""
 }
 
 @Test func registryRedirectsNeverDowngradeOrLeakCredentials() throws {
-    var r = URLRequest(url: try #require(URL(string: "https://registry.example/v2/a/blobs/sha256:1")))
+    var r = RegistryRequest(url: try #require(URL(string: "https://registry.example/v2/a/blobs/sha256:1")))
     r.setValue("Bearer t", forHTTPHeaderField: "Authorization")
     let cdn = RegistryResponse(status: 307, headers: ["Location": "https://cdn.example/blob?sig=x"])
     let next = try #require(RegistrySession.redirect(r, cdn))
-    #expect(next.url?.host == "cdn.example" && next.value(forHTTPHeaderField: "Authorization") == nil)
+    #expect(next.url.host == "cdn.example" && next.value(forHTTPHeaderField: "Authorization") == nil)
     let same = try #require(RegistrySession.redirect(r, RegistryResponse(status: 302, headers: ["location": "/v2/a/blobs/other"])))
-    #expect(same.url?.absoluteString == "https://registry.example/v2/a/blobs/other" && same.value(forHTTPHeaderField: "Authorization") == "Bearer t")
+    #expect(same.url.absoluteString == "https://registry.example/v2/a/blobs/other" && same.value(forHTTPHeaderField: "Authorization") == "Bearer t")
     #expect(RegistrySession.redirect(r, RegistryResponse(status: 302, headers: ["Location": "http://cdn.example/blob"])) == nil)
     #expect(RegistrySession.redirect(r, RegistryResponse(status: 200, headers: ["Location": "https://x.example/"])) == nil)
 }

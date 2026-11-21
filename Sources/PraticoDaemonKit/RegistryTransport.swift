@@ -28,13 +28,32 @@ struct RegistryResponse: Sendable {
 
 typealias RegistryBody = AsyncThrowingStream<Data, any Error>
 
+/// A request as `RegistrySession` builds it, for either HTTP stack: Foundation's
+/// `URLRequest` would pull FoundationNetworking, and with it libcurl, into the Linux build.
+struct RegistryRequest: Sendable {
+    var url: URL
+    var httpMethod = "GET"
+    private(set) var headers: [String: String] = [:]
+
+    init(url: URL) { self.url = url }
+
+    mutating func setValue(_ value: String?, forHTTPHeaderField name: String) {
+        headers = headers.filter { $0.key.lowercased() != name.lowercased() }
+        if let value { headers[name] = value }
+    }
+
+    func value(forHTTPHeaderField name: String) -> String? {
+        headers.first { $0.key.lowercased() == name.lowercased() }?.value
+    }
+}
+
 /// How `RegistrySession` reaches a registry: URLSession on the Mac, so the system's proxy,
 /// PAC settings, and roots (MDM-installed ones included) apply; AsyncHTTPClient on Linux
 /// hosts (docs/design/remote.md), with `HTTPS_PROXY`/`NO_PROXY` and the system's CA bundle.
 /// Neither follows redirects: `RegistrySession` applies one redirect policy to both.
 protocol RegistryTransport: Sendable {
-    func send(_ request: URLRequest) async throws -> (RegistryResponse, RegistryBody)
-    func upload(_ request: URLRequest, file: URL) async throws -> RegistryResponse
+    func send(_ request: RegistryRequest) async throws -> (RegistryResponse, RegistryBody)
+    func upload(_ request: RegistryRequest, file: URL) async throws -> RegistryResponse
     /// TLS answered at `url`, whatever the status: true; no TLS there: false; no answer
     /// yet (refused, timed out): nil. A certificate the policy does not trust counts as
     /// TLS, so the request fails and says which CA to add, never a silent downgrade.
@@ -74,8 +93,8 @@ final class URLSessionTransport: NSObject, RegistryTransport, URLSessionTaskDele
 
     func shutdown() { session.finishTasksAndInvalidate() }
 
-    func send(_ request: URLRequest) async throws -> (RegistryResponse, RegistryBody) {
-        let (bytes, response) = try await session.bytes(for: request)
+    func send(_ request: RegistryRequest) async throws -> (RegistryResponse, RegistryBody) {
+        let (bytes, response) = try await session.bytes(for: Self.urlRequest(request))
         let head = try Self.head(response)
         let body = RegistryBody { continuation in
             let task = Task {
@@ -100,8 +119,8 @@ final class URLSessionTransport: NSObject, RegistryTransport, URLSessionTaskDele
         return (head, body)
     }
 
-    func upload(_ request: URLRequest, file: URL) async throws -> RegistryResponse {
-        let (_, response) = try await session.upload(for: request, fromFile: file)
+    func upload(_ request: RegistryRequest, file: URL) async throws -> RegistryResponse {
+        let (_, response) = try await session.upload(for: Self.urlRequest(request), fromFile: file)
         return try Self.head(response)
     }
 
@@ -116,6 +135,13 @@ final class URLSessionTransport: NSObject, RegistryTransport, URLSessionTaskDele
         } catch {
             return true
         }
+    }
+
+    private static func urlRequest(_ r: RegistryRequest) -> URLRequest {
+        var out = URLRequest(url: r.url)
+        out.httpMethod = r.httpMethod
+        for (k, v) in r.headers { out.setValue(v, forHTTPHeaderField: k) }
+        return out
     }
 
     private static func head(_ response: URLResponse) throws -> RegistryResponse {
@@ -229,12 +255,11 @@ final class HTTPClientTransport: RegistryTransport, @unchecked Sendable {
         return false
     }
 
-    private func request(_ r: URLRequest) throws -> HTTPClientRequest {
-        guard let url = r.url else { throw RegistryError(status: 400, description: "request without a URL") }
-        var out = HTTPClientRequest(url: url.absoluteString)
-        out.method = HTTPMethod(rawValue: r.httpMethod ?? "GET")
+    private func request(_ r: RegistryRequest) -> HTTPClientRequest {
+        var out = HTTPClientRequest(url: r.url.absoluteString)
+        out.method = HTTPMethod(rawValue: r.httpMethod)
         out.headers.add(name: "User-Agent", value: "pratico/\(Pratico.version)")
-        for (k, v) in r.allHTTPHeaderFields ?? [:] { out.headers.replaceOrAdd(name: k, value: v) }
+        for (k, v) in r.headers { out.headers.replaceOrAdd(name: k, value: v) }
         return out
     }
 
@@ -244,8 +269,8 @@ final class HTTPClientTransport: RegistryTransport, @unchecked Sendable {
         return RegistryResponse(status: Int(r.status.code), headers: headers)
     }
 
-    func send(_ r: URLRequest) async throws -> (RegistryResponse, RegistryBody) {
-        let response = try await client.execute(try request(r), timeout: Self.deadline)
+    func send(_ r: RegistryRequest) async throws -> (RegistryResponse, RegistryBody) {
+        let response = try await client.execute(request(r), timeout: Self.deadline)
         let body = RegistryBody { continuation in
             let task = Task {
                 do {
@@ -260,8 +285,8 @@ final class HTTPClientTransport: RegistryTransport, @unchecked Sendable {
         return (Self.head(response), body)
     }
 
-    func upload(_ r: URLRequest, file: URL) async throws -> RegistryResponse {
-        var req = try request(r)
+    func upload(_ r: RegistryRequest, file: URL) async throws -> RegistryResponse {
+        var req = request(r)
         let size = (try FileManager.default.attributesOfItem(atPath: file.path)[.size] as? NSNumber)?.int64Value ?? 0
         let handle = try FileHandle(forReadingFrom: file)
         defer { try? handle.close() }
@@ -278,7 +303,7 @@ final class HTTPClientTransport: RegistryTransport, @unchecked Sendable {
 
     func speaksTLS(_ url: URL) async -> Bool? {
         do {
-            let response = try await client.execute(try request(URLRequest(url: url)), timeout: .seconds(5))
+            let response = try await client.execute(request(RegistryRequest(url: url)), timeout: .seconds(5))
             for try await _ in response.body {}
             return true
         } catch let e as NIOSSLError {

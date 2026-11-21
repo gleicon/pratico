@@ -39,7 +39,7 @@ let package = Package(
                 .product(name: "CloudHypervisor", package: "containerization", condition: .when(platforms: [.linux])),
                 .product(name: "AsyncHTTPClient", package: "async-http-client", condition: .when(platforms: [.linux])),
                 .product(name: "NIOSSL", package: "swift-nio-ssl", condition: .when(platforms: [.linux])),
-                .product(name: "NIOHTTP1", package: "swift-nio", condition: .when(platforms: [.linux])),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
                 .product(name: "X509", package: "swift-certificates", condition: .when(platforms: [.linux])),
             ]),
         .executableTarget(name: "pratico-daemon", dependencies: ["PraticoCore", "PraticoDaemonKit"]),

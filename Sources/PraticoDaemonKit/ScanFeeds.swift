@@ -1,7 +1,4 @@
 import Foundation
-#if canImport(FoundationNetworking)
-import FoundationNetworking
-#endif
 
 /// The public data scans are enriched with, each cached a day in `scan-db/` so a scan
 /// offline still uses the last copy: CISA's catalog of exploited CVEs, and FIRST's EPSS.
@@ -11,17 +8,39 @@ extension ScanService {
     /// The body of a `200` (or a `file://` URL, for tests) within `timeout`; nil otherwise.
     /// Blocking: scans run on their own queue.
     static func fetch(_ url: URL, timeout: TimeInterval = 30) -> Data? {
-        // Read directly: Linux's URLSession does not load file URLs.
         if url.isFileURL { return try? Data(contentsOf: url) }
         let done = DispatchSemaphore(value: 0)
         let fetched = Box<Data?>(nil)
+        #if canImport(Security)
         URLSession.shared.dataTask(with: url) { data, response, _ in
             if (response as? HTTPURLResponse)?.statusCode == 200 { fetched.value = data }
             done.signal()
         }.resume()
         _ = done.wait(timeout: .now() + timeout)
+        #else
+        // The registries' transport: the same proxy and CA bundle, and no libcurl.
+        let transport = HTTPClientTransport(policy: RegistryPolicy(), host: url.host ?? "")
+        defer { transport.shutdown() }
+        let task = Task {
+            let (head, body) = try await transport.send(RegistryRequest(url: url))
+            guard head.status == 200 else { return }
+            fetched.value = try await RegistrySession.collect(body, limit: Self.feedLimit)
+        }
+        Task {
+            _ = await task.result
+            done.signal()
+        }
+        // A late task may still write `fetched`: past the deadline it is not read.
+        if done.wait(timeout: .now() + timeout) == .timedOut {
+            task.cancel()
+            return nil
+        }
+        #endif
         return fetched.value
     }
+
+    /// The largest feed read (egress lists are capped lower, at `EgressFeeds.maxBytes`).
+    static let feedLimit = 128 << 20
 
     /// CISA KEV CVE IDs, cached for a day; a stale cache beats none when offline.
     func knownExploited() -> (Set<String>, String?) {

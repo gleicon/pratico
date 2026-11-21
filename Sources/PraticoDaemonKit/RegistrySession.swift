@@ -4,11 +4,9 @@ import ContainerizationOCI
 import Crypto
 import Foundation
 import NIOCore
+import NIOHTTP1
 import PraticoCore
 
-#if canImport(FoundationNetworking)
-import FoundationNetworking
-#endif
 #if canImport(Security)
 import Security
 #else
@@ -249,8 +247,9 @@ final class RegistrySession: ContentClient, @unchecked Sendable {
     /// The next request for a redirect, or nil to stop at it: never from HTTPS to plain
     /// HTTP, and no credentials to another host (blobs commonly redirect to a CDN, which
     /// gets none). Both transports leave redirects to this.
-    static func redirect(_ request: URLRequest, _ response: RegistryResponse) -> URLRequest? {
-        guard [301, 302, 303, 307, 308].contains(response.status), let from = request.url,
+    static func redirect(_ request: RegistryRequest, _ response: RegistryResponse) -> RegistryRequest? {
+        let from = request.url
+        guard [301, 302, 303, 307, 308].contains(response.status),
             let location = response.value("Location"), let to = URL(string: location, relativeTo: from)?.absoluteURL
         else { return nil }
         if from.scheme == "https" && to.scheme != "https" { return nil }
@@ -276,7 +275,7 @@ final class RegistrySession: ContentClient, @unchecked Sendable {
 
     /// Sends `make()` with what the registry asked for: a cached Bearer token for `scope`,
     /// or Basic. A 401 with a challenge is answered once.
-    private func send(_ scope: String?, _ make: () throws -> URLRequest) async throws -> (RegistryBody, RegistryResponse) {
+    private func send(_ scope: String?, _ make: () throws -> RegistryRequest) async throws -> (RegistryBody, RegistryResponse) {
         var answered = false
         while true {
             var request = try make()
@@ -330,7 +329,7 @@ final class RegistrySession: ContentClient, @unchecked Sendable {
         if let scope, !scope.isEmpty { items.append(URLQueryItem(name: "scope", value: scope)) }
         c.queryItems = items
         guard let url = c.url else { throw RegistryError(status: 401, description: "invalid token realm \(realm)") }
-        var request = URLRequest(url: url)
+        var request = RegistryRequest(url: url)
         if let creds = credentials { request.setValue(Self.basicHeader(creds), forHTTPHeaderField: "Authorization") }
         // Token requests do not follow redirects (Containerization refuses them too).
         let (http, body) = try await transport.send(request)
@@ -399,7 +398,7 @@ final class RegistrySession: ContentClient, @unchecked Sendable {
         return out
     }
 
-    private static func collect(_ body: RegistryBody, limit: Int) async throws -> Data {
+    static func collect(_ body: RegistryBody, limit: Int) async throws -> Data {
         var data = Data()
         for try await chunk in body {
             data.append(chunk)
@@ -410,7 +409,7 @@ final class RegistrySession: ContentClient, @unchecked Sendable {
 
     private func failure(_ http: RegistryResponse, _ body: RegistryBody, _ what: String) async -> RegistryError {
         let json = (try? await Self.collect(body, limit: 64 << 10)).flatMap { JSON.parse($0) }
-        let reason = json?["errors"]?.array?.first?["message"]?.string ?? HTTPURLResponse.localizedString(forStatusCode: http.status)
+        let reason = json?["errors"]?.array?.first?["message"]?.string ?? HTTPResponseStatus(statusCode: http.status).reasonPhrase
         if http.status == 401 || http.status == 403 {
             // Docker Hub answers a repository that does not exist the same way, with or
             // without a login: say so, as Docker does.
@@ -427,7 +426,7 @@ final class RegistrySession: ContentClient, @unchecked Sendable {
     /// `GET /v2/` with the credentials: a 401 after answering the challenge means wrong
     /// credentials. A registry without authentication accepts any.
     func ping() async throws {
-        let (bytes, http) = try await send(nil) { URLRequest(url: url("/v2/")) }
+        let (bytes, http) = try await send(nil) { RegistryRequest(url: url("/v2/")) }
         guard http.status == 200 else {
             let e = await failure(http, bytes, "GET \(url("/v2/").absoluteString)")
             if e.unauthorized { throw Self.wrongCredentials("Get \"\(url("/v2/").absoluteString)\"") }
@@ -452,7 +451,7 @@ final class RegistrySession: ContentClient, @unchecked Sendable {
         let accept = (Self.manifestTypes + ["*/*"]).joined(separator: ", ")
         let target = url("/v2/\(name)/manifests/\(tag)")
         let (bytes, http) = try await send(Self.scope(name)) {
-            var r = URLRequest(url: target)
+            var r = RegistryRequest(url: target)
             r.httpMethod = "HEAD"
             r.setValue(accept, forHTTPHeaderField: "Accept")
             return r
@@ -478,7 +477,7 @@ final class RegistrySession: ContentClient, @unchecked Sendable {
         guard !descriptor.mediaType.isEmpty else { throw RegistryError(status: 400, description: "missing media type for \(descriptor.digest)") }
         let target = url(path(name, descriptor))
         let (bytes, http) = try await send(Self.scope(name)) {
-            var r = URLRequest(url: target)
+            var r = RegistryRequest(url: target)
             r.setValue(descriptor.mediaType, forHTTPHeaderField: "Accept")
             return r
         }
@@ -491,7 +490,7 @@ final class RegistrySession: ContentClient, @unchecked Sendable {
     func fetchBlob(name: String, descriptor: Descriptor, into file: URL, progress: ProgressHandler?) async throws -> (Int64, SHA256Digest) {
         let target = url("/v2/\(name)/blobs/\(descriptor.digest)")
         let (bytes, http) = try await send(Self.scope(name)) {
-            var r = URLRequest(url: target)
+            var r = RegistryRequest(url: target)
             r.setValue(descriptor.mediaType.isEmpty ? "*/*" : descriptor.mediaType, forHTTPHeaderField: "Accept")
             return r
         }
@@ -533,7 +532,7 @@ final class RegistrySession: ContentClient, @unchecked Sendable {
         let object = isManifest ? (tag.contains("@") || tag.isEmpty ? descriptor.digest : tag) : descriptor.digest
         let check = url("/v2/\(name)/\(isManifest ? "manifests" : "blobs")/\(object)")
         let (headBytes, head) = try await send(scope) {
-            var r = URLRequest(url: check)
+            var r = RegistryRequest(url: check)
             r.httpMethod = "HEAD"
             r.setValue("\(descriptor.mediaType), */*", forHTTPHeaderField: "Accept")
             return r
@@ -560,7 +559,7 @@ final class RegistrySession: ContentClient, @unchecked Sendable {
         } else {
             let start = url("/v2/\(name)/blobs/uploads/")
             let (b, http) = try await send(scope) {
-                var r = URLRequest(url: start)
+                var r = RegistryRequest(url: start)
                 r.httpMethod = "POST"
                 return r
             }
@@ -579,7 +578,7 @@ final class RegistrySession: ContentClient, @unchecked Sendable {
             target = resolved.url!
         }
         let contentType = isManifest ? descriptor.mediaType : "application/octet-stream"
-        var put = URLRequest(url: target)
+        var put = RegistryRequest(url: target)
         put.httpMethod = "PUT"
         put.setValue(contentType, forHTTPHeaderField: "Content-Type")
         put.setValue(String(descriptor.size), forHTTPHeaderField: "Content-Length")
