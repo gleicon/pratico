@@ -160,6 +160,25 @@ Local Mac development still comes first. When pratico runs on remote hosts:
 - [ ] Slice 2: a Linux VM with KVM on the Mac; the static Linux daemon with pinned Cloud Hypervisor runs `alpine true` through `docker -H ssh://`
 - Memory follows use there too, through virtio-balloon free page reporting (KVM returns pages the guest frees); same criterion as on the Mac
 
+## Components as their own projects (backlog, after the Linux hosts slices; planned 2026-11-20)
+
+Pratico grew pieces that stand alone. Review each before extracting any: who else would use
+it, how clean its boundary is, whether it has its own tests, and whether a separate project
+would get it more review (most are security-sensitive). Extraction costs a release process
+and upkeep per project, so only pieces that pass the review move out.
+
+- [ ] Review the candidates and decide which to extract, which to keep in pratico, and in what order:
+  - Userspace switch and egress control (`Net/`, ~2,500 lines): L2 switch, NAT uplink, named flows, allowlists, threat feeds, ask mode
+  - Guest BPF loader and flight recorder (`VminitdCore/BPFObject.swift`, `Recorder.swift`, `vm/bpf`, ~600 lines): loads CO-RE-free probes with no libbpf
+  - Seccomp compiler (`ContainerizationOCI/LinuxSeccomp+BPF.swift`, ~250 lines): Docker and OCI profiles to classic BPF
+  - Registry client with a visible trust policy (`RegistrySession`, `RegistryTransport`, ~900 lines): tokens, realm checks, digests, plain-HTTP and extra-CA rules, two transports
+  - Image scanning orchestration (`Scan*`, ~750 lines): osv-scanner, grype, trivy, KEV, EPSS merged into one report
+  - Safe archive handling (`Tar`, `Archive`, `DockerArchive`, ~600 lines): extraction that never writes through links, legacy `docker save` conversion
+  - MCP server for containers (`MCP*`, ~470 lines)
+  - Reproducible kernel and init builds (`scripts/build-*.sh`, `vm/`)
+  - The vendored containerization fork (`Vendor/containerization`)
+- [ ] For each one kept for extraction: its own package and tests, pratico depending on it by version, its own release with a proper tag
+
 ## Won't do (decided 2026-11-20)
 
 - TLS inspection and a per-install CA: egress names every flow from DNS, SNI, or Host; a man-in-the-middle CA is a key to protect and new attack surface
