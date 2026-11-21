@@ -26,8 +26,12 @@ scanning, and the flight recorder are the same code.
 - This Mac (M5, macOS 26.4) supports nested virtualization
   (`VZGenericPlatformConfiguration.isNestedVirtualizationSupported`), so a Linux VM here
   can run KVM: the Linux host can be built and tested on the Mac. arm64 only.
-- pratico's kernel has no KVM (`config-pratico`), so the test host needs a kernel with
-  `CONFIG_KVM`.
+- pratico's kernel has KVM built in (`CONFIG_KVM=y`, from upstream's `config-arm64`), but
+  Virtualization.framework boots a VM without hypervisor mode unless it asks for nested
+  virtualization: the guest logs `kvm: HYP mode not available` and has no `/dev/kvm`, even
+  with `--privileged`. The test host is the one VM that asks, through
+  `--runtime pratico-testhost`, which only a daemon started with `PRATICO_TESTHOST=1`
+  accepts; its guest logs `Hyp nVHE mode initialized successfully` (2026-11-21).
 - `docker` over `ssh://` runs `docker system dial-stdio` on the host: the host needs the
   docker CLI (only the CLI package, no engine), with `DOCKER_HOST` pointing at pratico's socket.
 - Most VPSes do not expose `/dev/kvm`. KVM is there on bare-metal servers and on clouds
@@ -80,11 +84,17 @@ scanning, and the flight recorder are the same code.
 
 1. Daemon compiles for Linux; platform seams for VM boot, NIC, TLS trust and logins;
    unit tests pass on Linux (`scripts/linux-check.sh`). Done 2026-11-20, against glibc in
-   the pinned Swift image; the static (musl) build comes with slice 2.
+   the pinned Swift image.
 2. Test host on the Mac: a Linux VM with KVM and the Linux daemon; `docker -H ssh://` runs
-   `alpine true` in a Cloud Hypervisor VM.
-3. Networking and egress through the switch on Linux; the e2e suite runs against the test host.
-4. Install over SSH: one documented command, systemd unit, `pratico` user.
+   `alpine true` in a Cloud Hypervisor VM. Done 2026-11-21 (`make e2e-testhost`): an
+   Ubuntu 24.04 container on `--runtime pratico-testhost` with sshd and the docker CLI;
+   the daemon and shim built in the pinned Swift image with the Swift runtime linked in
+   (`scripts/linux-check.sh host`, still needing glibc, libarchive and libcurl), Cloud
+   Hypervisor v55.0 pinned by SHA-256. Containers run with `--network none` until slice 3.
+3. Networking and egress through the switch on Linux; `virtiofsd`, pinned, for volumes and
+   bind mounts; the e2e suite runs against the test host.
+4. Install over SSH: one documented command, systemd unit, `pratico` user. The binaries
+   go static (musl) here, with no libcurl: FoundationNetworking goes from the Linux build.
 5. Menubar: hosts list over swift-nio-ssh, `/pratico/*` from each, active host written to
    the docker context.
 6. x86_64: kernel, init, probes, and the seccomp syscall table; e2e on an x86_64 KVM host.

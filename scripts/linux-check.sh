@@ -2,6 +2,7 @@
 # Builds the daemon for Linux and runs its unit tests there, in the pinned Swift image on
 # pratico itself (as build-init.sh does). The build directory is a volume, kept between runs.
 # Usage: scripts/linux-check.sh [build|test]    (default: test)
+#        scripts/linux-check.sh host <out-dir>  release daemon and shim, Swift linked in
 set -euo pipefail
 
 SWIFT_IMAGE=swift@sha256:1ba0416be43dc57ba6ff7d02114356cad1ab17364024b7669385e3fe41a224aa  # 6.3.3-noble, as build-init.sh
@@ -14,10 +15,14 @@ deps='apt-get -qq update >/dev/null && apt-get -qq install -y --no-install-recom
 case "${1:-test}" in
 build) cmd='swift build --scratch-path /build --product pratico-daemon && swift build --scratch-path /build --product pratico-shim' ;;
 test) cmd='swift test --scratch-path /build --filter "PraticoCoreTests|PraticoDaemonKitTests"' ;;
-*) echo "usage: scripts/linux-check.sh [build|test]" >&2; exit 2 ;;
+host)
+    OUT="$(mkdir -p "${2:?usage: scripts/linux-check.sh host <out-dir>}" && cd "$2" && pwd)"
+    out=(-v "$OUT":/out)
+    cmd='for p in pratico-daemon pratico-shim; do swift build --scratch-path /build -c release --static-swift-stdlib --product $p || exit 1; done && cp /build/release/pratico-daemon /build/release/pratico-shim /out/' ;;
+*) echo "usage: scripts/linux-check.sh [build|test|host <out-dir>]" >&2; exit 2 ;;
 esac
 
 docker volume inspect pratico-linux-build >/dev/null 2>&1 || docker volume create pratico-linux-build >/dev/null
 docker run --rm --cpus "$(sysctl -n hw.ncpu)" -m 12g \
-    -v "$ROOT":/src:ro -v pratico-linux-build:/build -w /src \
+    -v "$ROOT":/src:ro -v pratico-linux-build:/build ${out[@]+"${out[@]}"} -w /src \
     "$SWIFT_IMAGE" sh -c "$deps && $cmd"

@@ -355,6 +355,7 @@ public enum ShimHost {
         config.unified = o.cgroup
         config.sysctl = o.sysctls
         config.useInit = o.useInit
+        config.virtualization = o.nestedVirtualization ?? false
         if o.unmaskedPaths {
             config.maskedPaths = []
             config.readonlyPaths = []

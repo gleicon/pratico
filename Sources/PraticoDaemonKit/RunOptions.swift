@@ -39,11 +39,21 @@ struct RunOptions: Codable, Sendable, Equatable {
     var stopTimeout = 10
     var restart = RestartPolicy()
     var logBytes = LogStore.defaultCap
+    /// `--runtime pratico-testhost`: the VM boots with nested virtualization, so the guest
+    /// kernel's KVM runs and the container sees `/dev/kvm`. Optional, so specs from before
+    /// it decode; nil is false.
+    var nestedVirtualization: Bool?
 
     enum Seccomp: Codable, Sendable, Equatable {
         case `default`, unconfined
         case profile(String)
     }
+
+    /// The Linux test host's runtime (docs/design/remote.md): a VM with hypervisor mode,
+    /// to develop pratico's Linux hosts on. Only a daemon started with PRATICO_TESTHOST=1
+    /// accepts it; every other VM boots without hypervisor mode, so its KVM is inert.
+    static let testHostRuntime = "pratico-testhost"
+    static var testHostEnabled: Bool { ProcessInfo.processInfo.environment["PRATICO_TESTHOST"] == "1" }
 
     /// The guest kernel's version, for Docker profiles' `minKernel`; a test ties it to
     /// scripts/build-kernel.sh.
@@ -236,6 +246,7 @@ extension RunOptions {
         // As on Docker, a privileged container runs no seccomp filter, whatever was asked.
         if host["Privileged"]?.bool == true { seccomp = .unconfined }
         readonlyRootfs = host["ReadonlyRootfs"]?.bool ?? false
+        if host["Runtime"]?.string == Self.testHostRuntime { nestedVirtualization = true }
     }
 
     /// Docker's `CAP_X`, `X`, or `ALL`, as `CAP_X` or `ALL`.
@@ -399,7 +410,8 @@ extension RunOptions {
                 }
             }
         }
-        if let r = host["Runtime"]?.string, !["", "runc"].contains(r) { throw APIError(400, "pratico: --runtime \(r) is not supported") }
+        let runtimes = ["", "runc"] + (testHostEnabled ? [testHostRuntime] : [])
+        if let r = host["Runtime"]?.string, !runtimes.contains(r) { throw APIError(400, "pratico: --runtime \(r) is not supported") }
         if let i = host["Isolation"]?.string, !["", "default"].contains(i) { throw APIError(400, "pratico: --isolation \(i) is not supported") }
         if config["NetworkDisabled"]?.bool == true { throw APIError(400, "pratico: NetworkDisabled is not supported; use --network none") }
     }

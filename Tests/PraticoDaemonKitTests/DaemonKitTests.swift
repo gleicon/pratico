@@ -695,6 +695,21 @@ private func emptyDir() throws -> URL {
     #expect(nics.addresses(card: 0).first == "172.18.0.2/24")
 }
 
+@Test func testHostRuntimeOnlyWhereEnabled() throws {
+    func parse(_ host: JSON) throws -> RunOptions {
+        try RunOptions.parse(host: host, config: [:], defaultCPUs: 4, defaultMemoryMiB: 1024)
+    }
+    let testHost: JSON = ["Runtime": .string(RunOptions.testHostRuntime)]
+    unsetenv("PRATICO_TESTHOST")
+    #expect(throws: APIError.self) { try parse(testHost) }
+    #expect(try parse(["Runtime": "runc"]).nestedVirtualization == nil)
+    setenv("PRATICO_TESTHOST", "1", 1)
+    defer { unsetenv("PRATICO_TESTHOST") }
+    #expect(try parse(testHost).nestedVirtualization == true)
+    #expect(try parse([:]).nestedVirtualization == nil)
+    #expect(throws: APIError.self) { try parse(["Runtime": "kata"]) }
+}
+
 @Test func runOptionsApplyWhatTheyAccept() throws {
     func parse(_ host: JSON, _ config: JSON = [:]) throws -> RunOptions {
         try RunOptions.parse(host: host, config: config, defaultCPUs: 4, defaultMemoryMiB: 1024)

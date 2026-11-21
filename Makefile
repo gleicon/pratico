@@ -12,7 +12,7 @@ DMG          := $(DIST_DIR)/Pratico-$(VERSION).dmg
 
 ASSETS_DIR   := $(BUILD_DIR)/runtime-assets
 
-.PHONY: e2e-tools all build assets probe test e2e e2e-embedded e2e-registry bench app sign dmg release install run uninstall clean
+.PHONY: e2e-tools e2e-testhost all build assets probe test e2e e2e-embedded e2e-registry bench app sign dmg release install run uninstall clean
 
 all: build
 
@@ -48,6 +48,10 @@ e2e-tools: build assets
 # Bounds, performance, and CLI compatibility (AC-44 to AC-49): minutes, and 32 VMs at once.
 bench: build assets
 	e2e/bench.sh "$(BIN_DIR)"
+
+# Remote hosts on the Mac: the Linux daemon in a KVM test host, over docker's ssh://.
+e2e-testhost: build assets
+	e2e/testhost.sh "$(BIN_DIR)"
 
 # Test harness only: spins up a throwaway private registry to check docker login + pull.
 e2e-registry: build
