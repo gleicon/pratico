@@ -45,13 +45,18 @@ public actor EmbeddedRuntime {
     public let store: ImageStore
     /// The store's content, shared with pratico's registry client (`RegistrySession`).
     public let content: LocalContentStore
+    #if canImport(Virtualization)
+    /// For `run`, pratico-runtime-probe's path (the Mac only).
     private var manager: ContainerManager
+    #endif
 
-    private init(assets: URL, store: ImageStore, content: LocalContentStore, manager: ContainerManager) {
+    private init(assets: URL, store: ImageStore, content: LocalContentStore, kernel: Kernel, reference: String) async throws {
         self.assets = assets
         self.store = store
         self.content = content
-        self.manager = manager
+        #if canImport(Virtualization)
+        manager = try await ContainerManager(kernel: kernel, initfsReference: reference, imageStore: store)
+        #endif
     }
 
     /// Where the kernel and `vminit` are: `PRATICO_RUNTIME_ASSETS`, the app bundle's
@@ -88,10 +93,10 @@ public actor EmbeddedRuntime {
             try? await store.delete(reference: img.reference)  // an earlier pratico's init; its blobs go with prune
         }
         let kernel = Kernel(path: assets.appending(path: "vmlinux"), platform: .linuxArm)
-        let manager = try await ContainerManager(kernel: kernel, initfsReference: reference, imageStore: store)
-        return EmbeddedRuntime(assets: assets, store: store, content: content, manager: manager)
+        return try await EmbeddedRuntime(assets: assets, store: store, content: content, kernel: kernel, reference: reference)
     }
 
+    #if canImport(Virtualization)
     /// Runs `arguments` in a fresh container from `image` (pulled if missing) and returns
     /// its exit code and combined output. A first end-to-end path; the per-container
     /// shim replaces it.
@@ -113,6 +118,7 @@ public actor EmbeddedRuntime {
         try await container.stop()
         return (status.exitCode, output.data)
     }
+    #endif
 }
 
 /// Collects a process's output in memory, keeping at most `limit` bytes (the first ones):

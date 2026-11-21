@@ -432,11 +432,31 @@ private let grypeSample = Data(#"""
 }
 
 @Test func registryProxyComesFromTheEnvironment() {
-    #expect(RegistrySession.environmentProxy([:]) == nil)
-    let d = RegistrySession.environmentProxy(["HTTPS_PROXY": "http://proxy.corp:3128", "NO_PROXY": "localhost, .corp"])
+    #if canImport(Security)
+    #expect(URLSessionTransport.environmentProxy([:]) == nil)
+    let d = URLSessionTransport.environmentProxy(["HTTPS_PROXY": "http://proxy.corp:3128", "NO_PROXY": "localhost, .corp"])
     #expect(d?[kCFNetworkProxiesHTTPSProxy] as? String == "proxy.corp")
     #expect(d?[kCFNetworkProxiesHTTPSPort] as? Int == 3128)
     #expect(d?["ExceptionsList"] as? [String] == ["localhost", ".corp"])
+    #else
+    let env = ["NO_PROXY": "localhost, .corp, registry.example"]
+    #expect(HTTPClientTransport.bypassesProxy("localhost:5000", env))
+    #expect(HTTPClientTransport.bypassesProxy("ghcr.corp", env))
+    #expect(HTTPClientTransport.bypassesProxy("registry.example", env))
+    #expect(!HTTPClientTransport.bypassesProxy("ghcr.io", env))
+    #endif
+}
+
+@Test func registryRedirectsNeverDowngradeOrLeakCredentials() throws {
+    var r = URLRequest(url: try #require(URL(string: "https://registry.example/v2/a/blobs/sha256:1")))
+    r.setValue("Bearer t", forHTTPHeaderField: "Authorization")
+    let cdn = RegistryResponse(status: 307, headers: ["Location": "https://cdn.example/blob?sig=x"])
+    let next = try #require(RegistrySession.redirect(r, cdn))
+    #expect(next.url?.host == "cdn.example" && next.value(forHTTPHeaderField: "Authorization") == nil)
+    let same = try #require(RegistrySession.redirect(r, RegistryResponse(status: 302, headers: ["location": "/v2/a/blobs/other"])))
+    #expect(same.url?.absoluteString == "https://registry.example/v2/a/blobs/other" && same.value(forHTTPHeaderField: "Authorization") == "Bearer t")
+    #expect(RegistrySession.redirect(r, RegistryResponse(status: 302, headers: ["Location": "http://cdn.example/blob"])) == nil)
+    #expect(RegistrySession.redirect(r, RegistryResponse(status: 200, headers: ["Location": "https://x.example/"])) == nil)
 }
 
 @Test func onlyRealLoopbackHostsCountAsLoopback() {

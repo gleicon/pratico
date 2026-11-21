@@ -5,7 +5,16 @@ import Crypto
 import Foundation
 import NIOCore
 import PraticoCore
+
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
+#if canImport(Security)
 import Security
+#else
+import NIOSSL
+import X509
+#endif
 
 /// How pratico reaches registries (SPEC D-29), from `config.toml`:
 /// `registry_http`, `registry_http_loopback`, `registry_ca`, `registry_system_roots`.
@@ -27,7 +36,11 @@ struct RegistryPolicy: @unchecked Sendable {
     var keepLogins = true
     var cas: [CA] = []
     /// The CA certificates themselves, in `cas` order.
+    #if canImport(Security)
     var anchors: [SecCertificate] = []
+    #else
+    var anchors: [NIOSSLCertificate] = []
+    #endif
 
     /// Loads and checks the CA files; an unreadable or empty one is a configuration error,
     /// so the daemon refuses to start rather than silently trusting less (or more).
@@ -49,10 +62,18 @@ struct RegistryPolicy: @unchecked Sendable {
             let ders = pemCertificates(text)
             guard !ders.isEmpty else { throw ConfigError("registry_ca: no PEM certificate in \(file)") }
             for der in ders {
+                #if canImport(Security)
                 guard let cert = SecCertificateCreateWithData(nil, der as CFData) else {
                     throw ConfigError("registry_ca: \(file) holds a certificate macOS cannot read")
                 }
                 let subject = (SecCertificateCopySubjectSummary(cert) as String?) ?? "unnamed"
+                #else
+                guard let cert = try? NIOSSLCertificate(bytes: [UInt8](der), format: .der),
+                    let parsed = try? Certificate(derEncoded: [UInt8](der))
+                else { throw ConfigError("registry_ca: \(file) holds a certificate pratico cannot read") }
+                let subject = parsed.subject.flatMap { $0 }.first { $0.type == .RDNAttributeType.commonName }
+                    .map { "\($0.value)" } ?? "unnamed"
+                #endif
                 let digest = SHA256.hash(data: der).map { String(format: "%02x", $0) }.joined()
                 p.cas.append(CA(file: file, subject: subject, sha256: digest))
                 p.anchors.append(cert)
@@ -154,21 +175,20 @@ struct RegistryError: Error, CustomStringConvertible {
     var unauthorized: Bool { status == 401 || status == 403 }
 }
 
-/// pratico's registry client (OCI distribution), on URLSession: the system's proxy and
-/// PAC settings and its trusted roots (MDM-installed ones included) apply, plus the
-/// policy above. It is the `ContentClient` Containerization's import and export use.
+/// pratico's registry client (OCI distribution), over `RegistryTransport` (URLSession on
+/// the Mac, with the system's proxy, PAC settings, and roots), plus the policy above. It is the `ContentClient` Containerization's import and export use.
 ///
 /// It keeps Containerization's guards: digests are verified, a pinned digest cannot be
 /// substituted, sizes are bounded, and tokens are only fetched from the registry's own
 /// domain. Credentials never leave over plain HTTP unless the policy allows that host,
 /// and never follow a redirect to another host.
-final class RegistrySession: NSObject, ContentClient, URLSessionTaskDelegate, @unchecked Sendable {
+final class RegistrySession: ContentClient, @unchecked Sendable {
     let host: String  // as in the reference: docker.io, ghcr.io, 127.0.0.1:5000
     let base: URL
     private let credentials: (username: String, password: String)?
     private let policy: RegistryPolicy
     private let note: @Sendable (String) -> Void
-    private var session: URLSession!
+    private var transport: (any RegistryTransport)!
     private let lock = NSLock()
     private var tokens: [String: (header: String, expires: Date)] = [:]  // by scope
     private var basic = false  // the registry asked for Basic
@@ -189,19 +209,13 @@ final class RegistrySession: NSObject, ContentClient, URLSessionTaskDelegate, @u
         self.credentials = credentials
         self.policy = policy
         self.note = note
-        super.init()
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.urlCache = nil
-        configuration.httpCookieStorage = nil
-        configuration.httpAdditionalHeaders = ["User-Agent": "pratico/\(Pratico.version)"]
-        configuration.connectionProxyDictionary = Self.environmentProxy()
-        session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
+        transport = policy.transport(host: self.host) { [weak self] key, message in self?.say(key, message) }
         if base.scheme == "http", let why = policy.plainHTTPReason(self.host) {
             say("plain-http", "pratico: \(self.host) answers plain HTTP; pratico uses it (\(why)), so this traffic is not encrypted")
         }
     }
 
-    deinit { session?.finishTasksAndInvalidate() }
+    deinit { transport?.shutdown() }
 
     private func say(_ key: String, _ message: String) {
         lock.lock()
@@ -220,100 +234,35 @@ final class RegistrySession: NSObject, ContentClient, URLSessionTaskDelegate, @u
         guard policy.plainHTTPReason(host) != nil else { return "https" }
         return schemes.answer(host) {
             guard let url = URL(string: "https://\(wire)/v2/") else { return "https" }
-            let request = URLRequest(url: url, timeoutInterval: 5)
-            let probe = URLSession(configuration: .ephemeral, delegate: ProbeTrust(policy: policy), delegateQueue: nil)
-            defer { probe.finishTasksAndInvalidate() }
-            do {
-                _ = try blocking { try await probe.data(for: request) }
-                return "https"  // any HTTP status: TLS works
-            } catch let e as URLError where e.code == .cannotConnectToHost || e.code == .timedOut || e.code == .networkConnectionLost {
-                return nil  // not up yet: ask again next time
-            } catch let e as URLError where e.code == .secureConnectionFailed {
-                return "http"  // no TLS there
-            } catch {
-                // TLS with a certificate pratico does not trust: no silent downgrade; the
-                // request fails and says which CA to add.
-                return "https"
-            }
+            let probe = policy.transport(host: host) { _, _ in }
+            defer { probe.shutdown() }
+            // nil: not up yet, ask again next time.
+            return (try? blocking { await probe.speaksTLS(url) }).flatMap { $0.map { $0 ? "https" : "http" } }
         } ?? "https"
     }
 
     private static let schemes = Memo<String, String>()
 
-    /// Docker's daemon honours HTTPS_PROXY/HTTP_PROXY/NO_PROXY; without them the system's
-    /// proxy settings (and PAC) apply.
-    static func environmentProxy(_ env: [String: String] = ProcessInfo.processInfo.environment) -> [AnyHashable: Any]? {
-        func url(_ k: String) -> URL? { (env[k] ?? env[k.lowercased()]).flatMap { URL(string: $0) } }
-        let https = url("HTTPS_PROXY"), http = url("HTTP_PROXY")
-        guard https != nil || http != nil else { return nil }
-        var d: [AnyHashable: Any] = [:]
-        if let p = https, let h = p.host {
-            d[kCFNetworkProxiesHTTPSEnable] = 1
-            d[kCFNetworkProxiesHTTPSProxy] = h
-            d[kCFNetworkProxiesHTTPSPort] = p.port ?? 443
-        }
-        if let p = http, let h = p.host {
-            d[kCFNetworkProxiesHTTPEnable] = 1
-            d[kCFNetworkProxiesHTTPProxy] = h
-            d[kCFNetworkProxiesHTTPPort] = p.port ?? 80
-        }
-        if let no = env["NO_PROXY"] ?? env["no_proxy"] {
-            d["ExceptionsList"] = no.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
-        }
-        return d
-    }
+    // MARK: Redirects
 
-    // MARK: Trust and redirects
-
-    func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge)
-        async -> (URLSession.AuthChallengeDisposition, URLCredential?)
-    {
-        guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
-            let trust = challenge.protectionSpace.serverTrust
-        else { return (.performDefaultHandling, nil) }
-        switch Self.evaluate(trust, policy) {
-        case .system:
-            return (.useCredential, URLCredential(trust: trust))
-        case .extra(let ca):
-            let h = challenge.protectionSpace.host
-            say("ca-\(h)", "pratico: \(h)'s certificate is trusted through an extra CA, \"\(ca.subject)\" SHA-256 \(ca.sha256.prefix(16))… (registry_ca), not a system root")
-            return (.useCredential, URLCredential(trust: trust))
-        case .untrusted:
-            return (.cancelAuthenticationChallenge, nil)
-        }
-    }
-
-    enum Verdict { case system, extra(RegistryPolicy.CA), untrusted }
-
-    /// The system's roots first (unless disabled), then each extra CA, so pratico can say
-    /// which one vouched for the registry.
-    static func evaluate(_ trust: SecTrust, _ policy: RegistryPolicy) -> Verdict {
-        if policy.systemRoots {
-            SecTrustSetAnchorCertificates(trust, nil)
-            SecTrustSetAnchorCertificatesOnly(trust, false)
-            if SecTrustEvaluateWithError(trust, nil) { return .system }
-        }
-        for (i, anchor) in policy.anchors.enumerated() {
-            SecTrustSetAnchorCertificates(trust, [anchor] as CFArray)
-            SecTrustSetAnchorCertificatesOnly(trust, true)
-            if SecTrustEvaluateWithError(trust, nil) { return .extra(policy.cas[i]) }
-        }
-        return .untrusted
-    }
-
-    /// No downgrade to plain HTTP, and no credentials to another host (blobs commonly
-    /// redirect to a CDN, which gets none).
-    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
-                    newRequest request: URLRequest) async -> URLRequest?
-    {
-        guard let from = task.originalRequest?.url, let to = request.url else { return nil }
+    /// The next request for a redirect, or nil to stop at it: never from HTTPS to plain
+    /// HTTP, and no credentials to another host (blobs commonly redirect to a CDN, which
+    /// gets none). Both transports leave redirects to this.
+    static func redirect(_ request: URLRequest, _ response: RegistryResponse) -> URLRequest? {
+        guard [301, 302, 303, 307, 308].contains(response.status), let from = request.url,
+            let location = response.value("Location"), let to = URL(string: location, relativeTo: from)?.absoluteURL
+        else { return nil }
         if from.scheme == "https" && to.scheme != "https" { return nil }
         var next = request
+        next.url = to
+        if response.status == 303 && request.httpMethod != "HEAD" { next.httpMethod = "GET" }
         if from.host?.lowercased() != to.host?.lowercased() || from.port != to.port {
             next.setValue(nil, forHTTPHeaderField: "Authorization")
         }
         return next
     }
+
+    static let maxRedirects = 10
 
     // MARK: Requests
 
@@ -326,14 +275,19 @@ final class RegistrySession: NSObject, ContentClient, URLSessionTaskDelegate, @u
 
     /// Sends `make()` with what the registry asked for: a cached Bearer token for `scope`,
     /// or Basic. A 401 with a challenge is answered once.
-    private func send(_ scope: String?, _ make: () throws -> URLRequest) async throws -> (URLSession.AsyncBytes, HTTPURLResponse) {
+    private func send(_ scope: String?, _ make: () throws -> URLRequest) async throws -> (RegistryBody, RegistryResponse) {
         var answered = false
         while true {
             var request = try make()
             if let header = authorization(scope) { request.setValue(header, forHTTPHeaderField: "Authorization") }
-            let (bytes, response) = try await session.bytes(for: request)
-            guard let http = response as? HTTPURLResponse else { throw RegistryError(status: 502, description: "no HTTP response from \(host)") }
-            guard http.statusCode == 401, !answered, let challenge = http.value(forHTTPHeaderField: "WWW-Authenticate") else {
+            var (http, bytes) = try await transport.send(request)
+            var hops = 0
+            while hops < Self.maxRedirects, let next = Self.redirect(request, http) {
+                hops += 1
+                request = next
+                (http, bytes) = try await transport.send(request)
+            }
+            guard http.status == 401, !answered, let challenge = http.value("WWW-Authenticate") else {
                 return (bytes, http)
             }
             answered = true
@@ -377,15 +331,16 @@ final class RegistrySession: NSObject, ContentClient, URLSessionTaskDelegate, @u
         guard let url = c.url else { throw RegistryError(status: 401, description: "invalid token realm \(realm)") }
         var request = URLRequest(url: url)
         if let creds = credentials { request.setValue(Self.basicHeader(creds), forHTTPHeaderField: "Authorization") }
-        let (data, response) = try await session.data(for: request, delegate: NoRedirects())
-        guard let http = response as? HTTPURLResponse else { throw RegistryError(status: 502, description: "no response from \(realm)") }
-        guard http.statusCode == 200 else {
+        // Token requests do not follow redirects (Containerization refuses them too).
+        let (http, body) = try await transport.send(request)
+        guard http.status == 200 else {
             // A refusal, or a token server asking for credentials again: wrong ones.
-            if [401, 403].contains(http.statusCode) || http.value(forHTTPHeaderField: "WWW-Authenticate") != nil {
+            if [401, 403].contains(http.status) || http.value("WWW-Authenticate") != nil {
                 throw Self.wrongCredentials(host)
             }
-            throw RegistryError(status: http.statusCode, description: "token request to \(realm) failed with response: \(http.statusCode)")
+            throw RegistryError(status: http.status, description: "token request to \(realm) failed with response: \(http.status)")
         }
+        let data = try await Self.collect(body, limit: 1 << 20)
         guard let json = JSON.parse(data), let token = json["token"]?.string ?? json["access_token"]?.string else {
             throw RegistryError(status: 502, description: "\(realm) answered without a token")
         }
@@ -443,22 +398,22 @@ final class RegistrySession: NSObject, ContentClient, URLSessionTaskDelegate, @u
         return out
     }
 
-    private static func collect(_ bytes: URLSession.AsyncBytes, limit: Int) async throws -> Data {
+    private static func collect(_ body: RegistryBody, limit: Int) async throws -> Data {
         var data = Data()
-        for try await b in bytes {
-            data.append(b)
+        for try await chunk in body {
+            data.append(chunk)
             guard data.count <= limit else { throw RegistryError(status: 502, description: "response larger than \(limit) bytes") }
         }
         return data
     }
 
-    private func failure(_ http: HTTPURLResponse, _ bytes: URLSession.AsyncBytes, _ what: String) async -> RegistryError {
-        let body = (try? await Self.collect(bytes, limit: 64 << 10)).flatMap { JSON.parse($0) }
-        let reason = body?["errors"]?.array?.first?["message"]?.string ?? HTTPURLResponse.localizedString(forStatusCode: http.statusCode)
-        if http.statusCode == 401 || http.statusCode == 403 {
-            return RegistryError(status: http.statusCode, description: "\(what): unauthorized: \(reason)")
+    private func failure(_ http: RegistryResponse, _ body: RegistryBody, _ what: String) async -> RegistryError {
+        let json = (try? await Self.collect(body, limit: 64 << 10)).flatMap { JSON.parse($0) }
+        let reason = json?["errors"]?.array?.first?["message"]?.string ?? HTTPURLResponse.localizedString(forStatusCode: http.status)
+        if http.status == 401 || http.status == 403 {
+            return RegistryError(status: http.status, description: "\(what): unauthorized: \(reason)")
         }
-        return RegistryError(status: http.statusCode, description: "\(what) failed with response: \(http.statusCode) \(reason)")
+        return RegistryError(status: http.status, description: "\(what) failed with response: \(http.status) \(reason)")
     }
 
     // MARK: Login
@@ -467,7 +422,7 @@ final class RegistrySession: NSObject, ContentClient, URLSessionTaskDelegate, @u
     /// credentials. A registry without authentication accepts any.
     func ping() async throws {
         let (bytes, http) = try await send(nil) { URLRequest(url: url("/v2/")) }
-        guard http.statusCode == 200 else {
+        guard http.status == 200 else {
             let e = await failure(http, bytes, "GET \(url("/v2/").absoluteString)")
             if e.unauthorized { throw Self.wrongCredentials("Get \"\(url("/v2/").absoluteString)\"") }
             throw e
@@ -496,12 +451,12 @@ final class RegistrySession: NSObject, ContentClient, URLSessionTaskDelegate, @u
             r.setValue(accept, forHTTPHeaderField: "Accept")
             return r
         }
-        guard http.statusCode == 200 else { throw await failure(http, bytes, "HEAD \(target.absoluteString)") }
-        guard let header = http.value(forHTTPHeaderField: "Docker-Content-Digest"),
+        guard http.status == 200 else { throw await failure(http, bytes, "HEAD \(target.absoluteString)") }
+        guard let header = http.value("Docker-Content-Digest"),
             let digest = try? ParsedDigest(parsing: header).description
         else { throw RegistryError(status: 502, description: "\(host) sent no valid Docker-Content-Digest for \(name):\(tag)") }
-        guard let type = http.value(forHTTPHeaderField: "Content-Type"),
-            let size = http.value(forHTTPHeaderField: "Content-Length").flatMap(Int64.init), size >= 0
+        guard let type = http.value("Content-Type"),
+            let size = http.value("Content-Length").flatMap(Int64.init), size >= 0
         else { throw RegistryError(status: 502, description: "\(host) sent no Content-Type or Content-Length for \(name):\(tag)") }
         if tag.hasPrefix("sha256:"), digest.lowercased() != tag.lowercased() {
             throw RegistryError(status: 502, description: "registry returned digest \(digest) for pinned reference \(tag), refusing to accept substituted content")
@@ -521,7 +476,7 @@ final class RegistrySession: NSObject, ContentClient, URLSessionTaskDelegate, @u
             r.setValue(descriptor.mediaType, forHTTPHeaderField: "Accept")
             return r
         }
-        guard http.statusCode == 200 else { throw await failure(http, bytes, "GET \(target.absoluteString)") }
+        guard http.status == 200 else { throw await failure(http, bytes, "GET \(target.absoluteString)") }
         let data = try await Self.collect(bytes, limit: Int(min(descriptor.size, Int64(Self.manifestLimit * 16))))
         try Self.verify(SHA256.hash(data: data), descriptor)
         return data
@@ -534,31 +489,22 @@ final class RegistrySession: NSObject, ContentClient, URLSessionTaskDelegate, @u
             r.setValue(descriptor.mediaType.isEmpty ? "*/*" : descriptor.mediaType, forHTTPHeaderField: "Accept")
             return r
         }
-        guard http.statusCode == 200 else { throw await failure(http, bytes, "GET \(target.absoluteString)") }
+        guard http.status == 200 else { throw await failure(http, bytes, "GET \(target.absoluteString)") }
         guard FileManager.default.createFile(atPath: file.path, contents: nil), let out = try? FileHandle(forWritingTo: file) else {
             throw RegistryError(status: 500, description: "cannot create \(file.path)")
         }
         defer { try? out.close() }
         var hasher = SHA256()
         var received: Int64 = 0
-        var chunk = Data()
-        chunk.reserveCapacity(1 << 16)
-        func flush() async throws {
-            guard !chunk.isEmpty else { return }
-            try out.write(contentsOf: chunk)
-            hasher.update(data: chunk)
-            await progress?([.addSize(Int64(chunk.count))])
-            chunk.removeAll(keepingCapacity: true)
-        }
-        for try await b in bytes {
-            chunk.append(b)
-            received += 1
+        for try await chunk in bytes {
+            received += Int64(chunk.count)
             guard received <= descriptor.size else {
                 throw RegistryError(status: 502, description: "blob download exceeded expected size \(descriptor.size) for \(descriptor.digest)")
             }
-            if chunk.count >= 1 << 16 { try await flush() }
+            try out.write(contentsOf: chunk)
+            hasher.update(data: chunk)
+            await progress?([.addSize(Int64(chunk.count))])
         }
-        try await flush()
         let digest = hasher.finalize()
         try Self.verify(digest, descriptor)
         return (received, digest)
@@ -586,11 +532,11 @@ final class RegistrySession: NSObject, ContentClient, URLSessionTaskDelegate, @u
             r.setValue("\(descriptor.mediaType), */*", forHTTPHeaderField: "Accept")
             return r
         }
-        if head.statusCode == 200, !isManifest || object == descriptor.digest
-            || head.value(forHTTPHeaderField: "Docker-Content-Digest") == descriptor.digest
+        if head.status == 200, !isManifest || object == descriptor.digest
+            || head.value("Docker-Content-Digest") == descriptor.digest
         {
             throw ContainerizationError(.exists, message: "content already exists \(descriptor.digest)")
-        } else if head.statusCode != 200 && head.statusCode != 404 {
+        } else if head.status != 200 && head.status != 404 {
             throw await failure(head, headBytes, "HEAD \(check.absoluteString)")
         }
 
@@ -612,8 +558,8 @@ final class RegistrySession: NSObject, ContentClient, URLSessionTaskDelegate, @u
                 r.httpMethod = "POST"
                 return r
             }
-            if http.statusCode == 201 { throw ContainerizationError(.exists, message: "content already exists \(descriptor.digest)") }
-            guard [200, 202, 204].contains(http.statusCode), let location = http.value(forHTTPHeaderField: "Location"),
+            if http.status == 201 { throw ContainerizationError(.exists, message: "content already exists \(descriptor.digest)") }
+            guard [200, 202, 204].contains(http.status), let location = http.value("Location"),
                 var c = URLComponents(string: location)
             else { throw await failure(http, b, "POST \(start.absoluteString)") }
             // A relative Location is on the registry; an absolute one must stay on it too.
@@ -632,33 +578,13 @@ final class RegistrySession: NSObject, ContentClient, URLSessionTaskDelegate, @u
         put.setValue(contentType, forHTTPHeaderField: "Content-Type")
         put.setValue(String(descriptor.size), forHTTPHeaderField: "Content-Length")
         if let header = authorization(scope) { put.setValue(header, forHTTPHeaderField: "Authorization") }
-        let (_, response) = try await session.upload(for: put, fromFile: staged)
-        guard let http = response as? HTTPURLResponse, [200, 201, 204].contains(http.statusCode) else {
-            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
-            throw RegistryError(status: code, description: "PUT \(target.absoluteString) failed with response: \(code)")
+        let http = try await transport.upload(put, file: staged)
+        guard [200, 201, 204].contains(http.status) else {
+            throw RegistryError(status: http.status, description: "PUT \(target.absoluteString) failed with response: \(http.status)")
         }
-        guard http.value(forHTTPHeaderField: "Docker-Content-Digest") == descriptor.digest else {
+        guard http.value("Docker-Content-Digest") == descriptor.digest else {
             throw RegistryError(status: 502, description: "\(host) stored \(descriptor.digest) under another digest")
         }
-    }
-}
-
-/// Token requests do not follow redirects (Containerization refuses them too).
-private final class NoRedirects: NSObject, URLSessionTaskDelegate, Sendable {
-    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
-                    newRequest request: URLRequest) async -> URLRequest? { nil }
-}
-
-/// The scheme probe verifies certificates by the same policy as real requests.
-private final class ProbeTrust: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
-    let policy: RegistryPolicy
-    init(policy: RegistryPolicy) { self.policy = policy }
-    func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge)
-        async -> (URLSession.AuthChallengeDisposition, URLCredential?)
-    {
-        guard let trust = challenge.protectionSpace.serverTrust else { return (.performDefaultHandling, nil) }
-        if case .untrusted = RegistrySession.evaluate(trust, policy) { return (.cancelAuthenticationChallenge, nil) }
-        return (.useCredential, URLCredential(trust: trust))
     }
 }
 

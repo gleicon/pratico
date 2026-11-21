@@ -16,6 +16,11 @@ let package = Package(
         // Already in the graph through containerization; named for pratico's registry client.
         .package(url: "https://github.com/apple/swift-crypto.git", from: "4.0.0"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.0.0"),
+        // Linux hosts' registry transport (docs/design/remote.md); already in the graph
+        // through containerization.
+        .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.37.0"),
+        .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.37.6"),
+        .package(url: "https://github.com/apple/swift-certificates.git", from: "1.21.1"),
     ],
     targets: [
         .target(name: "CPratico"),
@@ -32,6 +37,10 @@ let package = Package(
                 .product(name: "ContainerizationOS", package: "containerization"),
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "AsyncHTTPClient", package: "async-http-client", condition: .when(platforms: [.linux])),
+                .product(name: "NIOSSL", package: "swift-nio-ssl", condition: .when(platforms: [.linux])),
+                .product(name: "NIOHTTP1", package: "swift-nio", condition: .when(platforms: [.linux])),
+                .product(name: "X509", package: "swift-certificates", condition: .when(platforms: [.linux])),
             ]),
         .executableTarget(name: "pratico-daemon", dependencies: ["PraticoCore", "PraticoDaemonKit"]),
         .executableTarget(name: "pratico-menubar", dependencies: ["PraticoCore"]),

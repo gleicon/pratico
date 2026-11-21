@@ -8,6 +8,9 @@ SWIFT_IMAGE=swift@sha256:1ba0416be43dc57ba6ff7d02114356cad1ab17364024b7669385e3f
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export DOCKER_HOST="${DOCKER_HOST:-unix://$HOME/.pratico/docker.sock}"
 
+# libarchive and its codecs, which ContainerizationArchive links (dev headers: the image has none).
+deps='apt-get -qq update >/dev/null && apt-get -qq install -y --no-install-recommends libarchive-dev libbz2-dev liblzma-dev libssl-dev >/dev/null'
+
 case "${1:-test}" in
 build) cmd='swift build --scratch-path /build --product pratico-daemon && swift build --scratch-path /build --product pratico-shim' ;;
 test) cmd='swift test --scratch-path /build --filter "PraticoCoreTests|PraticoDaemonKitTests"' ;;
@@ -17,4 +20,4 @@ esac
 docker volume inspect pratico-linux-build >/dev/null 2>&1 || docker volume create pratico-linux-build >/dev/null
 docker run --rm --cpus "$(sysctl -n hw.ncpu)" -m 12g \
     -v "$ROOT":/src:ro -v pratico-linux-build:/build -w /src \
-    "$SWIFT_IMAGE" sh -c "$cmd"
+    "$SWIFT_IMAGE" sh -c "$deps && $cmd"

@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// The public data scans are enriched with, each cached a day in `scan-db/` so a scan
 /// offline still uses the last copy: CISA's catalog of exploited CVEs, and FIRST's EPSS.

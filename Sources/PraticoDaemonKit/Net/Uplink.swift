@@ -166,7 +166,8 @@ final class Uplink: @unchecked Sendable {
         }
         guard sent == p.count else { close(fd); return }
         pings[port.path, default: 0] += 1
-        let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
+        // Used only on `queue`, the uplink's serial queue.
+        nonisolated(unsafe) let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
         let done = Box(false)
         let finish: @Sendable () -> Void = { [weak self] in
             guard !done.value else { return }
