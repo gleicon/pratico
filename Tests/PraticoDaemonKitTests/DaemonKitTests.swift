@@ -1,5 +1,8 @@
 import ContainerizationArchive
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import Testing
 
 import PraticoCore
@@ -487,7 +490,7 @@ private let grypeSample = Data(#"""
     try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: dir) }
     let api = dir.appending(path: "d.sock").path
-    let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+    let fd = socket(AF_UNIX, Posix.stream, 0)
     defer { close(fd) }
     var addr = sockaddr_un()
     addr.sun_family = sa_family_t(AF_UNIX)
@@ -1063,3 +1066,35 @@ final class LockedBox<T>: @unchecked Sendable {
     func set(_ v: T) { lock.withLock { value = v } }
     @discardableResult func update<R>(_ f: (inout T) -> R) -> R { lock.withLock { f(&value) } }
 }
+
+@Test func sparseCopyKeepsDataAndHoles() throws {
+    let a = scratch.appending(path: "sparse-\(UUID().uuidString)"), b = scratch.appending(path: "copy-\(UUID().uuidString)")
+    FileManager.default.createFile(atPath: a.path, contents: nil)
+    let h = try FileHandle(forWritingTo: a)
+    try h.write(contentsOf: Data("head".utf8))
+    try h.seek(toOffset: 64 << 20)
+    try h.write(contentsOf: Data("tail".utf8))
+    try h.close()
+    #expect(Posix.cloneOrSparseCopy(a.path, b.path))
+    let copy = try Data(contentsOf: b)
+    #expect(copy.count == (64 << 20) + 4 && copy.prefix(4) == Data("head".utf8) && copy.suffix(4) == Data("tail".utf8))
+    var st = Posix.Stat()
+    #expect(stat(b.path, &st) == 0 && Int64(st.st_blocks) * 512 < 16 << 20, "the hole stays a hole")
+    #expect(!Posix.cloneOrSparseCopy(a.path, b.path), "never over an existing file")
+}
+
+#if !canImport(Security)
+@Test func linuxSecretsAreOnlyTheDaemonUsers() throws {
+    let home = scratch.appending(path: "home-\(UUID().uuidString)")
+    let store = SecretStore(domain: "dev.pratico.test", home: home)
+    try store.save("ghcr.io", username: "u", password: "p")
+    try store.save("quay.io", username: "v", password: "q")
+    #expect(store.get("ghcr.io")?.password == "p")
+    #expect(store.list().map(\.hostname).sorted() == ["ghcr.io", "quay.io"])
+    var st = Posix.Stat()
+    #expect(stat(store.file.path, &st) == 0 && st.st_mode & 0o777 == 0o600)
+    #expect(stat(store.file.deletingLastPathComponent().path, &st) == 0 && st.st_mode & 0o777 == 0o700)
+    try store.delete("ghcr.io")
+    #expect(store.get("ghcr.io") == nil && store.get("quay.io")?.username == "v")
+}
+#endif

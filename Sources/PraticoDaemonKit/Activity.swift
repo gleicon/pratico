@@ -1,5 +1,6 @@
 import Containerization
 import Foundation
+import PraticoCore
 
 /// The flight recorder (D-56): every exec and exit inside a container and the process
 /// behind each TCP connection it opens and each UDP destination it sends to, seen by BPF probes in its VM (`vm/bpf`) and sent
@@ -229,7 +230,7 @@ final class ActivityLog {
     private func rollOver() {
         try? handle?.close()
         handle = nil
-        _ = try? FileManager.default.replaceItemAt(files.activityPrevious, withItemAt: files.activity)
+        try? Posix.replace(files.activityPrevious, with: files.activity)
         size = 0
     }
 }

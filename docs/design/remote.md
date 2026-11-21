@@ -39,10 +39,12 @@ scanning, and the flight recorder are the same code.
 |---|---|---|
 | VM boot (`Shim.swift`) | Virtualization.framework | Cloud Hypervisor process per VM (vendored `CHVirtualMachineManager`) |
 | Shared directories | virtio-fs built into VZ | one `virtiofsd` process per share |
-| NIC (`Net/NIC.swift`) | socket pair to the switch | TAP device read by the switch (needs `CAP_NET_ADMIN`), or vhost-user-net served by the switch (no privilege, more code) |
+| NIC (`Net/NIC.swift`) | socket pair to the switch | see decision 3 |
 | Socket calls (`Darwin.*`) | Darwin | Glibc/Musl: mechanical |
-| Registry TLS trust, proxies | Security, CFNetwork | swift-nio-ssl or AsyncHTTPClient, with its own trust store |
-| Registry logins | Keychain | file, mode 0600, under the daemon's user |
+| Registry TLS trust, proxies | Security, CFNetwork | AsyncHTTPClient with BoringSSL: the system bundle plus `registry_ca` (which root vouched is not reported); `HTTPS_PROXY`/`NO_PROXY` (done) |
+| Registry logins, abuse.ch key | Keychain | `<home>/secrets/<domain>.json`, 0600 in a 0700 directory (done) |
+| Log follow, free space, image copies | kqueue, resource keys, `clonefile` | inotify, `statvfs`, data-extent copies that keep holes (done) |
+| Shim exit | kqueue process source | a waiting thread per child; an earlier daemon's shims checked each second (done) |
 | Login job | launchd | systemd unit |
 | Kernel, init, probes, seccomp | arm64 | arm64, and x86_64 for most hosts: second kernel and init build, x86_64 syscall table for the seccomp compiler, probes against x86_64 kernel types |
 
@@ -56,13 +58,22 @@ scanning, and the flight recorder are the same code.
    hypervisor CVEs; Firecracker lacks virtio-fs and hotplug. Shipped as a pinned,
    latest-release binary with pratico's Linux build, spawned directly, never through a shell,
    in the role Virtualization.framework has on the Mac; `virtiofsd` likewise.
-3. NIC: a TAP device per VM read by the switch; the systemd unit grants the `pratico` user
-   `CAP_NET_ADMIN` and nothing else. No bridges, no iptables.
+3. NIC: to settle before slice 3. Agreed first as "a TAP device per VM read by the switch",
+   but Cloud Hypervisor owns the TAP's file descriptor (it opens the device and moves the
+   guest's frames through it), so the switch cannot read that end. The options:
+   - AF_PACKET on the TAP's host interface: the switch sends and receives the guest's frames
+     there. Needs `CAP_NET_ADMIN` and `CAP_NET_RAW`; the host kernel sees an interface with
+     no address, kept quiet (no IPv6, no ARP).
+   - vhost-user-net served by the switch: Cloud Hypervisor hands the guest's virtio queues
+     to pratico over a Unix socket. No capability and no host interface at all, so the
+     guest's frames never meet the host's network stack; more code (the vhost-user protocol
+     and virtio rings in shared guest memory).
 
 ## Slices, in order
 
-1. Daemon compiles for Linux with the static SDK; platform seams for VM boot, NIC,
-   TLS trust and logins; unit tests pass on Linux.
+1. Daemon compiles for Linux; platform seams for VM boot, NIC, TLS trust and logins;
+   unit tests pass on Linux (`scripts/linux-check.sh`). Done 2026-11-20, against glibc in
+   the pinned Swift image; the static (musl) build comes with slice 2.
 2. Test host on the Mac: a Linux VM with KVM and the Linux daemon; `docker -H ssh://` runs
    `alpine true` in a Cloud Hypervisor VM.
 3. Networking and egress through the switch on Linux; the e2e suite runs against the test host.

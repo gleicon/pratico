@@ -37,7 +37,7 @@ public actor EmbeddedRuntime {
         let fresh = root.appending(path: "initfs.ext4.new")
         try? fm.removeItem(at: fresh)
         _ = try await store.getInitImage(reference: reference).initBlock(at: fresh, for: .linuxArm)
-        if fm.fileExists(atPath: disk.path) { _ = try fm.replaceItemAt(disk, withItemAt: fresh) } else { try fm.moveItem(at: fresh, to: disk) }
+        try Posix.replace(disk, with: fresh)
         try reference.write(to: marker, atomically: true, encoding: .utf8)
     }
 

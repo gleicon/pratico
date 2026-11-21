@@ -6,7 +6,6 @@ let package = Package(
     platforms: [.macOS(.v26)],
     products: [
         .executable(name: "pratico-daemon", targets: ["pratico-daemon"]),
-        .executable(name: "pratico-menubar", targets: ["pratico-menubar"]),
         .executable(name: "pratico-shim", targets: ["pratico-shim"]),
     ],
     dependencies: [
@@ -43,9 +42,7 @@ let package = Package(
                 .product(name: "X509", package: "swift-certificates", condition: .when(platforms: [.linux])),
             ]),
         .executableTarget(name: "pratico-daemon", dependencies: ["PraticoCore", "PraticoDaemonKit"]),
-        .executableTarget(name: "pratico-menubar", dependencies: ["PraticoCore"]),
         .executableTarget(name: "pratico-shim", dependencies: ["PraticoDaemonKit"]),
-        .executableTarget(name: "pratico-runtime-probe", dependencies: ["PraticoDaemonKit"]),
         .testTarget(name: "PraticoCoreTests", dependencies: ["PraticoCore"]),
         .testTarget(name: "PraticoDaemonKitTests", dependencies: [
             "PraticoCore", "PraticoDaemonKit", .product(name: "ContainerizationArchive", package: "containerization"),
@@ -53,3 +50,12 @@ let package = Package(
         ]),
     ]
 )
+
+// The Mac app's own targets; a Linux host (docs/design/remote.md) builds the daemon and shim only.
+#if os(macOS)
+package.products.append(.executable(name: "pratico-menubar", targets: ["pratico-menubar"]))
+package.targets += [
+    .executableTarget(name: "pratico-menubar", dependencies: ["PraticoCore"]),
+    .executableTarget(name: "pratico-runtime-probe", dependencies: ["PraticoDaemonKit"]),
+]
+#endif

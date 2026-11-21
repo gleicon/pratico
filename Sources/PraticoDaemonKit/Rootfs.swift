@@ -1,6 +1,7 @@
 import ContainerizationArchive
 import ContainerizationEXT4
 import Foundation
+import PraticoCore
 import SystemPackage
 
 /// Docker's volume copy-up: an empty volume mounted where the image has files starts with
@@ -193,6 +194,6 @@ enum RootfsEdit {
             if tree["/lost+found"] == nil { try formatter.unlink(path: FilePath("/lost+found")) }
             try formatter.close()
         }
-        _ = try fm.replaceItemAt(rootfs, withItemAt: fresh)
+        try Posix.replace(rootfs, with: fresh)
     }
 }

@@ -155,7 +155,9 @@ Local Mac development still comes first. When pratico runs on remote hosts:
 - No call forwarding, proxy, or orchestrator; several hosts, each picked explicitly
 - No pratico CLI while the docker CLI can express what pratico does
 - Design and slices: docs/design/remote.md. arm64 first (built and tested on the Mac through nested KVM), then x86_64; Cloud Hypervisor as the VMM (to confirm before a VM boots); TAP NICs read by the switch, `CAP_NET_ADMIN` only
-- [ ] Slice 1: the daemon compiles for Linux (static SDK), platform seams for VM boot, NIC, TLS trust, and logins; unit tests pass on Linux
+- [x] Slice 1 (2026-11-20): the daemon and shim compile for Linux; seams for VM boot (Cloud Hypervisor), registry transport (AsyncHTTPClient), secrets (0600 file), log follow (inotify), sparse copies, shim exit; unit tests pass on Linux (`scripts/linux-check.sh`). Found on the way: the Mac daemon never reaped its shims (fixed)
+- [ ] NIC on Linux: AF_PACKET on the TAP interface or vhost-user-net (docs/design/remote.md, decision 3); to settle before slice 3
+- [ ] Slice 2: a Linux VM with KVM on the Mac; the static Linux daemon with pinned Cloud Hypervisor runs `alpine true` through `docker -H ssh://`
 - Memory follows use there too, through virtio-balloon free page reporting (KVM returns pages the guest frees); same criterion as on the Mac
 
 ## Won't do (decided 2026-11-20)

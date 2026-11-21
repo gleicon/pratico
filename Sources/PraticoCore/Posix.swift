@@ -183,5 +183,12 @@ public enum Posix {
         return true
         #endif
     }
-}
 
+    /// Moves `source` over `destination` in one step, whether or not `destination` exists
+    /// (`rename(2)`; `FileManager.replaceItemAt` fails on Linux when it does not).
+    public static func replace(_ destination: URL, with source: URL) throws {
+        guard rename(source.path, destination.path) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+    }
+}
