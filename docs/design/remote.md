@@ -58,16 +58,23 @@ scanning, and the flight recorder are the same code.
    hypervisor CVEs; Firecracker lacks virtio-fs and hotplug. Shipped as a pinned,
    latest-release binary with pratico's Linux build, spawned directly, never through a shell,
    in the role Virtualization.framework has on the Mac; `virtiofsd` likewise.
-3. NIC: to settle before slice 3. Agreed first as "a TAP device per VM read by the switch",
-   but Cloud Hypervisor owns the TAP's file descriptor (it opens the device and moves the
-   guest's frames through it), so the switch cannot read that end. The options:
-   - AF_PACKET on the TAP's host interface: the switch sends and receives the guest's frames
-     there. Needs `CAP_NET_ADMIN` and `CAP_NET_RAW`; the host kernel sees an interface with
-     no address, kept quiet (no IPv6, no ARP).
-   - vhost-user-net served by the switch: Cloud Hypervisor hands the guest's virtio queues
-     to pratico over a Unix socket. No capability and no host interface at all, so the
-     guest's frames never meet the host's network stack; more code (the vhost-user protocol
-     and virtio rings in shared guest memory).
+3. NIC (settled 2026-11-20, simple and fast first): each VM gets a network namespace of its
+   own, made through a user namespace. In it the shim creates the TAP device, runs Cloud
+   Hypervisor, and opens an AF_PACKET socket on the TAP's interface; it relays frames between
+   that socket and the switch as the Mac's relay does with its socket pair. The namespace has
+   no routes, no addresses, and no forwarding, so a guest's frames reach only pratico's switch
+   (egress holds even on a host with `ip_forward=1`). The shim holds `CAP_NET_ADMIN` and
+   `CAP_NET_RAW` only inside its own user namespace: the service needs no capability on the
+   host. Ubuntu 24.04 limits unprivileged user namespaces through AppArmor, so the install
+   ships a profile for `pratico-shim`. Not taken: vhost-user-net (about a thousand lines of
+   virtio rings over guest memory, all of it attack surface) and a TAP on the host's own
+   network (guest frames meet the host's stack and forwarding).
+
+   VMM, looked at again for this: QEMU's `-netdev dgram` would match the Mac's socket pair,
+   but its vsock needs the host kernel's `/dev/vhost-vsock` (more privilege, host-wide CIDs)
+   and its device model is far larger; Firecracker has no virtio-fs, so no bind mounts or
+   shares. Cloud Hypervisor stays: vsock over a Unix socket, virtio-fs through `virtiofsd`,
+   already vendored.
 
 ## Slices, in order
 
