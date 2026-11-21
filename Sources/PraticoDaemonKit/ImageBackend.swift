@@ -18,7 +18,9 @@ protocol ImageBackend: Sendable {
     func removeUnreferencedBlobs() -> Int64
     /// `progress` gets Docker JSON progress messages, without `id`.
     func pull(_ ref: String, platform: String?, auth: RegistryAuth?, progress: @escaping @Sendable (JSON) -> Void) throws
-    func push(_ ref: String, auth: RegistryAuth?, progress: @escaping @Sendable (JSON) -> Void) throws
+    /// The descriptor the registry now holds: this Mac's platform only, so for an image
+    /// pulled as a multi-platform index it is a new index, not the local one.
+    func push(_ ref: String, auth: RegistryAuth?, progress: @escaping @Sendable (JSON) -> Void) throws -> Descriptor
     /// Writes the image's OCI layout (`index.json`, `oci-layout`, `blobs/`) for one platform.
     func saveLayout(_ ref: String, os: String, arch: String, into dir: URL) throws
     /// Imports every image an OCI layout directory names (`docker load`); their references.
@@ -130,17 +132,18 @@ final class EmbeddedImageBackend: ImageBackend, @unchecked Sendable {
         meter.flush()
     }
 
-    func push(_ ref: String, auth: RegistryAuth?, progress: @escaping @Sendable (JSON) -> Void) throws {
+    func push(_ ref: String, auth: RegistryAuth?, progress: @escaping @Sendable (JSON) -> Void) throws -> Descriptor {
         let meter = ProgressMeter(progress)
         let (client, name, tag, reference) = try target(ref, auth, progress)
         let current = Platform.current
-        try blocking { [store, content] in
+        let pushed = try blocking { [store, content] in
             let img = try await store.get(reference: reference)
             let operation = ImageStore.ExportOperation(name: name, tag: tag, contentStore: content, client: client,
                                                        progress: { events in meter.record(events) })
-            _ = try await operation.export(index: img.descriptor, platforms: { $0.os == current.os && $0.architecture == current.architecture })
+            return try await operation.export(index: img.descriptor, platforms: { $0.os == current.os && $0.architecture == current.architecture })
         }
         meter.flush()
+        return pushed
     }
 
     func loadLayout(from dir: URL) throws -> [String] {

@@ -1,3 +1,4 @@
+import ContainerizationOCI
 import Foundation
 import PraticoCore
 
@@ -347,7 +348,7 @@ public final class ImageService: Sendable {
     /// Docker CLI prints.
     func push(_ ref: String, auth: RegistryAuth?, conn: Connection) throws {
         let full = ImageRef.normalize(ref)
-        guard let img = backend.image(full) else {
+        guard backend.image(full) != nil else {
             throw APIError(404, "An image does not exist locally with the tag: \(ImageRef.familiar(full))")
         }
         let tag = full.split(separator: ":").last.map(String.init) ?? "latest"
@@ -356,13 +357,16 @@ public final class ImageService: Sendable {
         defer { conn.endChunked() }
         let emit = Self.emitter(conn)
         emit(["status": .string("The push refers to repository [\(repo)]")])
+        let pushed: Descriptor
         do {
-            try backend.push(full, auth: auth, progress: Self.tagged(emit, tag))
+            pushed = try backend.push(full, auth: auth, progress: Self.tagged(emit, tag))
         } catch {
             return Self.fail("push to \(repo) failed: \(error)", emit)
         }
-        let digest = img["configuration"]?["descriptor"]?["digest"]?.string ?? ""
-        let size = img["configuration"]?["descriptor"]?["size"]?.int ?? 0
+        // What the registry holds, which a pull of this tag gets: not the local index when
+        // that names other platforms too.
+        let digest = pushed.digest
+        let size = pushed.size
         emit(["status": .string("\(tag): digest: \(digest) size: \(size)")])
         emit(["progressDetail": [:], "aux": ["Tag": .string(tag), "Digest": .string(digest), "Size": .int(size)]])
     }
