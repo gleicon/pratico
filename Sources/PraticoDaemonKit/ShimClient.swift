@@ -42,18 +42,26 @@ struct ShimClient: Sendable {
         command.extraFiles = []  // the daemon's write end closes, so the pipe ends with the shim
         let pid = command.pid
 
-        let deadline = Date().addingTimeInterval(60)
+        let deadline = Date().addingTimeInterval(Self.bootPatience)
         while Date() < deadline {
             var p = pollfd(fd: ready[0], events: Int16(POLLIN), revents: 0)
             _ = poll(&p, 1, Int32(max(deadline.timeIntervalSinceNow, 0) * 1000))
-            if FileManager.default.fileExists(atPath: files.exit.path) { break }
+            if FileManager.default.fileExists(atPath: files.exit.path) { return pid }
             if ["created", "running", "paused"].contains(Self.read(files.state)?["status"]?.string),
                 FileManager.default.fileExists(atPath: files.socket.path)
-            { break }
+            { return pid }
             Thread.sleep(forTimeInterval: 0.02)
         }
-        return pid
+        // Going on would send `/start` to a shim not yet listening, and the start would fail
+        // later in a confusing way. The shim leads its session: its VMM goes with it.
+        kill(-pid, SIGKILL)
+        var status: Int32 = 0
+        _ = waitpid(pid, &status, 0)
+        throw APIError(500, "pratico-shim did not boot the VM within \(Int(Self.bootPatience)) s")
     }
+
+    /// How long a VM may take to boot. A nested test host needs tens of seconds under load.
+    static let bootPatience: TimeInterval = ShimControl.startPatience
 
     /// Calls once when the shim process ends (also for shims from an earlier daemon), and
     /// reaps it when it is this daemon's child: an unreaped shim stays a zombie, and enough
