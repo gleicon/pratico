@@ -12,6 +12,9 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+// Modified by the Pratico project (2026-11-21): `NetConfig`'s offload switches
+// (Vendor/README.md).
 //===----------------------------------------------------------------------===//
 
 extension CloudHypervisor {
@@ -105,6 +108,11 @@ extension CloudHypervisor {
         public var queueSize: Int?
         /// Optional device identifier.
         public var id: String?
+        /// TCP segmentation, UDP fragmentation and checksum offload to the TAP; nil is
+        /// cloud-hypervisor's default (on).
+        public var offloadTSO: Bool?
+        public var offloadUFO: Bool?
+        public var offloadCsum: Bool?
 
         public init(
             tap: String? = nil,
@@ -114,8 +122,14 @@ extension CloudHypervisor {
             mtu: Int? = nil,
             numQueues: Int? = nil,
             queueSize: Int? = nil,
-            id: String? = nil
+            id: String? = nil,
+            offloadTSO: Bool? = nil,
+            offloadUFO: Bool? = nil,
+            offloadCsum: Bool? = nil
         ) {
+            self.offloadTSO = offloadTSO
+            self.offloadUFO = offloadUFO
+            self.offloadCsum = offloadCsum
             self.tap = tap
             self.ip = ip
             self.mask = mask
@@ -135,6 +149,9 @@ extension CloudHypervisor {
             case numQueues = "num_queues"
             case queueSize = "queue_size"
             case id
+            case offloadTSO = "offload_tso"
+            case offloadUFO = "offload_ufo"
+            case offloadCsum = "offload_csum"
         }
     }
 

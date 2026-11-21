@@ -36,6 +36,7 @@ let package = Package(
                 .product(name: "ContainerizationOS", package: "containerization"),
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "CloudHypervisor", package: "containerization", condition: .when(platforms: [.linux])),
                 .product(name: "AsyncHTTPClient", package: "async-http-client", condition: .when(platforms: [.linux])),
                 .product(name: "NIOSSL", package: "swift-nio-ssl", condition: .when(platforms: [.linux])),
                 .product(name: "NIOHTTP1", package: "swift-nio", condition: .when(platforms: [.linux])),

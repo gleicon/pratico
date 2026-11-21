@@ -12,6 +12,9 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+// Modified by the Pratico project (2026-11-21): `Attrs.userNamespace` and `netNamespace`,
+// joined by the child before exec (Vendor/README.md).
 //===----------------------------------------------------------------------===//
 
 import CShim
@@ -72,6 +75,10 @@ public struct Command: Sendable {
         public var gid: UInt32?
         /// Signal to send when parent process dies (Linux only).
         public var pdeathSignal: Int32?
+        /// A user namespace the process joins before exec (Linux only).
+        public var userNamespace: Int32?
+        /// A network namespace the process joins before exec, after `userNamespace` (Linux only).
+        public var netNamespace: Int32?
 
         public init(
             setPGroup: Bool = false,
@@ -221,6 +228,8 @@ extension Command {
         if let pdeathSignal = self.attrs.pdeathSignal {
             attrs.pdeathSignal = pdeathSignal
         }
+        attrs.userns_fd = self.attrs.userNamespace ?? -1
+        attrs.netns_fd = self.attrs.netNamespace ?? -1
 
         var pid: pid_t = 0
         var argv = ([executable] + arguments).map { strdup($0) } + [nil]

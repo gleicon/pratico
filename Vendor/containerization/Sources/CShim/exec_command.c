@@ -13,9 +13,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+ // Modified by the Pratico project (2026-11-21): the child joins attrs' user and network
+ // namespaces first.
 
 #if defined(__linux__) || defined(__APPLE__)
 
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE  // setns
+#endif
 #include <errno.h>
 #include <fcntl.h>
 #include <dirent.h>
@@ -33,6 +38,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #if defined(__linux__)
+#include <sched.h>
 #include <sys/prctl.h>
 #endif
 
@@ -103,6 +109,8 @@ void exec_command_attrs_init(struct exec_command_attrs *attrs) {
   attrs->gid = -1;
   attrs->pdeathSignal = 0;
   attrs->setfgpgrp = 0;
+  attrs->userns_fd = -1;
+  attrs->netns_fd = -1;
 }
 
 static void child_handler(const int sync_pipes[2], const char *executable,
@@ -122,6 +130,17 @@ static void child_handler(const int sync_pipes[2], const char *executable,
   if (close(sync_pipes[0]) < 0) {
     goto fail;
   }
+
+#if defined(__linux__)
+  // Joining a user namespace needs a single-threaded caller, which only this child is;
+  // the network namespace is owned by it, so it is joined second.
+  if (attrs.userns_fd >= 0 && setns(attrs.userns_fd, CLONE_NEWUSER) < 0) {
+    goto fail;
+  }
+  if (attrs.netns_fd >= 0 && setns(attrs.netns_fd, CLONE_NEWNET) < 0) {
+    goto fail;
+  }
+#endif
 
   // Setup process group and foreground before clearing signal mask.
   if (attrs.setpgid) {

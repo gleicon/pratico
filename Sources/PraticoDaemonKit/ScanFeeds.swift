@@ -11,10 +11,12 @@ extension ScanService {
     /// The body of a `200` (or a `file://` URL, for tests) within `timeout`; nil otherwise.
     /// Blocking: scans run on their own queue.
     static func fetch(_ url: URL, timeout: TimeInterval = 30) -> Data? {
+        // Read directly: Linux's URLSession does not load file URLs.
+        if url.isFileURL { return try? Data(contentsOf: url) }
         let done = DispatchSemaphore(value: 0)
         let fetched = Box<Data?>(nil)
         URLSession.shared.dataTask(with: url) { data, response, _ in
-            if (response as? HTTPURLResponse).map({ $0.statusCode == 200 }) ?? url.isFileURL { fetched.value = data }
+            if (response as? HTTPURLResponse)?.statusCode == 200 { fetched.value = data }
             done.signal()
         }.resume()
         _ = done.wait(timeout: .now() + timeout)

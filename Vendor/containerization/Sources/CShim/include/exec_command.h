@@ -13,6 +13,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+ // Modified by the Pratico project (2026-11-21): userns_fd and netns_fd, the namespaces
+ // the child joins before exec.
 
 #ifndef exec_command_h
 #define exec_command_h
@@ -42,6 +44,10 @@ struct exec_command_attrs {
   int pdeathSignal;
   /// make the new process group the foreground process group
   int setfgpgrp;
+  /// user namespace to join before exec (Linux only, -1 to stay)
+  int userns_fd;
+  /// network namespace to join before exec, after userns_fd (Linux only, -1 to stay)
+  int netns_fd;
 };
 
 void exec_command_attrs_init(struct exec_command_attrs *attrs);

@@ -12,6 +12,9 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+// Modified by the Pratico project (2026-11-21): passes the manager's namespaces to
+// cloud-hypervisor; pause and resume (Vendor/README.md).
 //===----------------------------------------------------------------------===//
 
 #if os(Linux)
@@ -142,6 +145,7 @@ public final class CHVirtualMachineInstance: Sendable {
         runtimeRoot: URL,
         chBinary: URL,
         virtiofsdBinary: URL?,
+        namespaces: CHVirtualMachineManager.Namespaces? = nil,
         logger: Logger? = nil,
         with: (inout Configuration) throws -> Void
     ) throws {
@@ -153,6 +157,7 @@ public final class CHVirtualMachineInstance: Sendable {
             runtimeRoot: runtimeRoot,
             chBinary: chBinary,
             virtiofsdBinary: virtiofsdBinary,
+            namespaces: namespaces,
             logger: logger
         )
     }
@@ -163,6 +168,7 @@ public final class CHVirtualMachineInstance: Sendable {
         runtimeRoot: URL,
         chBinary: URL,
         virtiofsdBinary: URL?,
+        namespaces: CHVirtualMachineManager.Namespaces?,
         logger: Logger?
     ) throws {
         // 1. Working directory: per-instance under runtimeRoot. Mode 0o700
@@ -202,7 +208,8 @@ public final class CHVirtualMachineInstance: Sendable {
             config: .init(
                 binary: chBinary,
                 apiSocketPath: apiSocket,
-                bootLog: config.bootLog
+                bootLog: config.bootLog,
+                namespaces: namespaces
             ),
             logger: logger
         )
@@ -365,6 +372,24 @@ extension CHVirtualMachineInstance: VirtualMachineInstance {
             try? FileManager.default.removeItem(at: self.workDir)
 
             self._state.withLock { $0 = .stopped }
+        }
+    }
+
+    /// Freezes the vCPUs (`vm.pause`), as `docker pause` asks; the guest's clock sync
+    /// stops with them and starts again on resume.
+    public func pause() async throws {
+        try await lock.withLock { _ in
+            try self.requireRunning()
+            await self.timeSyncer.pause()
+            try await chCall { try await self.client.vmPause() }
+        }
+    }
+
+    public func resume() async throws {
+        try await lock.withLock { _ in
+            try self.requireRunning()
+            try await chCall { try await self.client.vmResume() }
+            await self.timeSyncer.resume()
         }
     }
 

@@ -90,6 +90,11 @@ struct ShimFiles: Sendable {
         dir.deletingLastPathComponent().deletingLastPathComponent()
             .appending(path: "run/\(dir.lastPathComponent.prefix(12)).sock")
     }
+    /// `<home>/run/ch`: Cloud Hypervisor's per-VM directories (API, vsock and virtiofsd
+    /// sockets) on Linux hosts.
+    var vmmRuntime: URL {
+        dir.deletingLastPathComponent().deletingLastPathComponent().appending(path: "run/ch")
+    }
     var state: URL { dir.appending(path: "state.json") }  // {"pid", "status": "starting|created|running|paused"}
     var exit: URL { dir.appending(path: "exit.json") }  // {"exitCode", "finishedAt"}; written last
     var log: URL { dir.appending(path: "log") }
@@ -188,32 +193,35 @@ public enum ShimHost {
     /// One relay per card, which boots with its boot endpoint's address (D-43) and the
     /// card's own MAC (the switch shows the others, D-44).
     private static func relays(_ spec: ShimSpec) throws -> [SwitchNIC] {
-        let relays = try spec.nics.cards.indices.map { n in
+        let cards = spec.nics.cards.indices.map { n in
             let entry = spec.nics.bootEntry(card: n)
             var boot = spec.nics.slots[entry]
             boot.mac = spec.nics.cardMAC(of: entry)
-            return try NICRelay.start(boot, switchSocket: spec.switchSocket, primary: entry == spec.nics.primary)
+            return (nic: boot, primary: entry == spec.nics.primary)
         }
+        let relays = try NICRelay.start(cards, switchSocket: spec.switchSocket)
         precondition(relays.count == spec.nics.cards.count, "a relay per card")
         return relays
     }
 
     /// Virtualization.framework on the Mac; Cloud Hypervisor on KVM on Linux hosts
-    /// (docs/design/remote.md), the binary from `PATH` until slice 2 ships a pinned one.
-    private static func manager(_ spec: ShimSpec) throws -> any VirtualMachineManager {
+    /// (docs/design/remote.md), `cloud-hypervisor` and `virtiofsd` from `PATH`, their
+    /// sockets under `<home>/run/ch` rather than a directory every daemon on the host shares.
+    private static func manager(_ spec: ShimSpec, files: ShimFiles, interfaces: [SwitchNIC]) throws -> any VirtualMachineManager {
         let kernel = Kernel(path: URL(filePath: spec.kernel), platform: .linuxArm)
         let initfs = Mount.block(format: "ext4", source: spec.initfs, destination: "/", options: ["ro"])
         #if canImport(Virtualization)
         return VZVirtualMachineManager(kernel: kernel, initialFilesystem: initfs)
         #else
-        return try CHVirtualMachineManager(kernel: kernel, initialFilesystem: initfs)
+        return try CHVirtualMachineManager(kernel: kernel, initialFilesystem: initfs, runtimeRoot: files.vmmRuntime,
+                                           namespaces: interfaces.first?.namespaces)
         #endif
     }
 
     /// Boots the VM and creates the container in it, its process not yet started.
     private static func boot(_ spec: ShimSpec, files: ShimFiles, log: LogStore, stdin: StdinStream?,
                              interfaces: [SwitchNIC], trace: inout Trace) async throws -> LinuxContainer {
-        let vmm = try manager(spec)
+        let vmm = try manager(spec, files: files, interfaces: interfaces)
         let rootfs = Mount.block(format: "ext4", source: spec.rootfs, destination: "/", options: spec.options?.readonlyRootfs == true ? ["ro"] : [])
         let resources = VMResources(cpus: spec.cpus, memoryInBytes: UInt64(spec.memoryMiB).mib() + VMResources.guestMemoryOverhead)
         let container = try LinuxContainer(spec.id, rootfs: rootfs, vmm: vmm, vm: resources) { config in

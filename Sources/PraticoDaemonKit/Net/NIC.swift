@@ -4,6 +4,9 @@ import Foundation
 import PraticoCore
 #if canImport(Virtualization)
 import Virtualization
+#else
+import CPratico
+import CloudHypervisor
 #endif
 
 /// One network endpoint of a VM: an address on one of its virtual NICs (cards), as the
@@ -188,18 +191,83 @@ struct SwitchNIC: Interface, VZInterface {
         return config
     }
 }
+#else
+/// A VM NIC on a Linux host (docs/design/remote.md, decision 3): a TAP in the VM's own
+/// network namespace, which cloud-hypervisor joins. Offloads are off, so every frame is a
+/// plain Ethernet frame within the MTU, checksummed by the guest, as the switch expects.
+struct SwitchNIC: Interface, CHInterface {
+    let tapName: String
+    let ipv4Address: CIDRv4
+    let ipv4Gateway: IPv4Address?
+    let macAddress: MACAddress?
+    /// The VM's namespaces, shared by its cards.
+    let namespaces: CHVirtualMachineManager.Namespaces
+
+    var mtu: UInt32 { 1500 }
+
+    func chNetConfig() throws -> CloudHypervisor.NetConfig {
+        CloudHypervisor.NetConfig(tap: tapName, mac: macAddress?.description, mtu: Int(mtu),
+                                  offloadTSO: false, offloadUFO: false, offloadCsum: false)
+    }
+}
+#endif
 
 /// Moves frames between the VM end of a NIC and the daemon's switch. Sends to the
 /// switch are connectionless, so a daemon restart costs a few dropped frames, not the
 /// network.
 enum NICRelay {
-    /// Builds the NIC for Containerization and starts relaying; `primary` gets the default route.
-    static func start(_ nic: ShimNIC, switchSocket: String, primary: Bool) throws -> SwitchNIC {
-        var pair: [Int32] = [-1, -1]
-        guard socketpair(AF_UNIX, Posix.datagram, 0, &pair) == 0 else { throw APIError(500, "pratico-net: socketpair failed") }
-        let vm = pair[0], local = pair[1]
-        for fd in [vm, local] { bufferSizes(fd) }
+    /// Builds the VM's NICs for Containerization, one per card, and starts relaying; the
+    /// card marked primary gets the default route.
+    static func start(_ cards: [(nic: ShimNIC, primary: Bool)], switchSocket: String) throws -> [SwitchNIC] {
+        precondition(cards.count <= ShimNIC.slots, "\(cards.count) cards, at most \(ShimNIC.slots)")
+        #if canImport(Virtualization)
+        return try cards.map { card in
+            var pair: [Int32] = [-1, -1]
+            guard socketpair(AF_UNIX, Posix.datagram, 0, &pair) == 0 else { throw APIError(500, "pratico-net: socketpair failed") }
+            let vm = pair[0], local = pair[1]
+            for fd in [vm, local] { bufferSizes(fd) }
+            try relay(local, nic: card.nic, switchSocket: switchSocket)
+            return SwitchNIC(
+                ipv4Address: try CIDRv4(card.nic.address),
+                ipv4Gateway: card.primary ? try IPv4Address(card.nic.gateway) : nil,
+                macAddress: try MACAddress(card.nic.mac),
+                handle: FileHandle(fileDescriptor: vm, closeOnDealloc: false))
+        }
+        #else
+        guard !cards.isEmpty else { return [] }
+        let names = cards.indices.map { "tap\($0)" }
+        var user: Int32 = -1, net: Int32 = -1, step: Int32 = 0
+        var packets = [Int32](repeating: -1, count: cards.count)
+        let made = withCStrings(names) { pratico_vm_netns($0, Int32(names.count), &user, &net, &packets, &step) }
+        guard made == 0 else {
+            throw APIError(500, "pratico-net: cannot make the VM's network namespace (step \(step)): \(String(cString: strerror(errno)))")
+        }
+        let namespaces = CHVirtualMachineManager.Namespaces(user: user, net: net)
+        return try zip(cards, zip(names, packets)).map { card, tap in
+            bufferSizes(tap.1)
+            try relay(tap.1, nic: card.nic, switchSocket: switchSocket)
+            return SwitchNIC(
+                tapName: tap.0,
+                ipv4Address: try CIDRv4(card.nic.address),
+                ipv4Gateway: card.primary ? try IPv4Address(card.nic.gateway) : nil,
+                macAddress: try MACAddress(card.nic.mac),
+                namespaces: namespaces)
+        }
+        #endif
+    }
 
+    #if !canImport(Virtualization)
+    private static func withCStrings<R>(_ strings: [String], _ body: (UnsafePointer<UnsafePointer<CChar>?>) -> R) -> R {
+        let copies = strings.map { strdup($0) }
+        defer { copies.forEach { free($0) } }
+        let pointers = copies.map { UnsafePointer($0) }
+        return pointers.withUnsafeBufferPointer { body($0.baseAddress!) }
+    }
+    #endif
+
+    /// Relays frames between `local`, the VM's end of a card (one frame per datagram or
+    /// packet), and the switch, through a socket bound at the card's `nic.socket`.
+    private static func relay(_ local: Int32, nic: ShimNIC, switchSocket: String) throws {
         let relay = socket(AF_UNIX, Posix.datagram, 0)
         guard relay >= 0 else { throw APIError(500, "pratico-net: socket failed") }
         bufferSizes(relay)
@@ -240,11 +308,6 @@ enum NICRelay {
                 _ = send(local, buf, n, 0)
             }
         }
-        return SwitchNIC(
-            ipv4Address: try CIDRv4(nic.address),
-            ipv4Gateway: primary ? try IPv4Address(nic.gateway) : nil,
-            macAddress: try MACAddress(nic.mac),
-            handle: FileHandle(fileDescriptor: vm, closeOnDealloc: false))
     }
 
     private static func bufferSizes(_ fd: Int32) {
@@ -254,14 +317,3 @@ enum NICRelay {
         setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcv, socklen_t(MemoryLayout<Int32>.size))
     }
 }
-#else
-/// On Linux hosts a VM's NIC is a TAP device (docs/design/remote.md); how it reaches the
-/// switch comes with networking there (slice 3).
-typealias SwitchNIC = TAPInterface
-
-enum NICRelay {
-    static func start(_ nic: ShimNIC, switchSocket: String, primary: Bool) throws -> SwitchNIC {
-        throw APIError(501, "pratico-net: networks are not available on Linux hosts yet")
-    }
-}
-#endif

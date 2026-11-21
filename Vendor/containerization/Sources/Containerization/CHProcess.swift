@@ -12,6 +12,9 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+// Modified by the Pratico project (2026-11-21): cloud-hypervisor can run in a user and
+// network namespace the caller made (Vendor/README.md).
 //===----------------------------------------------------------------------===//
 
 #if os(Linux)
@@ -38,6 +41,7 @@ final class CHProcess: Sendable {
         let binary: URL
         let apiSocketPath: URL
         let bootLog: BootLog?
+        let namespaces: CHVirtualMachineManager.Namespaces?
     }
 
     enum ExitReason: Sendable, Equatable {
@@ -94,6 +98,8 @@ final class CHProcess: Sendable {
         // the parent before our own teardown ladder (terminate → wait) gets
         // a chance to run an orderly shutdown.
         command.attrs.setsid = true
+        command.attrs.userNamespace = config.namespaces?.user
+        command.attrs.netNamespace = config.namespaces?.net
 
         do {
             try command.start()

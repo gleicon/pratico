@@ -1,7 +1,7 @@
 # Remote Linux hosts (design, 2026-11-20)
 
-Status: proposed. Nothing here is built; the roadmap's "Remote Linux hosts" section holds
-what is decided. This note sizes the work and lists what still needs a decision.
+Status: in progress, slices 1 to 3 done (below); not yet installable on a host. The
+roadmap's "Remote Linux hosts" section holds what is decided.
 
 ## Settled (roadmap, 2026-11-20)
 
@@ -32,6 +32,10 @@ scanning, and the flight recorder are the same code.
   with `--privileged`. The test host is the one VM that asks, through
   `--runtime pratico-testhost`, which only a daemon started with `PRATICO_TESTHOST=1`
   accepts; its guest logs `Hyp nVHE mode initialized successfully` (2026-11-21).
+- Nested virtualization is slow: in the test host a VM boots in about 15 s and starts its
+  process in about 9 more (`PRATICO_TRACE=1`), against well under a second on the Mac. The
+  test host proves behavior, not speed; timing checks there measure the nesting, and with
+  several VMs booting at once a boot can pass Cloud Hypervisor's 60 s wait for the agent.
 - `docker` over `ssh://` runs `docker system dial-stdio` on the host: the host needs the
   docker CLI (only the CLI package, no engine), with `DOCKER_HOST` pointing at pratico's socket.
 - Most VPSes do not expose `/dev/kvm`. KVM is there on bare-metal servers and on clouds
@@ -42,8 +46,8 @@ scanning, and the flight recorder are the same code.
 | Area | On the Mac | On Linux |
 |---|---|---|
 | VM boot (`Shim.swift`) | Virtualization.framework | Cloud Hypervisor process per VM (vendored `CHVirtualMachineManager`) |
-| Shared directories | virtio-fs built into VZ | one `virtiofsd` process per share |
-| NIC (`Net/NIC.swift`) | socket pair to the switch | see decision 3 |
+| Shared directories | virtio-fs built into VZ | one `virtiofsd` process per share, 1.15.0 built static by `scripts/build-virtiofsd.sh` (done) |
+| NIC (`Net/NIC.swift`) | socket pair to the switch | TAP in a namespace of the VM's own, AF_PACKET to the switch: decision 3 (done) |
 | Socket calls (`Darwin.*`) | Darwin | Glibc/Musl: mechanical |
 | Registry TLS trust, proxies | Security, CFNetwork | AsyncHTTPClient with BoringSSL: the system bundle plus `registry_ca` (which root vouched is not reported); `HTTPS_PROXY`/`NO_PROXY` (done) |
 | Registry logins, abuse.ch key | Keychain | `<home>/secrets/<domain>.json`, 0600 in a 0700 directory (done) |
@@ -92,7 +96,15 @@ scanning, and the flight recorder are the same code.
    (`scripts/linux-check.sh host`, still needing glibc, libarchive and libcurl), Cloud
    Hypervisor v55.0 pinned by SHA-256. Containers run with `--network none` until slice 3.
 3. Networking and egress through the switch on Linux; `virtiofsd`, pinned, for volumes and
-   bind mounts; the e2e suite runs against the test host.
+   bind mounts; the e2e suite runs against the test host. Done 2026-11-21: `pratico_vm_netns`
+   (`Sources/CPratico/netns.c`) makes each VM's user and network namespaces, TAPs and packet
+   sockets in a forked child; Cloud Hypervisor joins them before exec (vendored
+   `exec_command`), with offloads off so frames reach the switch whole; its sockets live in
+   `<home>/run/ch`, not a directory every daemon on the host shares. `make e2e-testhost`
+   checks DNS, egress, user networks, published ports, bind mounts and volumes (21 checks);
+   `e2e/run.sh` runs inside the test host as well. A shim that has not booted its VM
+   within 120 s is killed and the start fails, instead of the daemon going on to a shim
+   not yet listening.
 4. Install over SSH: one documented command, systemd unit, `pratico` user. The binaries
    go static (musl) here, with no libcurl: FoundationNetworking goes from the Linux build.
 5. Menubar: hosts list over swift-nio-ssh, `/pratico/*` from each, active host written to

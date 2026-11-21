@@ -16,7 +16,7 @@ ASSETS="${PRATICO_RUNTIME_ASSETS:-$(pwd)/.build/runtime-assets}"
 export PRATICO_RUNTIME_ASSETS="$ASSETS"
 
 # $TMPDIR keeps the socket path under the 104-byte sun_path limit.
-HOME_DIR="$(mktemp -d -t pratico-e2e)"
+HOME_DIR="$(mktemp -d "${TMPDIR:-/tmp}/pratico-e2e.XXXXXX")"
 SOCK="$HOME_DIR/docker.sock"
 export DOCKER_HOST="unix://$SOCK"
 # An isolated CLI config: the user's registry logins must never reach the daemon under
@@ -60,7 +60,8 @@ cleanup() {
         docker network prune -f >/dev/null 2>&1
     fi
     stop_daemon
-    rm -rf "$HOME_DIR"  # images live in its store too
+    # Images live in its store too; kept when a check failed, for its logs.
+    if [ "$fail" -eq 0 ]; then rm -rf "$HOME_DIR"; else echo "kept $HOME_DIR"; fi
 }
 trap cleanup EXIT
 
@@ -97,9 +98,12 @@ start_daemon
 if [ -e "$HOME_DIR/daemon.err" ]; then bad "startup clears the previous error"; else ok "startup clears the previous error"; fi
 
 # --- Skeleton ---------------------------------------------------------------
-tm=$(tmutil isexcluded "$HOME_DIR/store" "$HOME_DIR/containers" 2>&1)
-expect_eq "AC-42 store and containers excluded from Time Machine" "$(grep -c '\[Excluded\]' <<<"$tm")" "2"
-expect_eq "AC-1 socket mode is 0600" "$(stat -f %Lp "$SOCK")" "600"
+if [ "$(uname)" = Darwin ]; then
+    tm=$(tmutil isexcluded "$HOME_DIR/store" "$HOME_DIR/containers" 2>&1)
+    expect_eq "AC-42 store and containers excluded from Time Machine" "$(grep -c '\[Excluded\]' <<<"$tm")" "2"
+fi
+# GNU stat's -f is the filesystem's status, so -c (GNU) goes first.
+expect_eq "AC-1 socket mode is 0600" "$(stat -c %a "$SOCK" 2>/dev/null || stat -f %Lp "$SOCK")" "600"
 check "AC-6 docker version prints client and server" docker version
 expect_eq "AC-53 server API version is pinned" "$(docker version --format '{{.Server.APIVersion}}')" "1.55"
 expect_eq "AC-53 server minimum API version" "$(docker version --format '{{.Server.MinAPIVersion}}')" "1.44"
@@ -192,7 +196,7 @@ expect_has "--mount with missing source is refused" \
     "$(docker run --rm --mount "type=bind,source=$MNT/missing,target=/x" alpine true 2>&1)" "does not exist"
 
 # --- Ports ------------------------------------------------------------------
-LAN_IP=$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null)
+LAN_IP=$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || hostname -I 2>/dev/null | cut -d' ' -f1)
 WEB='mkdir -p /w && echo pratico-ok >/w/index.html && httpd -f -p 80 -h /w'
 docker run -d --name e2e-p1 -p 18080:80 busybox sh -c "$WEB" >/dev/null
 docker run -d --name e2e-p2 -p 127.0.0.1:18081:80 busybox sh -c "$WEB" >/dev/null
@@ -334,7 +338,7 @@ check "AC-21 docker cp in succeeds" docker cp "$CP/h" e2e-cp:/tmp/h
 expect_eq "AC-21 contents match after the round trip" "$(docker exec e2e-cp cat /tmp/h)" "$(cat "$CP/h")"
 head -c 100000000 /dev/urandom >"$CP/big"
 check "docker cp in of 100 MB (past the in-memory body limit)" docker cp "$CP/big" e2e-cp:/tmp/big
-expect_eq "and it arrives intact" "$(docker exec e2e-cp sha256sum /tmp/big | cut -d' ' -f1)" "$(shasum -a 256 "$CP/big" | cut -d' ' -f1)"
+expect_eq "and it arrives intact" "$(docker exec e2e-cp sha256sum /tmp/big | cut -d' ' -f1)" "$({ sha256sum "$CP/big" 2>/dev/null || shasum -a 256 "$CP/big"; } | cut -d' ' -f1)"
 rm -f "$CP/big"
 mkdir -p "$CP/d/sub" && echo deep >"$CP/d/sub/f"
 docker cp "$CP/d" e2e-cp:/tmp/ >/dev/null 2>&1

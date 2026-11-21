@@ -44,3 +44,13 @@ git subtree pull --prefix Vendor/containerization https://github.com/apple/conta
   `LCShim/syscall.c`, `include/syscall.h` add `CZ_bpf` and the ring buffer's atomics.
 - `Sources/Containerization/VirtualMachineAgent.swift` (2026-11-18): `WriteFileFlags` has a
   public initializer, so pratico writes a running container's cgroup files (`docker update`).
+- `Sources/CShim/exec_command.c`, `include/exec_command.h`, `Sources/ContainerizationOS/Command.swift`
+  (2026-11-21): the child joins a user and a network namespace given as fds
+  (`Attrs.userNamespace`, `netNamespace`) before exec; only a single-threaded process can
+  join a user namespace, which the forked child is.
+- `Sources/Containerization/CHVirtualMachineManager.swift`, `CHVirtualMachineInstance.swift`,
+  `CHProcess.swift` (2026-11-21): `namespaces`, which cloud-hypervisor joins, so it opens
+  the VM's TAP devices in pratico's per-VM network namespace (docs/design/remote.md).
+  The instance pauses and resumes (`vm.pause`, `vm.resume`), for `docker pause`.
+- `Sources/CloudHypervisor/Types/DeviceConfigs.swift` (2026-11-21): `NetConfig`'s
+  `offload_tso`, `offload_ufo` and `offload_csum`, so pratico's switch gets plain frames.

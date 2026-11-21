@@ -18,7 +18,8 @@ test) cmd='swift test --scratch-path /build --filter "PraticoCoreTests|PraticoDa
 host)
     OUT="$(mkdir -p "${2:?usage: scripts/linux-check.sh host <out-dir>}" && cd "$2" && pwd)"
     out=(-v "$OUT":/out)
-    cmd='for p in pratico-daemon pratico-shim; do swift build --scratch-path /build -c release --static-swift-stdlib --product $p || exit 1; done && cp /build/release/pratico-daemon /build/release/pratico-shim /out/' ;;
+    # A rename, not a copy over the file: a test host may be running the old binaries.
+    cmd='for p in pratico-daemon pratico-shim; do swift build --scratch-path /build -c release --static-swift-stdlib --product $p || exit 1; done && for p in pratico-daemon pratico-shim; do cp /build/release/$p /out/.$p.new && mv -f /out/.$p.new /out/$p || exit 1; done' ;;
 *) echo "usage: scripts/linux-check.sh [build|test|host <out-dir>]" >&2; exit 2 ;;
 esac
 

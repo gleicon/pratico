@@ -12,6 +12,9 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+// Modified by the Pratico project (2026-11-21): `namespaces`, which cloud-hypervisor
+// joins before exec (Vendor/README.md).
 //===----------------------------------------------------------------------===//
 
 #if os(Linux)
@@ -26,7 +29,21 @@ import NIOCore
 /// initial filesystem, host binary paths, and a runtime root (under which
 /// each instance gets its own working directory).
 public struct CHVirtualMachineManager: VirtualMachineManager {
+    /// A user namespace and a network namespace owned by it, as open namespace fds, which
+    /// cloud-hypervisor joins before exec: its TAP devices are there. The caller keeps the
+    /// fds open while the VM runs.
+    public struct Namespaces: Sendable {
+        public let user: Int32
+        public let net: Int32
+
+        public init(user: Int32, net: Int32) {
+            self.user = user
+            self.net = net
+        }
+    }
+
     private let kernel: Kernel
+    private let namespaces: Namespaces?
     private let initialFilesystem: Mount
     private let chBinary: URL
     private let virtiofsdBinaryOverride: URL?
@@ -54,6 +71,8 @@ public struct CHVirtualMachineManager: VirtualMachineManager {
     ///     users. `/run` is tmpfs on every modern Linux distro, so contents
     ///     don't survive reboot — which is the right lifecycle for VM
     ///     runtime state.
+    ///   - namespaces: A user and a network namespace cloud-hypervisor joins before
+    ///     exec, where its TAP devices are; nil runs it in the caller's.
     ///   - group: Optional shared NIO `EventLoopGroup`; if nil, each VM
     ///     spawns its own.
     public init(
@@ -63,9 +82,11 @@ public struct CHVirtualMachineManager: VirtualMachineManager {
         virtiofsdBinary: URL? = nil,
         virtiofsdOptions: VirtiofsdOptions = .init(),
         runtimeRoot: URL? = nil,
+        namespaces: Namespaces? = nil,
         group: (any EventLoopGroup)? = nil,
         logger: Logger? = nil
     ) throws {
+        self.namespaces = namespaces
         self.kernel = kernel
         self.initialFilesystem = initialFilesystem
         self.chBinary = try Self.resolveBinary(chBinary, name: "cloud-hypervisor")
@@ -123,6 +144,7 @@ public struct CHVirtualMachineManager: VirtualMachineManager {
             runtimeRoot: runtimeRoot,
             chBinary: chBinary,
             virtiofsdBinary: virtiofsdBinaryOverride,
+            namespaces: namespaces,
             logger: logger
         )
     }
