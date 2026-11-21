@@ -1,4 +1,5 @@
 import Foundation
+import PraticoCore
 
 /// One endpoint of a running container: its address on one network, on the card whose
 /// frames the shim relays over the datagram socket bound at `path`. Endpoints on one card
@@ -59,7 +60,7 @@ final class NetSwitch: @unchecked Sendable {
 
     func start() throws {
         unlink(socketPath)
-        fd = socket(AF_UNIX, SOCK_DGRAM, 0)
+        fd = socket(AF_UNIX, Posix.datagram, 0)
         guard fd >= 0 else { throw APIError(500, "pratico-net: socket failed") }
         var size: Int32 = 4 << 20
         setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &size, socklen_t(MemoryLayout<Int32>.size))
@@ -270,7 +271,7 @@ final class NetSwitch: @unchecked Sendable {
     static func hostLookup(_ name: String) -> [UInt32]? {
         var hints = addrinfo()
         hints.ai_family = AF_INET
-        hints.ai_socktype = SOCK_STREAM
+        hints.ai_socktype = Posix.stream
         var res: UnsafeMutablePointer<addrinfo>?
         guard getaddrinfo(name, nil, &hints, &res) == 0 else { return nil }
         defer { freeaddrinfo(res) }

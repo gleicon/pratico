@@ -1,5 +1,4 @@
 import Foundation
-import os
 import PraticoCore
 
 /// Labels marking what pratico created (SPEC FR-27).
@@ -816,17 +815,17 @@ public final class ContainerService: @unchecked Sendable {
             return
         }
         let done = DispatchSemaphore(value: 0)
-        let ended = OSAllocatedUnfairLock(initialState: false)
+        let ended = LogFollowEnd()
         var past: [LogLine]
         if follow {
             past = store.follow { line in
-                guard let line, !ended.withLock({ $0 }) else { done.signal(); return false }
+                guard let line, !ended.isSet else { done.signal(); return false }
                 if let d = encode(line) { return conn.chunk(d) }
                 return true
             }
             if let until = window.until {
                 DispatchQueue.global().asyncAfter(wallDeadline: .now() + until.timeIntervalSinceNow) {
-                    ended.withLock { $0 = true }
+                    ended.set()
                     done.signal()
                 }
             }
@@ -965,4 +964,12 @@ final class ExitWatch: @unchecked Sendable {
         guard done.wait(timeout: .now() + seconds) == .success else { return nil }
         return lock.withLock { code }
     }
+}
+
+/// Set once a followed log's `until` passes: the follower stops at its next line.
+private final class LogFollowEnd: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    var isSet: Bool { lock.withLock { value } }
+    func set() { lock.withLock { value = true } }
 }

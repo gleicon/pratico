@@ -1,7 +1,10 @@
 import Containerization
 import ContainerizationExtras
 import Foundation
+import PraticoCore
+#if canImport(Virtualization)
 import Virtualization
+#endif
 
 /// One network endpoint of a VM: an address on one of its virtual NICs (cards), as the
 /// daemon plans it and the shim builds it (part of `NICSlots`). Since 2026-11-15 a VM has
@@ -167,6 +170,7 @@ struct NICSlots: Codable, Sendable, Equatable {
     }
 }
 
+#if canImport(Virtualization)
 /// A VM NIC whose frames go through a datagram socket pair: Virtualization.framework
 /// holds one end, the shim's relay the other (SPEC D-27).
 struct SwitchNIC: Interface, VZInterface {
@@ -192,11 +196,11 @@ enum NICRelay {
     /// Builds the NIC for Containerization and starts relaying; `primary` gets the default route.
     static func start(_ nic: ShimNIC, switchSocket: String, primary: Bool) throws -> SwitchNIC {
         var pair: [Int32] = [-1, -1]
-        guard socketpair(AF_UNIX, SOCK_DGRAM, 0, &pair) == 0 else { throw APIError(500, "pratico-net: socketpair failed") }
+        guard socketpair(AF_UNIX, Posix.datagram, 0, &pair) == 0 else { throw APIError(500, "pratico-net: socketpair failed") }
         let vm = pair[0], local = pair[1]
         for fd in [vm, local] { bufferSizes(fd) }
 
-        let relay = socket(AF_UNIX, SOCK_DGRAM, 0)
+        let relay = socket(AF_UNIX, Posix.datagram, 0)
         guard relay >= 0 else { throw APIError(500, "pratico-net: socket failed") }
         bufferSizes(relay)
         unlink(nic.socket)
@@ -250,3 +254,14 @@ enum NICRelay {
         setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcv, socklen_t(MemoryLayout<Int32>.size))
     }
 }
+#else
+/// On Linux hosts a VM's NIC is a TAP device (docs/design/remote.md); how it reaches the
+/// switch comes with networking there (slice 3).
+typealias SwitchNIC = TAPInterface
+
+enum NICRelay {
+    static func start(_ nic: ShimNIC, switchSocket: String, primary: Bool) throws -> SwitchNIC {
+        throw APIError(501, "pratico-net: networks are not available on Linux hosts yet")
+    }
+}
+#endif

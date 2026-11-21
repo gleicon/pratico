@@ -154,6 +154,8 @@ Local Mac development still comes first. When pratico runs on remote hosts:
 - The menubar is the one place to see every host (containers, scans, alerts, counters, connections from the `/pratico/*` endpoints) and sets the active host by writing the docker context; docker commands go straight to that host
 - No call forwarding, proxy, or orchestrator; several hosts, each picked explicitly
 - No pratico CLI while the docker CLI can express what pratico does
+- Design and slices: docs/design/remote.md. arm64 first (built and tested on the Mac through nested KVM), then x86_64; Cloud Hypervisor as the VMM (to confirm before a VM boots); TAP NICs read by the switch, `CAP_NET_ADMIN` only
+- [ ] Slice 1: the daemon compiles for Linux (static SDK), platform seams for VM boot, NIC, TLS trust, and logins; unit tests pass on Linux
 - Memory follows use there too, through virtio-balloon free page reporting (KVM returns pages the guest frees); same criterion as on the Mac
 
 ## Won't do (decided 2026-11-20)

@@ -198,12 +198,22 @@ public enum ShimHost {
         return relays
     }
 
+    /// Virtualization.framework on the Mac; Cloud Hypervisor on KVM on Linux hosts
+    /// (docs/design/remote.md), the binary from `PATH` until slice 2 ships a pinned one.
+    private static func manager(_ spec: ShimSpec) throws -> any VirtualMachineManager {
+        let kernel = Kernel(path: URL(filePath: spec.kernel), platform: .linuxArm)
+        let initfs = Mount.block(format: "ext4", source: spec.initfs, destination: "/", options: ["ro"])
+        #if canImport(Virtualization)
+        return VZVirtualMachineManager(kernel: kernel, initialFilesystem: initfs)
+        #else
+        return try CHVirtualMachineManager(kernel: kernel, initialFilesystem: initfs)
+        #endif
+    }
+
     /// Boots the VM and creates the container in it, its process not yet started.
     private static func boot(_ spec: ShimSpec, files: ShimFiles, log: LogStore, stdin: StdinStream?,
                              interfaces: [SwitchNIC], trace: inout Trace) async throws -> LinuxContainer {
-        let vmm = VZVirtualMachineManager(
-            kernel: Kernel(path: URL(filePath: spec.kernel), platform: .linuxArm),
-            initialFilesystem: .block(format: "ext4", source: spec.initfs, destination: "/", options: ["ro"]))
+        let vmm = try manager(spec)
         let rootfs = Mount.block(format: "ext4", source: spec.rootfs, destination: "/", options: spec.options?.readonlyRootfs == true ? ["ro"] : [])
         let resources = VMResources(cpus: spec.cpus, memoryInBytes: UInt64(spec.memoryMiB).mib() + VMResources.guestMemoryOverhead)
         let container = try LinuxContainer(spec.id, rootfs: rootfs, vmm: vmm, vm: resources) { config in

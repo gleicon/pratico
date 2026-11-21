@@ -1,4 +1,4 @@
-import CryptoKit
+import Crypto
 import Foundation
 
 /// The image side of `docker commit` (D-47): the base image as an OCI layout, one more

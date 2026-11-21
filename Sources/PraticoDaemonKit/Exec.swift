@@ -1,4 +1,5 @@
 import Foundation
+import PraticoCore
 
 /// One `docker exec` instance (SPEC FR-17). Lives in memory only, as in Docker.
 final class ExecInstance: @unchecked Sendable {
@@ -112,7 +113,7 @@ final class ExecService: @unchecked Sendable {
             conn.respond(200)
             Thread.detachNewThread {
                 var buf = [UInt8](repeating: 0, count: 65536)
-                while Darwin.read(fd, &buf, buf.count) > 0 {}
+                while Posix.read(fd, &buf, buf.count) > 0 {}
                 close(fd)
                 finishFromShim()
             }
@@ -138,7 +139,7 @@ final class ExecService: @unchecked Sendable {
         }
         Thread.detachNewThread {
             var buf = [UInt8](repeating: 0, count: 65536)
-            while case let n = Darwin.read(fd, &buf, buf.count), n > 0 {
+            while case let n = Posix.read(fd, &buf, buf.count), n > 0 {
                 if !conn.write(Data(buf[0..<n])) { break }
             }
             close(fd)

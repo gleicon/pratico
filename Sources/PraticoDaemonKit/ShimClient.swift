@@ -3,6 +3,7 @@ import ContainerizationOCI
 import ContainerizationExtras
 import ContainerizationOS
 import Foundation
+import PraticoCore
 
 // MARK: - Daemon side
 
@@ -109,7 +110,7 @@ struct ShimClient: Sendable {
         _ = request.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
         var buf = [UInt8](repeating: 0, count: 4096)
         var response = Data()
-        while case let n = Darwin.read(fd, &buf, buf.count), n > 0 { response.append(contentsOf: buf[0..<n]) }
+        while case let n = Posix.read(fd, &buf, buf.count), n > 0 { response.append(contentsOf: buf[0..<n]) }
         let headEnd = response.range(of: Data("\r\n\r\n".utf8))
         let head = String(decoding: response[..<(headEnd?.lowerBound ?? response.endIndex)], as: UTF8.self)
         let payload = headEnd.map { response[$0.upperBound...] } ?? Data()
@@ -129,7 +130,7 @@ struct ShimClient: Sendable {
         _ = request.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
         var head = Data()
         var byte: UInt8 = 0
-        while head.count < 4096, Darwin.read(fd, &byte, 1) == 1 {
+        while head.count < 4096, Posix.read(fd, &byte, 1) == 1 {
             head.append(byte)
             if head.suffix(4) == Data("\r\n\r\n".utf8) { break }
         }
@@ -141,7 +142,7 @@ struct ShimClient: Sendable {
                 .flatMap { Int($0.split(separator: ":")[1].trimmingCharacters(in: .whitespaces)) } ?? 0
             var body = [UInt8](repeating: 0, count: min(max(length, 0), 65536))
             var got = 0
-            while got < body.count, case let n = Darwin.read(fd, &body[got], body.count - got), n > 0 { got += n }
+            while got < body.count, case let n = Posix.read(fd, &body[got], body.count - got), n > 0 { got += n }
             close(fd)
             throw APIError(status, JSON.parse(Data(body[0..<got]))?["message"]?.string ?? "shim refused \(path)")
         }
@@ -149,7 +150,7 @@ struct ShimClient: Sendable {
     }
 
     private func connectSocket(_ files: ShimFiles) throws -> Int32 {
-        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        let fd = socket(AF_UNIX, Posix.stream, 0)
         guard fd >= 0 else { throw APIError(500, "shim: socket failed") }
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)

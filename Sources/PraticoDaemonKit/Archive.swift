@@ -1,4 +1,5 @@
 import Foundation
+import PraticoCore
 
 /// `docker cp` via `/containers/{id}/archive` (SPEC FR-18): the guest agent copies files
 /// to and from the host, where they are tarred in process.
@@ -209,7 +210,7 @@ final class ArchiveService: @unchecked Sendable {
         var cur = base
         for part in rel.split(separator: "/") {
             cur = cur.appending(path: String(part))
-            var st = Darwin.stat()
+            var st = Posix.Stat()
             guard lstat(cur.path, &st) == 0 else { return nil }
             guard st.st_mode & S_IFMT == S_IFDIR else {
                 throw APIError(400, "cannot copy over a mount point: \(rel) in the archive is not a directory")

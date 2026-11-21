@@ -1,5 +1,5 @@
-import Darwin
 import Foundation
+import PraticoCore
 
 /// Fixed limits (SPEC NFR-4, Tiger Style): nothing here grows without bound.
 public enum Limits {
@@ -42,8 +42,7 @@ public final class Connection: @unchecked Sendable {
 
     init(fd: Int32) {
         self.fd = fd
-        var on: Int32 = 1
-        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
+        Posix.noSigpipe(fd)
     }
 
     deinit { close() }
@@ -55,7 +54,7 @@ public final class Connection: @unchecked Sendable {
             closed = true
             // Wakes a thread blocked in read() before the descriptor is released.
             shutdown(fd, SHUT_RDWR)
-            Darwin.close(fd)
+            Posix.close(fd)
         }
     }
 
@@ -64,7 +63,7 @@ public final class Connection: @unchecked Sendable {
     private func fill() -> Bool {
         var chunk = [UInt8](repeating: 0, count: Limits.readChunk)
         while true {
-            let n = chunk.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress, Limits.readChunk) }
+            let n = chunk.withUnsafeMutableBytes { Posix.read(fd, $0.baseAddress, Limits.readChunk) }
             if n > 0 {
                 buffer.append(contentsOf: chunk[0..<n])
                 return true
@@ -228,7 +227,7 @@ public final class Connection: @unchecked Sendable {
         return data.withUnsafeBytes { raw in
             var offset = 0
             while offset < raw.count {
-                let n = Darwin.write(fd, raw.baseAddress! + offset, raw.count - offset)
+                let n = Posix.write(fd, raw.baseAddress! + offset, raw.count - offset)
                 if n < 0 {
                     if errno == EINTR { continue }
                     return false
@@ -354,7 +353,7 @@ public final class HTTPServer: @unchecked Sendable {
     }
 
     private static func listenLoopback(_ port: UInt16) throws -> Int32 {
-        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        let fd = socket(AF_INET, Posix.stream, 0)
         guard fd >= 0 else { throw DaemonError.system("socket", errno) }
         var on: Int32 = 1
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, socklen_t(MemoryLayout<Int32>.size))
@@ -378,7 +377,7 @@ public final class HTTPServer: @unchecked Sendable {
     }
 
     private func listenUnix() throws -> Int32 {
-        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        let fd = socket(AF_UNIX, Posix.stream, 0)
         guard fd >= 0 else { throw DaemonError.system("socket", errno) }
 
         var addr = sockaddr_un()
@@ -391,7 +390,7 @@ public final class HTTPServer: @unchecked Sendable {
         }
         let len = socklen_t(MemoryLayout<sockaddr_un>.size)
         // A live daemon keeps its socket: a second one must not take it over.
-        let probe = socket(AF_UNIX, SOCK_STREAM, 0)
+        let probe = socket(AF_UNIX, Posix.stream, 0)
         let live = withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(probe, $0, len) } } == 0
         close(probe)
         if live {
@@ -410,7 +409,7 @@ public final class HTTPServer: @unchecked Sendable {
 
     public func stop() {
         if listenFD >= 0 {
-            Darwin.close(listenFD)
+            Posix.close(listenFD)
             listenFD = -1
         }
         if loopbackPort == nil { unlink(path) }

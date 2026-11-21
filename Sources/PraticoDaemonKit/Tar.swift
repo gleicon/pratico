@@ -1,5 +1,6 @@
 import ContainerizationArchive
 import Foundation
+import PraticoCore
 
 /// tar in process, through ContainerizationArchive (libarchive); pratico runs no tar binary.
 enum Tar {
@@ -31,7 +32,7 @@ enum Tar {
         let id = owner?(path) ?? Owner(uid: st.st_uid, gid: st.st_gid)
         entry.owner = id.uid
         entry.group = id.gid
-        entry.modificationDate = Date(timeIntervalSince1970: TimeInterval(st.st_mtimespec.tv_sec))
+        entry.modificationDate = Date(timeIntervalSince1970: TimeInterval(Posix.modified(st)))
         entry.size = 0
         switch st.st_mode & S_IFMT {
         case S_IFDIR:

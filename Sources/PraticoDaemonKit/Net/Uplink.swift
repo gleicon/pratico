@@ -1,4 +1,5 @@
 import Foundation
+import PraticoCore
 
 /// pratico-net's way out of a network (SPEC D-27, runtime step 4b). Containers' UDP,
 /// ping, and TCP leave through ordinary sockets on the Mac, so the Mac's routing, VPN,
@@ -108,7 +109,7 @@ final class Uplink: @unchecked Sendable {
         if udp[key] == nil {
             guard admits(port.path),
                 egressAllows(key, port, target: target, dnsQuery: d.dstPort == 53 ? DNSQuery(d.payload) : nil, again: { [self] in udpOut(ip, port, target) }),
-                let fd = Self.connected(SOCK_DGRAM, target, d.dstPort)
+                let fd = Self.connected(Posix.datagram, target, d.dstPort)
             else { return }
             let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
             let flow = UDPFlow(fd: fd, source: source)
@@ -139,7 +140,7 @@ final class Uplink: @unchecked Sendable {
             }
         }
         flow.last = Date()
-        _ = d.payload.withUnsafeBytes { Darwin.send(flow.fd, $0.baseAddress, $0.count, 0) }
+        _ = d.payload.withUnsafeBytes { Posix.send(flow.fd, $0.baseAddress, $0.count) }
     }
 
     // MARK: ICMP echo (unprivileged ICMP datagram sockets)
@@ -150,7 +151,7 @@ final class Uplink: @unchecked Sendable {
         // ICMP carries data too: the guard sees each echo, as it sees each flow.
         let key = FlowKey(path: port.path, srcIP: ip.src, srcPort: 0, dstIP: ip.dst, dstPort: 0)
         guard egressAllows(key, port, target: target, dnsQuery: nil, proto: "icmp", again: { [self] in ping(ip, port, target) }) else { return }
-        let fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP)
+        let fd = socket(AF_INET, Posix.datagram, IPPROTO_ICMP)
         guard fd >= 0 else { return }
         var sa = Self.sockaddr4(target, 0)
         let sent = withUnsafePointer(to: &sa) {
@@ -342,7 +343,7 @@ final class Uplink: @unchecked Sendable {
                  containerPort: UInt16, udp isUDP: Bool) throws -> UInt16
     {
         try queue.sync {
-            let fd = socket(AF_INET, isUDP ? SOCK_DGRAM : SOCK_STREAM, 0)
+            let fd = socket(AF_INET, isUDP ? Posix.datagram : Posix.stream, 0)
             guard fd >= 0 else { throw APIError(500, "cannot open a socket for port \(hostPort)") }
             var on: Int32 = 1
             setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, socklen_t(MemoryLayout<Int32>.size))
@@ -412,12 +413,12 @@ final class Uplink: @unchecked Sendable {
     private func accept(_ l: Listener, containerPort: UInt16) {
         let nic = l.nic, gateway = l.gateway
         while true {
-            let fd = Darwin.accept(l.fd, nil, nil)
+            let fd = Posix.accept(l.fd)
             guard fd >= 0 else { return }
             guard admits(nic.path) else { close(fd); continue }
             _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
             var on: Int32 = 1
-            setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
+            Posix.noSigpipe(fd)
             setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &on, socklen_t(MemoryLayout<Int32>.size))
             let key = FlowKey(path: nic.path, srcIP: nic.ip, srcPort: containerPort, dstIP: gateway, dstPort: ephemeral(nic.path))
             tcp[key] = TCPConn(inbound: key, port: nic, fd: fd, uplink: self)
@@ -471,11 +472,11 @@ final class Uplink: @unchecked Sendable {
         guard fd >= 0 else { return nil }
         _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
         var on: Int32 = 1
-        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
-        if type == SOCK_STREAM { setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &on, socklen_t(MemoryLayout<Int32>.size)) }
+        Posix.noSigpipe(fd)
+        if type == Posix.stream { setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &on, socklen_t(MemoryLayout<Int32>.size)) }
         var sa = sockaddr4(ip, port)
         let r = withUnsafePointer(to: &sa) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Posix.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
         }
         guard r == 0 || errno == EINPROGRESS else {
             close(fd)
@@ -573,7 +574,7 @@ final class TCPConn {
         state = .synSent
         let r = DispatchSource.makeReadSource(fileDescriptor: fd, queue: uplink.queue)
         r.setEventHandler { [weak self] in self?.readable() }
-        r.setCancelHandler { Darwin.close(fd) }
+        r.setCancelHandler { Posix.close(fd) }
         readSource = r  // resumed once established
         let w = DispatchSource.makeWriteSource(fileDescriptor: fd, queue: uplink.queue)
         w.setEventHandler { [weak self] in self?.writable() }
@@ -589,7 +590,7 @@ final class TCPConn {
     }
 
     func connect(_ target: UInt32) {
-        guard let fd = Uplink.connected(SOCK_STREAM, target, key.dstPort) else { return refuse() }
+        guard let fd = Uplink.connected(Posix.stream, target, key.dstPort) else { return refuse() }
         self.fd = fd
         let w = DispatchSource.makeWriteSource(fileDescriptor: fd, queue: uplink.queue)
         w.setEventHandler { [weak self] in self?.writable() }
@@ -598,7 +599,7 @@ final class TCPConn {
         w.resume()
         let r = DispatchSource.makeReadSource(fileDescriptor: fd, queue: uplink.queue)
         r.setEventHandler { [weak self] in self?.readable() }
-        r.setCancelHandler { Darwin.close(fd) }
+        r.setCancelHandler { Posix.close(fd) }
         readSource = r  // resumed once established
     }
 
@@ -902,7 +903,7 @@ final class TCPConn {
             if readSuspended { r.resume() }
             r.cancel()  // closes the socket
         } else if fd >= 0 {
-            Darwin.close(fd)
+            Posix.close(fd)
         }
         readSource = nil
         writeSource = nil
