@@ -1,4 +1,5 @@
 import Foundation
+import PraticoCore
 
 /// What pratico keeps on disk, measured as allocated blocks: rootfs images are sparse, so
 /// their length says little, and a layer two images share is counted once. Serves Docker's
@@ -16,12 +17,16 @@ struct DiskService {
     /// Bytes only this file holds on APFS: a clone shares the rest with its source. nil
     /// where the volume does not report it.
     static func privateSize(_ path: String) -> Int64? {
+        #if !canImport(Darwin)
+        return nil
+        #else
         var list = attrlist()
         list.bitmapcount = u_short(ATTR_BIT_MAP_COUNT)
         list.forkattr = attrgroup_t(ATTR_CMNEXT_PRIVATESIZE)
         var buf = [UInt8](repeating: 0, count: 32)
         guard getattrlist(path, &list, &buf, buf.count, UInt32(FSOPT_ATTR_CMN_EXTENDED | FSOPT_NOFOLLOW)) == 0 else { return nil }
         return buf.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 4, as: Int64.self) }
+        #endif
     }
 
     /// The unpacked copy of `imageId`, if any.
@@ -185,8 +190,7 @@ struct DiskService {
         let stopped = ctrs.filter { !$0.record.state.running }
         let sum: ([ContainerUse]) -> Int64 = { $0.reduce(0) { $0 + $1.rootfs } }
         let logs = ctrs.reduce(Int64(0)) { $0 + $1.logs }
-        let free = (try? home.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?
-            .volumeAvailableCapacityForImportantUsage ?? 0
+        let free = Posix.freeBytes(home) ?? 0
         return [
             // Every part below is its own slice: they add up to Total.
             "Total": .int(content + unpacked + runtime + scans + sum(ctrs) + logs + volumeBytes),

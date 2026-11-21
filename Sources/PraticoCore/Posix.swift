@@ -1,3 +1,7 @@
+import Foundation
+#if os(Linux)
+import CPratico
+#endif
 #if canImport(Darwin)
 @_exported import Darwin
 #elseif canImport(Glibc)
@@ -15,6 +19,18 @@ public enum Posix {
     #else
     public static let stream = Int32(SOCK_STREAM.rawValue)
     public static let datagram = Int32(SOCK_DGRAM.rawValue)
+    #endif
+
+    #if canImport(Darwin)
+    public static let shutWrite = SHUT_WR
+    public static let shutBoth = SHUT_RDWR
+    public static let tcp = IPPROTO_TCP
+    public static let icmp = IPPROTO_ICMP
+    #else
+    public static let shutWrite = Int32(SHUT_WR)
+    public static let shutBoth = Int32(SHUT_RDWR)
+    public static let tcp = Int32(IPPROTO_TCP)
+    public static let icmp = Int32(IPPROTO_ICMP)
     #endif
 
     public typealias Stat = stat
@@ -114,4 +130,58 @@ public enum Posix {
         st.st_mtim.tv_sec
         #endif
     }
+
+    /// Bytes free for new data at `path`: on the Mac what the system reports as available
+    /// for important use (purgeable space included), elsewhere what an unprivileged user may fill.
+    public static func freeBytes(_ url: URL) -> Int64? {
+        #if canImport(Darwin)
+        (try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?.volumeAvailableCapacityForImportantUsage
+        #else
+        var st = statvfs()
+        guard statvfs(url.path, &st) == 0 else { return nil }
+        return Int64(st.f_bavail) * Int64(st.f_frsize)
+        #endif
+    }
+
+    /// A copy of `source` at `destination` that shares or skips what it can: an APFS clone on
+    /// the Mac; elsewhere only the data extents are written, so holes (most of a disk
+    /// image) stay holes. False when nothing was made; the caller then copies plainly.
+    public static func cloneOrSparseCopy(_ source: String, _ destination: String) -> Bool {
+        #if canImport(Darwin)
+        return clonefile(source, destination, 0) == 0
+        #else
+        let from = open(source, O_RDONLY | O_CLOEXEC)
+        guard from >= 0 else { return false }
+        defer { close(from) }
+        var st = Stat()
+        guard fstat(from, &st) == 0 else { return false }
+        let to = open(destination, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, mode_t(st.st_mode & 0o7777))
+        guard to >= 0 else { return false }
+        defer { close(to) }
+        let size = Int64(st.st_size)
+        var at: Int64 = 0
+        var copied = true
+        while at < size {
+            let data = pratico_seek_data(from, at)
+            if data < 0 { break }  // ENXIO: only a hole remains
+            let hole = pratico_seek_hole(from, data)
+            guard hole > data else { copied = false; break }
+            var inOff = data, outOff = data
+            var left = hole - data
+            while left > 0 {
+                let n = pratico_copy_file_range(from, &inOff, to, &outOff, UInt(left))
+                if n <= 0 { copied = false; break }
+                left -= n
+            }
+            if !copied { break }
+            at = hole
+        }
+        guard copied, ftruncate(to, off_t(size)) == 0 else {
+            unlink(destination)
+            return false
+        }
+        return true
+        #endif
+    }
 }
+

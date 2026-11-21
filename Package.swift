@@ -18,7 +18,8 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.0.0"),
     ],
     targets: [
-        .target(name: "PraticoCore"),
+        .target(name: "CPratico"),
+        .target(name: "PraticoCore", dependencies: ["CPratico"]),
         .target(
             name: "PraticoDaemonKit",
             dependencies: [

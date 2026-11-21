@@ -1,4 +1,5 @@
 import Foundation
+import PraticoCore
 
 /// One line of container output.
 struct LogLine: Sendable {
@@ -235,7 +236,7 @@ enum StdCopy {
 final class LogWatch: @unchecked Sendable {
     private let store: LogStore
     private let queue = DispatchQueue(label: "pratico.log-watch")
-    private var source: DispatchSourceFileSystemObject?
+    private var source: DispatchSourceProtocol?
     private var tick: DispatchSourceTimer?
     private var cancelled = false
 
@@ -262,21 +263,53 @@ final class LogWatch: @unchecked Sendable {
         dispatchPrecondition(condition: .onQueue(queue))
         precondition(source == nil, "log watch armed twice")
         guard !cancelled else { return }
+        #if canImport(Darwin)
         let fd = open(store.path.path, O_EVTONLY | O_CLOEXEC)
         guard fd >= 0 else { return }
         let s = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: [.write, .extend, .rename, .delete], queue: queue)
         s.setEventHandler { [weak self] in
             guard let self else { return }
             store.refresh()
-            if !s.data.isDisjoint(with: [.rename, .delete]) {
-                s.cancel()
-                source = nil
-                arm()
-            }
+            if !s.data.isDisjoint(with: [.rename, .delete]) { rearm(s) }
         }
-        s.setCancelHandler { close(fd) }
+        #else
+        // inotify on Linux: the same events, read off one descriptor per watched log.
+        let fd = inotify_init1(Int32(IN_NONBLOCK | IN_CLOEXEC))
+        guard fd >= 0 else { return }
+        guard inotify_add_watch(fd, store.path.path, UInt32(IN_MODIFY | IN_MOVE_SELF | IN_DELETE_SELF)) >= 0 else {
+            Posix.close(fd)
+            return
+        }
+        let s = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
+        s.setEventHandler { [weak self] in
+            guard let self else { return }
+            var buf = [UInt8](repeating: 0, count: 4096)
+            var moved = false
+            while case let n = Posix.read(fd, &buf, buf.count), n > 0 {
+                var at = 0
+                while at + MemoryLayout<inotify_event>.size <= n {
+                    let (mask, len) = buf.withUnsafeBytes { raw in
+                        let e = raw.loadUnaligned(fromByteOffset: at, as: inotify_event.self)
+                        return (e.mask, Int(e.len))
+                    }
+                    if mask & UInt32(IN_MOVE_SELF | IN_DELETE_SELF | IN_IGNORED) != 0 { moved = true }
+                    at += MemoryLayout<inotify_event>.size + len
+                }
+            }
+            store.refresh()
+            if moved { rearm(s) }
+        }
+        #endif
+        s.setCancelHandler { Posix.close(fd) }
         s.resume()
         source = s
+    }
+
+    /// The log was rotated or removed: watch whatever is at its path now.
+    private func rearm(_ s: DispatchSourceProtocol) {
+        s.cancel()
+        source = nil
+        arm()
     }
 
     deinit {

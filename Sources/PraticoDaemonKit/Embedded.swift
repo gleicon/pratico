@@ -2,6 +2,7 @@ import Containerization
 import ContainerizationEXT4
 import ContainerizationOCI
 import Foundation
+import PraticoCore
 
 /// pratico's runtime (docs/design/runtime.md): one VM per container through
 /// apple/containerization, with the kernel and `vminit` shipped inside pratico, so no
@@ -191,7 +192,7 @@ final class EmbeddedContainers: Sendable {
             }
             try FileManager.default.moveItem(at: partial, to: cached)
         }
-        if clonefile(cached.path, url.path, 0) != 0 { try FileManager.default.copyItem(at: cached, to: url) }
+        if !Posix.cloneOrSparseCopy(cached.path, url.path) { try FileManager.default.copyItem(at: cached, to: url) }
     }
 
     /// Unpacked images, one ext4 per image digest (`prepareRootfs`).

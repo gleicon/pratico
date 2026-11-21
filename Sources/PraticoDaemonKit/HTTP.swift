@@ -53,7 +53,7 @@ public final class Connection: @unchecked Sendable {
         if !closed {
             closed = true
             // Wakes a thread blocked in read() before the descriptor is released.
-            shutdown(fd, SHUT_RDWR)
+            shutdown(fd, Posix.shutBoth)
             Posix.close(fd)
         }
     }
@@ -358,7 +358,9 @@ public final class HTTPServer: @unchecked Sendable {
         var on: Int32 = 1
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, socklen_t(MemoryLayout<Int32>.size))
         var addr = sockaddr_in()
+        #if canImport(Darwin)
         addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        #endif
         addr.sin_family = sa_family_t(AF_INET)
         addr.sin_port = port.bigEndian
         addr.sin_addr.s_addr = UInt32(0x7F00_0001).bigEndian  // 127.0.0.1

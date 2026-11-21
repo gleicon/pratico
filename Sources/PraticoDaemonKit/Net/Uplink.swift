@@ -37,9 +37,16 @@ final class Uplink: @unchecked Sendable {
     /// launchd agents start with a soft limit of 256 descriptors.
     static func raiseDescriptorLimit() {
         var lim = rlimit()
+        #if canImport(Darwin)
         guard getrlimit(RLIMIT_NOFILE, &lim) == 0 else { return }
-        lim.rlim_cur = min(lim.rlim_max, rlim_t(OPEN_MAX))
+        lim.rlim_cur = min(lim.rlim_max, rlim_t(OPEN_MAX))  // macOS refuses more than OPEN_MAX
         setrlimit(RLIMIT_NOFILE, &lim)
+        #else
+        let resource = __rlimit_resource_t(RLIMIT_NOFILE.rawValue)
+        guard getrlimit(resource, &lim) == 0 else { return }
+        lim.rlim_cur = lim.rlim_max
+        setrlimit(resource, &lim)
+        #endif
     }
 
     init(switch sw: NetSwitch) {
@@ -151,7 +158,7 @@ final class Uplink: @unchecked Sendable {
         // ICMP carries data too: the guard sees each echo, as it sees each flow.
         let key = FlowKey(path: port.path, srcIP: ip.src, srcPort: 0, dstIP: ip.dst, dstPort: 0)
         guard egressAllows(key, port, target: target, dnsQuery: nil, proto: "icmp", again: { [self] in ping(ip, port, target) }) else { return }
-        let fd = socket(AF_INET, Posix.datagram, IPPROTO_ICMP)
+        let fd = socket(AF_INET, Posix.datagram, Posix.icmp)
         guard fd >= 0 else { return }
         var sa = Self.sockaddr4(target, 0)
         let sent = withUnsafePointer(to: &sa) {
@@ -161,7 +168,7 @@ final class Uplink: @unchecked Sendable {
         pings[port.path, default: 0] += 1
         let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
         let done = Box(false)
-        let finish: () -> Void = { [weak self] in
+        let finish: @Sendable () -> Void = { [weak self] in
             guard !done.value else { return }
             done.value = true
             source.cancel()
@@ -419,7 +426,7 @@ final class Uplink: @unchecked Sendable {
             _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
             var on: Int32 = 1
             Posix.noSigpipe(fd)
-            setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &on, socklen_t(MemoryLayout<Int32>.size))
+            setsockopt(fd, Posix.tcp, Int32(TCP_NODELAY), &on, socklen_t(MemoryLayout<Int32>.size))
             let key = FlowKey(path: nic.path, srcIP: nic.ip, srcPort: containerPort, dstIP: gateway, dstPort: ephemeral(nic.path))
             tcp[key] = TCPConn(inbound: key, port: nic, fd: fd, uplink: self)
         }
@@ -459,7 +466,9 @@ final class Uplink: @unchecked Sendable {
 
     static func sockaddr4(_ ip: UInt32, _ port: UInt16) -> sockaddr_in {
         var sa = sockaddr_in()
+        #if canImport(Darwin)
         sa.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        #endif
         sa.sin_family = sa_family_t(AF_INET)
         sa.sin_port = port.bigEndian
         sa.sin_addr = in_addr(s_addr: ip.bigEndian)
@@ -473,7 +482,7 @@ final class Uplink: @unchecked Sendable {
         _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
         var on: Int32 = 1
         Posix.noSigpipe(fd)
-        if type == Posix.stream { setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &on, socklen_t(MemoryLayout<Int32>.size)) }
+        if type == Posix.stream { setsockopt(fd, Posix.tcp, Int32(TCP_NODELAY), &on, socklen_t(MemoryLayout<Int32>.size)) }
         var sa = sockaddr4(ip, port)
         let r = withUnsafePointer(to: &sa) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Posix.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
@@ -687,7 +696,7 @@ final class TCPConn {
             }
         }
         pauseWrites()
-        if guestFin { shutdown(fd, SHUT_WR) }
+        if guestFin { shutdown(fd, Posix.shutWrite) }
         if wasFull { uplink.send(seg(TCPSegment.ack), for: self) }  // window update
     }
 
@@ -717,9 +726,9 @@ final class TCPConn {
         if case .ask(let host) = verdict {
             awaiting = true
             // The connection lives on the uplink's queue: the answer goes back there.
-            let me = Weak(self), queue = uplink.queue
+            let me = Weak(self), queue = uplink.queue, name = carried
             guardian.questions.ask(container, host, port: key.dstPort) { outcome in
-                queue.async { me.value?.answered(outcome, carried: carried) }
+                queue.async { me.value?.answered(outcome, carried: name) }
             }
             return false
         }
@@ -838,7 +847,7 @@ final class TCPConn {
                 guard inspect(final: true) else { return }
                 flushToHost()
             }
-            if toHost.isEmpty { shutdown(fd, SHUT_WR) }
+            if toHost.isEmpty { shutdown(fd, Posix.shutWrite) }
         }
         if guestFin && finSent && sndUna == sndNxt { close(reset: false) }
     }

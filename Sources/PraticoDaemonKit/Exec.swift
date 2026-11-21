@@ -134,7 +134,7 @@ final class ExecService: @unchecked Sendable {
                     }
                     if !ok { return }
                 }
-                shutdown(fd, SHUT_WR)  // the shim's stdin ends; output keeps flowing
+                shutdown(fd, Posix.shutWrite)  // the shim's stdin ends; output keeps flowing
             }
         }
         Thread.detachNewThread {

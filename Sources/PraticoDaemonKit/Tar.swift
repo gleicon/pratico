@@ -182,8 +182,7 @@ enum Tar {
     /// What an archive may unpack to: the spooled-body cap, and never so much that the Mac
     /// is left with less than 5 GiB free.
     static func unpackLimit(at dir: URL) -> Int64 {
-        let free = (try? dir.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?
-            .volumeAvailableCapacityForImportantUsage ?? Limits.maxSpooledBytes
+        let free = Posix.freeBytes(dir) ?? Limits.maxSpooledBytes
         return max(min(Limits.maxSpooledBytes, free - (5 << 30)), 0)
     }
 }
