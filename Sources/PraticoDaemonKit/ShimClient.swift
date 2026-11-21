@@ -19,35 +19,28 @@ struct ShimClient: Sendable {
     }
 
     /// Starts a shim in its own session, so it outlives the daemon, and waits until the
-    /// container runs or has already exited.
+    /// container runs or has already exited. The shim gets only the descriptors below
+    /// (`Command` closes the rest in the child): it would otherwise inherit the daemon's API
+    /// connections and published-port listeners, which then outlive a daemon restart.
     func spawn(_ files: ShimFiles) throws -> pid_t {
         for f in [files.exit, files.state, files.socket] { try? FileManager.default.removeItem(at: f) }
-        var attr: posix_spawnattr_t?
-        posix_spawnattr_init(&attr)
-        defer { posix_spawnattr_destroy(&attr) }
-        // CLOEXEC_DEFAULT: the shim gets only the descriptors below. Without it, it would
-        // inherit the daemon's API connections and published-port listeners, which then
-        // outlive a daemon restart.
-        posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETSID | POSIX_SPAWN_CLOEXEC_DEFAULT))
-        var actions: posix_spawn_file_actions_t?
-        posix_spawn_file_actions_init(&actions)
-        defer { posix_spawn_file_actions_destroy(&actions) }
-        posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0)
-        posix_spawn_file_actions_addopen(&actions, 1, files.shimLog.path, O_WRONLY | O_CREAT | O_APPEND, 0o644)
-        posix_spawn_file_actions_adddup2(&actions, 1, 2)
+        let logFD = open(files.shimLog.path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0o644)
+        guard logFD >= 0 else { throw APIError(500, "cannot open \(files.shimLog.path)") }
+        let log = FileHandle(fileDescriptor: logFD, closeOnDealloc: true)
         // fd 3: the shim writes a byte once the container is created (`ShimHost.readyFD`),
         // and the pipe ends when it exits; either wakes the wait below, without polling.
         var ready: [Int32] = [-1, -1]
         guard pipe(&ready) == 0 else { throw APIError(500, "cannot create a pipe for pratico-shim") }
-        defer { close(ready[0]) }
-        posix_spawn_file_actions_adddup2(&actions, ready[1], ShimHost.readyFD)
-        let argv = [binary, files.dir.path]
-        var cargs = argv.map { strdup($0) } + [nil]
-        defer { cargs.forEach { free($0) } }
-        var pid: pid_t = 0
-        let rc = posix_spawn(&pid, binary, &actions, &attr, &cargs, environ)
-        close(ready[1])
-        guard rc == 0 else { throw APIError(500, "cannot start pratico-shim: \(String(cString: strerror(rc)))") }
+        defer { Posix.close(ready[0]) }
+        var command = Command(binary, arguments: [files.dir.path],
+                              extraFiles: [FileHandle(fileDescriptor: ready[1], closeOnDealloc: true)])
+        command.stdout = log
+        command.stderr = log
+        command.attrs.setsid = true
+        assert(ShimHost.readyFD == 3, "extraFiles start at fd 3")
+        do { try command.start() } catch { throw APIError(500, "cannot start pratico-shim: \(error)") }
+        command.extraFiles = []  // the daemon's write end closes, so the pipe ends with the shim
+        let pid = command.pid
 
         let deadline = Date().addingTimeInterval(60)
         while Date() < deadline {
@@ -62,22 +55,47 @@ struct ShimClient: Sendable {
         return pid
     }
 
-    /// Calls once when the shim process ends (also for shims from an earlier daemon).
+    /// Calls once when the shim process ends (also for shims from an earlier daemon), and
+    /// reaps it when it is this daemon's child: an unreaped shim stays a zombie, and enough
+    /// of them exhaust the user's process limit.
     func onExit(_ pid: pid_t, _ handler: @escaping @Sendable () -> Void) {
-        let source = DispatchSource.makeProcessSource(identifier: pid, eventMask: .exit, queue: .global())
         let fired = Box(false)
-        source.setEventHandler {
-            guard !fired.value else { return }
-            fired.value = true
-            source.cancel()
+        let lock = NSLock()
+        let fire: @Sendable () -> Void = {
+            guard lock.withLock({ () -> Bool in
+                if fired.value { return false }
+                fired.value = true
+                return true
+            }) else { return }
+            var status: Int32 = 0
+            _ = waitpid(pid, &status, WNOHANG)  // ECHILD for an earlier daemon's shim
             handler()
+        }
+        #if canImport(Darwin)
+        let source = DispatchSource.makeProcessSource(identifier: pid, eventMask: .exit, queue: .global())
+        source.setEventHandler {
+            source.cancel()
+            fire()
         }
         source.resume()
-        if kill(pid, 0) != 0 && errno == ESRCH, !fired.value {  // exited before the source armed
-            fired.value = true
-            source.cancel()
-            handler()
+        if kill(pid, 0) != 0 && errno == ESRCH { source.cancel(); fire() }  // exited before the source armed
+        #else
+        // Linux has no process source: a child is waited for on its own thread; an earlier
+        // daemon's shim (reparented, so not ours to wait for) is checked every second.
+        var probe: Int32 = 0
+        if waitpid(pid, &probe, WNOHANG) == -1 && errno == ECHILD {
+            DispatchQueue.global().async {
+                while kill(pid, 0) == 0 || errno != ESRCH { Thread.sleep(forTimeInterval: 1) }
+                fire()
+            }
+        } else {
+            Thread.detachNewThread {
+                var status: Int32 = 0
+                while waitpid(pid, &status, 0) == -1 && errno == EINTR {}
+                fire()
+            }
         }
+        #endif
     }
 
     /// The live shim's pid, if any.
