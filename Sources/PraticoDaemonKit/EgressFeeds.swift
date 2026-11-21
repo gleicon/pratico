@@ -25,13 +25,15 @@ final class EgressFeeds: @unchecked Sendable {
     let dir: URL
     let env: [String: String]
     let guardian: EgressGuard
+    let secrets: SecretStore
     private let queue = DispatchQueue(label: "pratico.egress-feeds")
     private let lock = NSLock()
     private var status: [String: (entries: Int, updated: Date?, error: String?)] = [:]
 
-    init(dir: URL, guardian: EgressGuard, env: [String: String] = ProcessInfo.processInfo.environment) {
+    init(dir: URL, guardian: EgressGuard, home: URL, env: [String: String] = ProcessInfo.processInfo.environment) {
         self.dir = dir
         self.guardian = guardian
+        secrets = SecretStore(domain: Self.keychainDomain, home: home)
         self.env = env
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     }
@@ -112,7 +114,7 @@ final class EgressFeeds: @unchecked Sendable {
         let override = env["PRATICO_EGRESS_\(feed.name.uppercased().replacingOccurrences(of: "-", with: "_"))_URL"]
         var raw = override ?? feed.url
         if feed.keyed && override == nil {  // an override (a file:// URL in tests) needs no key
-            guard let key = Self.key() else {
+            guard let key = key() else {
                 note(feed.name, error: "needs a free abuse.ch Auth-Key (Settings or POST /pratico/egress/key)")
                 return false
             }
@@ -160,7 +162,7 @@ final class EgressFeeds: @unchecked Sendable {
         let s = lock.withLock { status }
         return [
             "Block": .bool(guardian.blockThreats),
-            "Key": .bool(Self.key() != nil),
+            "Key": .bool(key() != nil),
             "Feeds": .array(Self.all.map { f in
                 let st = s[f.name]
                 return ["Name": .string(f.name), "NeedsKey": .bool(f.keyed), "Entries": .int(Int64(st?.entries ?? 0)),
@@ -171,24 +173,21 @@ final class EgressFeeds: @unchecked Sendable {
 
     // MARK: The abuse.ch key
 
-    static func key() -> String? {
-        (try? KeychainQuery().get(securityDomain: keychainDomain, hostname: keychainHost))?.password
-    }
+    func key() -> String? { secrets.get(Self.keychainHost)?.password }
 
     /// Stores the key and fetches the keyed feeds now.
     func setKey(_ key: String?) throws {
-        let helper = KeychainHelper(securityDomain: Self.keychainDomain)
         if let key {
             guard (16...128).contains(key.count), key.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }) else {
                 throw APIError(400, "that does not look like an abuse.ch Auth-Key")
             }
-            try helper.save(hostname: Self.keychainHost, username: "auth-key", password: key)
+            try secrets.save(Self.keychainHost, username: "auth-key", password: key)
             queue.async { [self] in
                 for feed in Self.all where feed.keyed { try? FileManager.default.removeItem(at: cache(feed)); _ = refreshIfDue(feed) }
                 rebuild()
             }
         } else {
-            try? helper.delete(hostname: Self.keychainHost)
+            try? secrets.delete(Self.keychainHost)
             for feed in Self.all where feed.keyed { try? FileManager.default.removeItem(at: cache(feed)) }
             rebuild()
         }

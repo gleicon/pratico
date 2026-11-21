@@ -105,7 +105,7 @@ public final class Daemon: @unchecked Sendable {
             Pratico.log("pratico-daemon: egress: \(name) -> \(destination): \(feed)\(blocked ? ", refused" : "")")
         }
         networks.netSwitch.egress = guardian
-        self.egressFeeds = EgressFeeds(dir: home.appending(path: "scan-db/egress", directoryHint: .isDirectory), guardian: guardian)
+        self.egressFeeds = EgressFeeds(dir: home.appending(path: "scan-db/egress", directoryHint: .isDirectory), guardian: guardian, home: home)
         // An image's unpacked copy goes with it.
         _ = events.subscribe(since: nil) { [embedded = containers.embedded] e in
             if e.type == "image" && e.action == "delete" { embedded.dropRootfsCache(imageId: e.id) }
