@@ -206,7 +206,8 @@ final class RegistrySession: ContentClient, @unchecked Sendable {
         let scheme = Self.scheme(for: self.host, wire: wire, policy: policy)
         guard let url = URL(string: "\(scheme)://\(wire)") else { throw RegistryError(status: 400, description: "invalid registry \(host)") }
         base = url
-        self.credentials = credentials
+        // The Docker CLI sends an empty auth for an anonymous pull: that is no login.
+        self.credentials = credentials.flatMap { $0.username.isEmpty && $0.password.isEmpty ? nil : $0 }
         self.policy = policy
         self.note = note
         transport = policy.transport(host: self.host) { [weak self] key, message in self?.say(key, message) }
@@ -411,7 +412,12 @@ final class RegistrySession: ContentClient, @unchecked Sendable {
         let json = (try? await Self.collect(body, limit: 64 << 10)).flatMap { JSON.parse($0) }
         let reason = json?["errors"]?.array?.first?["message"]?.string ?? HTTPURLResponse.localizedString(forStatusCode: http.status)
         if http.status == 401 || http.status == 403 {
-            return RegistryError(status: http.status, description: "\(what): unauthorized: \(reason)")
+            // Docker Hub answers a repository that does not exist the same way, with or
+            // without a login: say so, as Docker does.
+            let hint = credentials == nil
+                ? " (the repository does not exist, or it is private: docker login \(host))"
+                : " (the repository does not exist, or the login pratico keeps for \(host) cannot read it)"
+            return RegistryError(status: http.status, description: "\(what): unauthorized: \(reason)\(hint)")
         }
         return RegistryError(status: http.status, description: "\(what) failed with response: \(http.status) \(reason)")
     }
