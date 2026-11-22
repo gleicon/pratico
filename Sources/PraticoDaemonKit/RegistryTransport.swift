@@ -1,9 +1,6 @@
 import Foundation
 import PraticoCore
 
-#if canImport(FoundationNetworking)
-import FoundationNetworking
-#endif
 #if canImport(Security)
 import Security
 #else

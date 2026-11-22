@@ -29,7 +29,8 @@ fi
 [ "$(shasum -a 256 "$ch" | cut -d' ' -f1)" = "$CH_SHA256" ] || { echo "$ch does not match its SHA-256"; exit 1; }
 install -m 755 "$ch" "$STAGE/cloud-hypervisor"
 cp "$ASSETS/vmlinux" "$STAGE/runtime/"
-rm -rf "$STAGE/runtime/vminit" && cp -R "$ASSETS/vminit" "$STAGE/runtime/"
+# As installed: the layout alone, mounted read-only, so a write into the assets fails here.
+rm -rf "$STAGE/runtime/vminit" && cp -R "$ASSETS/vminit" "$STAGE/runtime/" && rm -rf "$STAGE/runtime/vminit/ingest"
 "$ROOT/scripts/build-virtiofsd.sh" "$CACHE/virtiofsd" >"$CACHE/virtiofsd.log" 2>&1 || { tail -20 "$CACHE/virtiofsd.log"; exit 1; }
 install -m 755 "$CACHE/virtiofsd/virtiofsd" "$STAGE/virtiofsd"
 echo "building pratico for Linux (scripts/linux-check.sh host)"
@@ -111,6 +112,8 @@ for _ in $(seq 100); do onhost test -S /var/run/docker.sock 2>/dev/null && break
 
 check "test host: reachable over ssh" onhost true
 check "test host: /dev/kvm" onhost test -c /dev/kvm
+# No FoundationNetworking: libcurl, and the libraries it brings, stay out of a host install.
+check "test host: pratico does not link libcurl" onhost "! ldd /opt/pratico/pratico-daemon /opt/pratico/pratico-shim | grep -q libcurl"
 expect_eq "ssh://: server is pratico on Linux" "$(remote version --format '{{.Server.Os}}/{{.Server.Arch}}' 2>&1)" "linux/arm64"
 check "ssh://: pull alpine" remote pull -q alpine
 expect_eq "ssh://: run alpine true" "$(remote run --rm --network none alpine sh -c 'echo ran' 2>&1)" "ran"
