@@ -1,13 +1,20 @@
-# The Linux test host (docs/design/remote.md): Ubuntu 24.04, as a VPS runs it, with sshd
-# and the docker CLI (`docker -H ssh://` runs `docker system dial-stdio` here). pratico's
-# Linux daemon, shim, runtime assets and Cloud Hypervisor are mounted at /opt/pratico by
-# e2e/testhost.sh; it boots as `--runtime pratico-testhost`, so /dev/kvm is there.
+# The Linux test host (docs/design/remote.md): Ubuntu 24.04 as a VPS runs it, systemd and
+# sshd, the docker CLI (`docker -H ssh://` runs `docker system dial-stdio` here) with
+# Docker's own engine masked, and a user `dev` with sudo, who installs pratico from the
+# release payload e2e/testhost.sh mounts at /opt/pratico. It boots as
+# `--runtime pratico-testhost`, so /dev/kvm is there.
 FROM ubuntu@sha256:9c7f200c07e3d4a03e7249d2c16bf66a51120fb876aa2242cf31451412543289
+ENV container=docker
 RUN apt-get -qq update && DEBIAN_FRONTEND=noninteractive apt-get -qq install -y --no-install-recommends \
-        ca-certificates curl docker.io netcat-openbsd openssh-server python3 >/dev/null \
+        ca-certificates curl dbus docker.io netcat-openbsd openssh-server python3 sudo systemd systemd-sysv >/dev/null \
     && rm -rf /var/lib/apt/lists/* \
-    && mkdir -p /run/sshd /root/.ssh && chmod 700 /root/.ssh \
+    && systemctl mask docker.service docker.socket containerd.service >/dev/null 2>&1 \
+    && systemctl enable ssh.service >/dev/null 2>&1 \
+    && useradd -m -s /bin/bash dev && echo 'dev ALL=(ALL) NOPASSWD:ALL' >/etc/sudoers.d/dev \
+    && mkdir -p /root/.ssh /home/dev/.ssh && chmod 700 /root/.ssh /home/dev/.ssh && chown dev:dev /home/dev/.ssh \
+    && groupadd -r kvm \
     && printf 'PasswordAuthentication no\nPermitRootLogin prohibit-password\n' >/etc/ssh/sshd_config.d/pratico.conf
 COPY entrypoint.sh /entrypoint.sh
 EXPOSE 22
+STOPSIGNAL SIGRTMIN+3
 ENTRYPOINT ["/entrypoint.sh"]

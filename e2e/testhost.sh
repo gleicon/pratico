@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Remote hosts on the Mac (docs/design/remote.md, slice 2): boots the Linux test host, an
-# Ubuntu container with KVM (`--runtime pratico-testhost`, nested virtualization) on a
-# throwaway daemon, runs pratico's Linux daemon in it with Cloud Hypervisor, and drives it
-# with the Mac's docker CLI over `ssh://`, as a VPS would be.
+# Remote hosts on the Mac (docs/design/remote.md): boots the Linux test host, an Ubuntu
+# container with KVM and systemd (`--runtime pratico-testhost`, nested virtualization) on a
+# throwaway daemon. Its user `dev` installs the release payload (scripts/host-payload.sh)
+# as a VPS's user would, `sudo pratico-daemon install`, and the Mac's docker CLI drives the
+# service over `ssh://dev@`; then an upgrade, which keeps containers, and the uninstall.
 # Usage: e2e/testhost.sh <bin-dir>    (TESTHOST_KEEP=1 leaves it running, to work on it)
 set -uo pipefail
 
@@ -14,27 +15,11 @@ docker() { "$DOCKER" "$@"; }
 ASSETS="${PRATICO_RUNTIME_ASSETS:-$ROOT/.build/runtime-assets}"
 [ -f "$ASSETS/vmlinux" ] || { echo "runtime assets missing: run make assets"; exit 1; }
 
-# Cloud Hypervisor's static build, checked against the digest GitHub records for it.
-CH_VERSION=v55.0
-CH_SHA256=446de7552dacc83bc86d1137e7ffa7c2d204cdda4850eac4f2d2666d63c0f697
-CH_URL="https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/$CH_VERSION/cloud-hypervisor-static-aarch64"
-
 STAGE="$ROOT/.build/testhost"
 CACHE="$ROOT/.cache/testhost"
-mkdir -p "$STAGE/runtime" "$CACHE"
-ch="$CACHE/cloud-hypervisor-$CH_VERSION"
-if [ ! -f "$ch" ]; then
-    curl -fsSL --retry 3 -o "$ch.part" "$CH_URL" && mv "$ch.part" "$ch" || { echo "cannot fetch $CH_URL"; exit 1; }
-fi
-[ "$(shasum -a 256 "$ch" | cut -d' ' -f1)" = "$CH_SHA256" ] || { echo "$ch does not match its SHA-256"; exit 1; }
-install -m 755 "$ch" "$STAGE/cloud-hypervisor"
-cp "$ASSETS/vmlinux" "$STAGE/runtime/"
-# As installed: the layout alone, mounted read-only, so a write into the assets fails here.
-rm -rf "$STAGE/runtime/vminit" && cp -R "$ASSETS/vminit" "$STAGE/runtime/" && rm -rf "$STAGE/runtime/vminit/ingest"
-"$ROOT/scripts/build-virtiofsd.sh" "$CACHE/virtiofsd" >"$CACHE/virtiofsd.log" 2>&1 || { tail -20 "$CACHE/virtiofsd.log"; exit 1; }
-install -m 755 "$CACHE/virtiofsd/virtiofsd" "$STAGE/virtiofsd"
-echo "building pratico for Linux (scripts/linux-check.sh host)"
-"$ROOT/scripts/linux-check.sh" host "$STAGE" >"$CACHE/build.log" 2>&1 || { tail -20 "$CACHE/build.log"; exit 1; }
+mkdir -p "$STAGE" "$CACHE"
+echo "building the Linux host payload (scripts/host-payload.sh)"
+"$ROOT/scripts/host-payload.sh" "$STAGE" >"$CACHE/build.log" 2>&1 || { tail -20 "$CACHE/build.log"; exit 1; }
 
 . "$ROOT/e2e/reap.sh"
 reap_stale pratico-testhost
@@ -52,21 +37,26 @@ ssh-keygen -q -t ed25519 -N "" -f "$HOME_DIR/id" -C pratico-testhost
 cp "$HOME_DIR/id.pub" "$STAGE/authorized_keys"
 PORT=2222
 cat >"$HOME_DIR/ssh_config" <<EOF
-Host testhost
+Host testhost devhost
     HostName 127.0.0.1
     Port $PORT
-    User root
     IdentityFile $HOME_DIR/id
     IdentitiesOnly yes
     StrictHostKeyChecking no
     UserKnownHostsFile $HOME_DIR/known_hosts
     LogLevel ERROR
+Host testhost
+    User root
+Host devhost
+    User dev
 EOF
 mkdir -p "$HOME_DIR/bin"
 printf '#!/bin/sh\nexec /usr/bin/ssh -F %s "$@"\n' "$HOME_DIR/ssh_config" >"$HOME_DIR/bin/ssh"
 chmod +x "$HOME_DIR/bin/ssh"
-remote() { PATH="$HOME_DIR/bin:$PATH" "$DOCKER" -H ssh://testhost "$@"; }
+# docker as dev, through the installed service; commands on the host as root, or as dev.
+remote() { PATH="$HOME_DIR/bin:$PATH" "$DOCKER" -H ssh://devhost "$@"; }
 onhost() { "$HOME_DIR/bin/ssh" testhost "$@"; }
+asdev() { "$HOME_DIR/bin/ssh" devhost "$@"; }
 
 pass=0
 fail=0
@@ -108,12 +98,25 @@ docker buildx create --name pratico-build --driver docker-container --driver-opt
 BUILDX_BUILDER=pratico-build docker build -q -t pratico-testhost "$ROOT/e2e/testhost" >/dev/null || { echo "cannot build the test host image"; exit 1; }
 docker run -d --name testhost --runtime pratico-testhost --privileged --cpus 4 -m 6g \
     -p "127.0.0.1:$PORT:22" -v "$STAGE:/opt/pratico:ro" -v "$ROOT/e2e:/e2e:ro" pratico-testhost >/dev/null || { echo "cannot start the test host"; exit 1; }
-for _ in $(seq 100); do onhost test -S /var/run/docker.sock 2>/dev/null && break; sleep 0.3; done
+# Up once sshd answers and systemd has finished booting ("degraded" counts: a container
+# lacks some of a machine's units).
+for _ in $(seq 200); do onhost test -d /run/systemd/system 2>/dev/null && break; sleep 0.3; done
+onhost timeout 60 systemctl is-system-running --wait >/dev/null 2>&1 || true
 
 check "test host: reachable over ssh" onhost true
+check "test host: systemd" onhost test -d /run/systemd/system
 check "test host: /dev/kvm" onhost test -c /dev/kvm
 # Static (musl): a host installs nothing for pratico, and the image has none of its libraries.
 check "test host: pratico is statically linked" onhost "for b in pratico-daemon pratico-shim; do ldd /opt/pratico/\$b 2>&1 | grep -q 'not a dynamic executable' || exit 1; done"
+asdev sudo /opt/pratico/pratico-daemon install --yes >"$HOME_DIR/install.log" 2>&1
+expect_eq "install: sudo pratico-daemon install --yes" "$?" "0"
+expect_eq "install: the service runs" "$(onhost systemctl is-active pratico.service 2>&1)" "active"
+expect_eq "install: as the pratico user, not root" "$(onhost ps -o user= -C pratico-daemon 2>&1 | sort -u)" "pratico"
+expect_eq "install: its socket is the pratico group's" "$(onhost "stat -c '%U:%G %a' /run/pratico/docker.sock" 2>&1)" "pratico:pratico 660"
+expect_eq "install: the docker CLI's default socket points at it" "$(onhost readlink /run/docker.sock 2>&1)" "/run/pratico/docker.sock"
+expect_eq "install: dev is in the pratico group" "$(asdev id -nG 2>&1 | tr ' ' '\n' | grep -x pratico)" "pratico"
+caps='grep CapEff /proc/$(pgrep -o pratico-daemon)/status | cut -f2'
+expect_eq "install: no capability on the host" "$(onhost "$caps" 2>&1)" "0000000000000000"
 expect_eq "ssh://: server is pratico on Linux" "$(remote version --format '{{.Server.Os}}/{{.Server.Arch}}' 2>&1)" "linux/arm64"
 check "ssh://: pull alpine" remote pull -q alpine
 expect_eq "ssh://: run alpine true" "$(remote run --rm --network none alpine sh -c 'echo ran' 2>&1)" "ran"
@@ -128,20 +131,34 @@ eventually_eq "net: a published port on the test host" published onhost "echo | 
 remote rm -f th-server th-published >/dev/null 2>&1
 check "net: network rm" remote network rm th-net
 
-onhost "rm -rf /tmp/th-share && mkdir -p /tmp/th-share && echo from-host >/tmp/th-share/in"
+# Bind mounts are read and written as the pratico user: dev shares the directory with
+# the group, as docs/design/remote.md says to.
+asdev "rm -rf /tmp/th-share && mkdir -p /tmp/th-share && chgrp pratico /tmp/th-share && chmod 2770 /tmp/th-share && echo from-host >/tmp/th-share/in && chmod 640 /tmp/th-share/in"
 expect_eq "fs: a bind mount reads the host's files" "$(remote run --rm -v /tmp/th-share:/share alpine cat /share/in 2>&1)" "from-host"
 remote run --rm -v /tmp/th-share:/share alpine sh -c 'echo from-vm >/share/out' >/dev/null 2>&1
-expect_eq "fs: and writes them" "$(onhost cat /tmp/th-share/out 2>&1)" "from-vm"
+expect_eq "fs: and writes them" "$(asdev cat /tmp/th-share/out 2>&1)" "from-vm"
 remote run --rm -v th-vol:/data alpine sh -c 'echo kept >/data/f' >/dev/null 2>&1
 expect_eq "fs: a named volume outlives its container" "$(remote run --rm -v th-vol:/data alpine cat /data/f 2>&1)" "kept"
 check "fs: volume rm" remote volume rm th-vol
 
-remote run -d --name sleeper --network none alpine sh -c 'echo up; sleep 60' >/dev/null 2>&1
-check "test host: the container is a Cloud Hypervisor VM" onhost pgrep -f /opt/pratico/cloud-hypervisor
+remote run -d --name sleeper --network none alpine sh -c 'echo up; sleep 600' >/dev/null 2>&1
+check "test host: the container is a Cloud Hypervisor VM" onhost pgrep -f /usr/lib/pratico/cloud-hypervisor
 expect_eq "ssh://: ps lists it" "$(remote ps --format '{{.Names}}' 2>&1)" "sleeper"
 eventually_eq "ssh://: logs" up remote logs sleeper
+# An upgrade is the same install again: the service restarts and adopts its containers.
+asdev sudo /opt/pratico/pratico-daemon install --yes >>"$HOME_DIR/install.log" 2>&1
+expect_eq "upgrade: install again" "$?" "0"
+expect_eq "upgrade: the container kept running" "$(remote inspect sleeper --format '{{.State.Running}}' 2>&1)" "true"
 check "ssh://: rm -f" remote rm -f sleeper
-check "test host: its VM is gone" sh -c "! '$HOME_DIR/bin/ssh' testhost pgrep -f /opt/pratico/cloud-hypervisor"
+check "test host: its VM is gone" sh -c "! '$HOME_DIR/bin/ssh' testhost pgrep -f /usr/lib/pratico/cloud-hypervisor"
+
+remote run -d --name left --network none alpine sleep 600 >/dev/null 2>&1
+asdev sudo /usr/lib/pratico/pratico-daemon uninstall --yes >>"$HOME_DIR/install.log" 2>&1
+expect_eq "uninstall: sudo pratico-daemon uninstall --yes" "$?" "0"
+check "uninstall: the service is gone" sh -c "! '$HOME_DIR/bin/ssh' testhost systemctl cat pratico.service"
+check "uninstall: its files are gone" onhost "! test -e /usr/lib/pratico && ! test -e /run/docker.sock && ! test -e /usr/lib/sysusers.d/pratico.conf"
+eventually_eq "uninstall: its containers stopped" 0 onhost "pgrep -c -f /usr/lib/pratico/[c]loud-hypervisor || true"
+check "uninstall: images and volumes kept" onhost test -d /var/lib/pratico/store
 
 echo "testhost: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

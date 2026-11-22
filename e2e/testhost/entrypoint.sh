@@ -1,11 +1,11 @@
 #!/bin/sh
-# Starts the test host: sshd for the Mac's docker CLI, and pratico's daemon on the socket
-# the docker CLI looks for by default.
+# Starts the test host: this run's key for root and dev, /dev/kvm and /dev/net/tun as
+# Ubuntu's udev rules leave them (kvm: group kvm, 0660; tun: 0666; the image's kvm group
+# is the one udev's package creates), then systemd. pratico is installed over ssh, by dev.
 set -eu
-install -m 600 /opt/pratico/authorized_keys /root/.ssh/authorized_keys
-ssh-keygen -A >/dev/null
-/usr/sbin/sshd
-export PATH="/opt/pratico:$PATH"
-mkdir -p /root/.pratico
-ln -sf /root/.pratico/docker.sock /var/run/docker.sock
-exec env PRATICO_RUNTIME_ASSETS=/opt/pratico/runtime /opt/pratico/pratico-daemon --home /root/.pratico
+for u in root dev; do
+    h=$(getent passwd "$u" | cut -d: -f6)
+    install -m 600 -o "$u" -g "$u" /opt/pratico/authorized_keys "$h/.ssh/authorized_keys"
+done
+chgrp kvm /dev/kvm && chmod 660 /dev/kvm && chmod 666 /dev/net/tun
+exec /sbin/init
