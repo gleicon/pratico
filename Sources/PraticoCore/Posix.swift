@@ -13,12 +13,12 @@ import CPratico
 /// The C library's calls under names no Swift method shadows (`read`, `close`, and the rest
 /// are also methods of types that call them), and the constants Glibc spells differently.
 public enum Posix {
-    #if canImport(Darwin)
-    public static let stream = SOCK_STREAM
-    public static let datagram = SOCK_DGRAM
-    #else
+    #if canImport(Glibc)
     public static let stream = Int32(SOCK_STREAM.rawValue)
     public static let datagram = Int32(SOCK_DGRAM.rawValue)
+    #else
+    public static let stream = Int32(SOCK_STREAM)
+    public static let datagram = Int32(SOCK_DGRAM)
     #endif
 
     #if canImport(Darwin)

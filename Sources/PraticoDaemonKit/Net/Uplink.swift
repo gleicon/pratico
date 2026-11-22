@@ -42,7 +42,11 @@ final class Uplink: @unchecked Sendable {
         lim.rlim_cur = min(lim.rlim_max, rlim_t(OPEN_MAX))  // macOS refuses more than OPEN_MAX
         setrlimit(RLIMIT_NOFILE, &lim)
         #else
+        #if canImport(Glibc)
         let resource = __rlimit_resource_t(RLIMIT_NOFILE.rawValue)
+        #else
+        let resource = RLIMIT_NOFILE
+        #endif
         guard getrlimit(resource, &lim) == 0 else { return }
         lim.rlim_cur = lim.rlim_max
         setrlimit(resource, &lim)

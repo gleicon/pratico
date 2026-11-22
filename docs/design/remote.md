@@ -99,7 +99,7 @@ scanning, and the flight recorder are the same code.
    `alpine true` in a Cloud Hypervisor VM. Done 2026-11-21 (`make e2e-testhost`): an
    Ubuntu 24.04 container on `--runtime pratico-testhost` with sshd and the docker CLI;
    the daemon and shim built in the pinned Swift image with the Swift runtime linked in
-   (`scripts/linux-check.sh host`, still needing glibc, libarchive and libcurl), Cloud
+   (`scripts/linux-check.sh host`; static since slice 4), Cloud
    Hypervisor v55.0 pinned by SHA-256. Containers run with `--network none` until slice 3.
 3. Networking and egress through the switch on Linux; `virtiofsd`, pinned, for volumes and
    bind mounts; the e2e suite runs against the test host. Done 2026-11-21: `pratico_vm_netns`
@@ -112,8 +112,15 @@ scanning, and the flight recorder are the same code.
    failures there were Mac-only checks (Time Machine) and nesting's timing (below), each
    looked at. A shim that has not booted its VM within 120 s is killed and the start fails,
    instead of the daemon going on to a shim not yet listening.
-4. Install over SSH: one documented command, systemd unit, `pratico` user. The binaries
-   go static (musl) here, with no libcurl: FoundationNetworking goes from the Linux build.
+4. Install over SSH: one documented command, systemd unit, `pratico` user. Done so far:
+   the daemon and shim are static (musl, the Swift static Linux SDK), with no
+   FoundationNetworking and so no libcurl; the test host image installs none of their
+   libraries, and checks they are static. The SDK's own libarchive (3.8.1) trailed
+   upstream by ten releases, and a static binary takes no distribution's fixes:
+   `scripts/build-libs.sh` builds libarchive (tar with gzip, bzip2 and xz only), zlib,
+   bzip2 and xz at their current releases, pinned by SHA-256, and the build fails unless
+   the binary carries that libarchive. Every Swift package is at its latest release
+   (swift-crypto 5.1.2, past the vendored containerization's `<5.0.0`).
 5. Menubar: hosts list over swift-nio-ssh, `/pratico/*` from each, active host written to
    the docker context.
 6. x86_64: kernel, init, probes, and the seccomp syscall table; e2e on an x86_64 KVM host.

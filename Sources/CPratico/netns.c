@@ -2,10 +2,9 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
-#include <linux/if_tun.h>
 #include <net/if.h>
 #include <netinet/in.h>
-#include <linux/if_packet.h>
+#include <netpacket/packet.h>
 #include <net/ethernet.h>
 #include <sched.h>
 #include <stdio.h>
@@ -18,6 +17,25 @@
 
 #ifndef PACKET_IGNORE_OUTGOING
 #define PACKET_IGNORE_OUTGOING 23
+#endif
+
+// The kernel's TUN ABI (include/uapi/linux/if_tun.h): the static musl SDK the host build
+// uses has no kernel headers. Where they are installed, they must agree.
+#define PRATICO_TUNSETIFF _IOW('T', 202, int)
+#define PRATICO_TUNSETPERSIST _IOW('T', 203, int)
+#define PRATICO_IFF_TAP 0x0002
+#define PRATICO_IFF_NO_PI 0x1000
+#define PRATICO_IFF_VNET_HDR 0x4000
+#if __has_include(<linux/if_tun.h>)
+#include <linux/if_tun.h>
+_Static_assert(TUNSETIFF == PRATICO_TUNSETIFF && TUNSETPERSIST == PRATICO_TUNSETPERSIST, "if_tun.h ioctls");
+_Static_assert(IFF_TAP == PRATICO_IFF_TAP && IFF_NO_PI == PRATICO_IFF_NO_PI && IFF_VNET_HDR == PRATICO_IFF_VNET_HDR, "if_tun.h flags");
+#else
+#define TUNSETIFF PRATICO_TUNSETIFF
+#define TUNSETPERSIST PRATICO_TUNSETPERSIST
+#define IFF_TAP PRATICO_IFF_TAP
+#define IFF_NO_PI PRATICO_IFF_NO_PI
+#define IFF_VNET_HDR PRATICO_IFF_VNET_HDR
 #endif
 
 struct report {

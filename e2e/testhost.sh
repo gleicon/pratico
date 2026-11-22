@@ -112,8 +112,8 @@ for _ in $(seq 100); do onhost test -S /var/run/docker.sock 2>/dev/null && break
 
 check "test host: reachable over ssh" onhost true
 check "test host: /dev/kvm" onhost test -c /dev/kvm
-# No FoundationNetworking: libcurl, and the libraries it brings, stay out of a host install.
-check "test host: pratico does not link libcurl" onhost "! ldd /opt/pratico/pratico-daemon /opt/pratico/pratico-shim | grep -q libcurl"
+# Static (musl): a host installs nothing for pratico, and the image has none of its libraries.
+check "test host: pratico is statically linked" onhost "for b in pratico-daemon pratico-shim; do ldd /opt/pratico/\$b 2>&1 | grep -q 'not a dynamic executable' || exit 1; done"
 expect_eq "ssh://: server is pratico on Linux" "$(remote version --format '{{.Server.Os}}/{{.Server.Arch}}' 2>&1)" "linux/arm64"
 check "ssh://: pull alpine" remote pull -q alpine
 expect_eq "ssh://: run alpine true" "$(remote run --rm --network none alpine sh -c 'echo ran' 2>&1)" "ran"
