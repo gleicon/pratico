@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Cuts a GitHub release: version tag vX.Y.Z plus the DMG and its SHA-256.
+# Cuts a GitHub release: version tag vX.Y.Z plus the DMG, the Linux host tarball
+# (scripts/linux-dist.sh), and their SHA-256s.
 # Refuses to run unless the version is proper semver, matches the code and
 # Info.plist, the tree is clean, and the tag does not exist yet. A run that pushed its tag
 # but did not publish the release (an upload that failed) is resumed: same tag, same commit.
 # Usage: scripts/release.sh <version>    (or: make release VERSION=x.y.z)
-#   SKIP_E2E=1   skip the end-to-end suite (unit tests still run)
+#   SKIP_E2E=1   skip the end-to-end suites, the Mac's and the Linux test host's (unit tests still run)
 #   PRERELEASE=1 mark the GitHub release as a pre-release (the Homebrew cask is not updated)
 #   SIGN_IDENTITY="Developer ID Application: …"  sign with a Developer ID instead of ad hoc
 #   NOTARY_PROFILE=<name>  notarize and staple the DMG with the credentials saved by
@@ -44,9 +45,12 @@ fi
 
 make test
 [ "${SKIP_E2E:-0}" = 1 ] || make e2e
+[ "${SKIP_E2E:-0}" = 1 ] || make e2e-testhost
 make dmg VERSION="$VERSION" SIGN_IDENTITY="$IDENTITY"
 DMG="dist/Pratico-$VERSION.dmg"
 hdiutil verify "$DMG" >/dev/null
+make linux-dist VERSION="$VERSION"
+LINUX_TAR="dist/pratico-$VERSION-linux-arm64.tar.gz"
 notarized=0
 if [ -n "${NOTARY_PROFILE:-}" ]; then
     xcrun notarytool submit "$DMG" --keychain-profile "$NOTARY_PROFILE" --wait
@@ -69,8 +73,9 @@ if [ "$notarized" = 1 ]; then
 else
     open_note='Ad-hoc signed, not notarized: approve the first launch in System Settings > Privacy & Security ("Open Anyway"), or run `xattr -dr com.apple.quarantine /Applications/Pratico.app`.'
 fi
-gh release create "$TAG" "$DMG" "$DMG.sha256" --title "Pratico $VERSION" --verify-tag "${flags[@]}" \
-    --notes "$(printf '%s Requires macOS 26 on Apple silicon; nothing else to install.\n\nSHA-256: %s' "$open_note" "$(cut -d' ' -f1 "$DMG.sha256")")"
+linux_note="Linux hosts (arm64, KVM, systemd): extract pratico-$VERSION-linux-arm64.tar.gz and run \`sudo ./pratico-$VERSION-linux-arm64/pratico-daemon install\`; https://github.com/gleicon/pratico/blob/$TAG/docs/linux-hosts.md says what it changes."
+gh release create "$TAG" "$DMG" "$DMG.sha256" "$LINUX_TAR" "$LINUX_TAR.sha256" --title "Pratico $VERSION" --verify-tag "${flags[@]}" \
+    --notes "$(printf '%s Requires macOS 26 on Apple silicon; nothing else to install.\n\nSHA-256: %s\n\n%s\n\nSHA-256: %s' "$open_note" "$(cut -d' ' -f1 "$DMG.sha256")" "$linux_note" "$(cut -d' ' -f1 "$LINUX_TAR.sha256")")"
 echo "released $TAG"
 # The release stands either way; a failed cask update is rerun on its own.
 if [ "${PRERELEASE:-0}" != 1 ]; then

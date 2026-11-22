@@ -19,7 +19,7 @@ CACHE="$ROOT/.cache/virtiofsd"
 export DOCKER_HOST="${DOCKER_HOST:-unix://$HOME/.pratico/docker.sock}"
 mkdir -p "$CACHE/in"
 
-if [ -x "$OUT/virtiofsd" ] && [ "$(cat "$OUT/virtiofsd.version" 2>/dev/null)" = "$VIRTIOFSD_VERSION" ]; then
+if [ -x "$OUT/virtiofsd" ] && [ -f "$OUT/virtiofsd.linked" ] && [ "$(cat "$OUT/virtiofsd.version" 2>/dev/null)" = "$VIRTIOFSD_VERSION" ]; then
     echo "virtiofsd: $OUT/virtiofsd $VIRTIOFSD_VERSION, built already"
     exit 0
 fi
@@ -43,7 +43,9 @@ docker run --rm --cpus "${CPUS:-8}" --memory "${MEMORY:-8g}" \
         export LIBSECCOMP_LINK_TYPE=static LIBSECCOMP_LIB_PATH=/usr/lib LIBCAPNG_LINK_TYPE=static LIBCAPNG_LIB_PATH=/usr/lib
         CARGO_HOME=/build/cargo RUSTFLAGS="-C target-feature=+crt-static" cargo build -q --release --locked --target aarch64-unknown-linux-musl
         install -m 755 target/aarch64-unknown-linux-musl/release/virtiofsd /out/virtiofsd
-        apk list -I libseccomp-static libcap-ng-static 2>/dev/null | cut -d" " -f1 | sed "s/^/virtiofsd: linked /"'
+        apk list -I libseccomp-static libcap-ng-static 2>/dev/null | cut -d" " -f1 >/out/virtiofsd.linked'
 file "$OUT/virtiofsd" 2>/dev/null | grep -q "statically linked" || { echo "virtiofsd: $OUT/virtiofsd is not static" >&2; exit 1; }
+# What it links, for THIRD_PARTY_NOTICES: Alpine's static packages, current when it builds.
+sed 's/^/virtiofsd: linked /' "$OUT/virtiofsd.linked"
 echo "$VIRTIOFSD_VERSION" >"$OUT/virtiofsd.version"
 echo "virtiofsd: $OUT/virtiofsd $VIRTIOFSD_VERSION $(shasum -a 256 "$OUT/virtiofsd" | cut -d' ' -f1)"

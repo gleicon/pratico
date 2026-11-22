@@ -9,10 +9,11 @@ ENTITLEMENTS := Support/pratico.entitlements
 SIGN_IDENTITY ?= -
 VERSION      ?= $(shell sed -n 's/.*static let version = "\(.*\)"/\1/p' Sources/PraticoCore/Pratico.swift)
 DMG          := $(DIST_DIR)/Pratico-$(VERSION).dmg
+LINUX_TAR    := $(DIST_DIR)/pratico-$(VERSION)-linux-arm64.tar.gz
 
 ASSETS_DIR   := $(BUILD_DIR)/runtime-assets
 
-.PHONY: e2e-tools e2e-testhost all build assets probe test e2e e2e-embedded e2e-registry bench app sign dmg release install run uninstall clean
+.PHONY: e2e-tools e2e-testhost linux-dist all build assets probe test e2e e2e-embedded e2e-registry bench app sign dmg release install run uninstall clean
 
 all: build
 
@@ -79,7 +80,12 @@ sign:
 dmg: app
 	scripts/dmg.sh "$(APP)" "$(DMG)" "$(VERSION)" "$(SIGN_IDENTITY)"
 
-# Tags vVERSION and publishes the DMG to GitHub; see scripts/release.sh for the checks.
+# The Linux host release: static daemon and shim, Cloud Hypervisor, virtiofsd, kernel and init.
+linux-dist: build assets
+	scripts/linux-dist.sh "$(VERSION)" "$(LINUX_TAR)"
+
+# Tags vVERSION and publishes the DMG and the Linux host tarball to GitHub; see
+# scripts/release.sh for the checks.
 release:
 	scripts/release.sh "$(VERSION)"
 
