@@ -54,6 +54,9 @@ Or by hand:
 3. Open Pratico. The menubar item starts the daemon, which then starts at login
    (`start_at_login`). Status › View Daemon Log opens `~/.pratico/daemon.log`.
 
+On an arm64 Linux server with KVM, pratico runs as a systemd service that your Mac's
+docker CLI drives over SSH: [docs/linux-hosts.md](docs/linux-hosts.md).
+
 ## Use
 
 The socket is `~/.pratico/docker.sock`. Point clients at it with a context:
@@ -269,13 +272,16 @@ make test            # unit tests
 make e2e             # Docker API against a throwaway daemon, real docker CLI
 make e2e-embedded    # runtime: shims, guest agent, pratico-net, volumes, snapshots
 make e2e-tools       # real tools: Testcontainers (Go), Compose with postgres (needs Go)
+make e2e-testhost    # Linux host: install, use, upgrade, uninstall in a nested KVM test host
+make linux-dist      # dist/pratico-<version>-linux-arm64.tar.gz
 make bench           # AC-44..49: latency, memory, connection limits, CLI versions
 ```
 
 The e2e suites use `/opt/homebrew/bin/docker` (`DOCKER=` to override), an isolated
 `DOCKER_CONFIG`, and fake scanners. `make release VERSION=x.y.z` runs the tests, builds
 and verifies the DMG, tags `vX.Y.Z`, and publishes the release; with `SIGN_IDENTITY` and
-`NOTARY_PROFILE` set it signs with a Developer ID and notarizes.
+`NOTARY_PROFILE` set it signs with a Developer ID and notarizes. It also builds the Linux
+host tarball and attaches it.
 
 Runnable examples of each feature, and pratico's own API endpoints: [examples/](examples/).
 Requirements, acceptance criteria, and design decisions: [SPEC.md](SPEC.md).
@@ -292,6 +298,8 @@ Requirements, acceptance criteria, and design decisions: [SPEC.md](SPEC.md).
   source (Apache-2.0, [Vendor/](Vendor/README.md)).
   These static binaries include musl (MIT), the Swift runtime, Foundation, libdispatch
   (Apache-2.0 with Runtime Library Exception), and ICU data (Unicode License V3).
+- The Linux host release also carries Cloud Hypervisor, virtiofsd, and static builds of
+  libarchive, zlib, bzip2, and xz; its `THIRD_PARTY_NOTICES` has their licenses.
 - osv-scanner, grype, trivy, and syft are installed separately and are not shipped with
   pratico.
 - Egress threat data, fetched on your Mac and not redistributed: Feodo Tracker, SSL

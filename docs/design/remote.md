@@ -1,6 +1,7 @@
 # Remote Linux hosts (design, 2026-11-20)
 
-Status: in progress, slices 1 to 3 done (below); not yet installable on a host. The
+Status: in progress, slices 1 to 4 done (below): installable on arm64 hosts
+([linux-hosts.md](../linux-hosts.md)). The
 roadmap's "Remote Linux hosts" section holds what is decided.
 
 ## Settled (roadmap, 2026-11-20)
@@ -16,8 +17,10 @@ roadmap's "Remote Linux hosts" section holds what is decided.
 
 `pratico-daemon` built for Linux with the Swift static Linux SDK (as `vminitd` already is),
 one binary with no runtime dependencies, run by systemd as an unprivileged `pratico` user.
-It serves the same API on `/var/run/pratico/docker.sock`; `/pratico/*`, the switch, egress,
-scanning, and the flight recorder are the same code.
+It serves the same API on `/run/pratico/docker.sock`, which members of the `pratico` group
+use (`/run/docker.sock` links to it when no other engine has that); `/pratico/*`, the
+switch, egress, scanning, and the flight recorder are the same code. How to install it:
+[linux-hosts.md](../linux-hosts.md).
 
 ## Measured facts
 
@@ -112,8 +115,23 @@ scanning, and the flight recorder are the same code.
    failures there were Mac-only checks (Time Machine) and nesting's timing (below), each
    looked at. A shim that has not booted its VM within 120 s is killed and the start fails,
    instead of the daemon going on to a shim not yet listening.
-4. Install over SSH: one documented command, systemd unit, `pratico` user. Done so far:
-   the daemon and shim are static (musl, the Swift static Linux SDK), with no
+4. Install: done 2026-11-22. `sudo pratico-daemon install`, from the extracted
+   `pratico-<version>-linux-arm64.tar.gz` (`make linux-dist`, attached to each release),
+   checks the host (arm64, `/dev/kvm` open to its group, systemd), shows what it writes and
+   runs, and asks; then copies the release to `/usr/lib/pratico` by rename, writes the
+   unit, sysusers, tmpfiles and (with AppArmor) the shim's profile, and runs
+   `systemd-sysusers`, `systemd-tmpfiles`, `apparmor_parser` and `systemctl`, exec'd from
+   fixed paths, never a shell (`--files-only` prints them instead). The unit runs as
+   `pratico` with no capability, `NoNewPrivileges`, `DevicePolicy=closed` with `/dev/kvm`
+   and `/dev/net/tun`, `RestrictNamespaces=user net mnt pid`, and `KillMode=process` so a
+   restart or upgrade keeps containers. Found on the way: `ProtectKernelTunables`,
+   `ProtectKernelLogs` and `ProtectHostname` each mount over part of `/proc`, and then
+   virtiofsd's sandbox cannot mount its own (`MountProc`, EPERM) and the shim cannot turn
+   IPv6 off in a VM's namespace: left out. Bind mounts are read and written as `pratico`,
+   so shared directories need its group. `uninstall` stops the containers (SIGTERM, then
+   SIGKILL after 30 s), removes what install wrote, keeps `/var/lib/pratico` unless
+   `--purge`. `make e2e-testhost` boots systemd in the test host, where a non-root user
+   installs, uses, upgrades and uninstalls pratico. The daemon and shim are static (musl, the Swift static Linux SDK), with no
    FoundationNetworking and so no libcurl; the test host image installs none of their
    libraries, and checks they are static. The SDK's own libarchive (3.8.1) trailed
    upstream by ten releases, and a static binary takes no distribution's fixes:

@@ -258,6 +258,7 @@
         <div><h3>Clients you already use</h3><p>Command-line clients and Compose files that speak the Docker-compatible API work unchanged, from version 25 on: <code>run</code>, <code>exec -it</code>, <code>logs -f</code>, <code>build</code> (BuildKit in its own VM), buildpacks' <code>pack build</code>, <code>save</code>, <code>load</code>, <code>commit</code>, <code>diff</code>, <code>export</code>, and <code>cp</code> with running or stopped containers. Options you pass are applied, from restart policies and CPU limits to capabilities; one a VM cannot honor is refused with a clear error, never ignored.</p></div>
         <div><h3>OCI images, any registry</h3><p>Pull and push standard OCI images, with your registry logins and private certificate authorities.</p></div>
         <div><h3>Your test and dev stacks</h3><p>Testcontainers and Compose stacks run as they do on Linux: postgres, mysql, redis, and mongo on their default volumes, which are real Linux disks, and test frameworks that mount the API socket reach pratico.</p></div>
+        <div><h3>Your own Linux server too</h3><p>On an arm64 Linux server with KVM, <code>sudo pratico-daemon install</code> sets pratico up as a systemd service under a user of its own, with no root and no capability on the host. Your Mac's docker CLI drives it over SSH, <code>docker -H ssh://</code>, one VM per container as on the Mac. <a href="https://github.com/gleicon/pratico/blob/main/docs/linux-hosts.md">What it needs and changes</a>.</p></div>
       </div>
     </div>
   </section>
