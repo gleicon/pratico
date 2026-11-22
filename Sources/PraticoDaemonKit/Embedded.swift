@@ -86,7 +86,7 @@ public actor EmbeddedRuntime {
         let store = try ImageStore(path: root, contentStore: content)
         let reference = try initReference(assets: assets)
         if try await store.getOrNil(reference: reference) == nil {
-            _ = try await store.load(from: assets.appending(path: "vminit", directoryHint: .isDirectory))
+            try await loadInit(from: assets.appending(path: "vminit", directoryHint: .isDirectory), into: store, root: root)
         }
         try await refreshInitfs(store: store, root: root, reference: reference)
         for img in try await store.list() where isInitImage(img.reference) && img.reference != reference {
@@ -94,6 +94,18 @@ public actor EmbeddedRuntime {
         }
         let kernel = Kernel(path: assets.appending(path: "vmlinux"), platform: .linuxArm)
         return try await EmbeddedRuntime(assets: assets, store: store, content: content, kernel: kernel, reference: reference)
+    }
+
+    /// Loads the bundled `vminit` layout from a copy under `root`: opening a layout as a
+    /// content store creates `ingest/` in it, and the assets are read-only (a signed app
+    /// bundle, a root-owned host install).
+    private static func loadInit(from layout: URL, into store: ImageStore, root: URL) async throws {
+        let fm = FileManager.default
+        let copy = root.appending(path: "vminit-load", directoryHint: .isDirectory)
+        try? fm.removeItem(at: copy)
+        try fm.copyItem(at: layout, to: copy)
+        defer { try? fm.removeItem(at: copy) }
+        _ = try await store.load(from: copy)
     }
 
     #if canImport(Virtualization)
