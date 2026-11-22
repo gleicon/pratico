@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Cuts a GitHub release: version tag vX.Y.Z plus the DMG and its SHA-256.
 # Refuses to run unless the version is proper semver, matches the code and
-# Info.plist, the tree is clean, and the tag does not exist yet.
+# Info.plist, the tree is clean, and the tag does not exist yet. A run that pushed its tag
+# but did not publish the release (an upload that failed) is resumed: same tag, same commit.
 # Usage: scripts/release.sh <version>    (or: make release VERSION=x.y.z)
 #   SKIP_E2E=1   skip the end-to-end suite (unit tests still run)
 #   PRERELEASE=1 mark the GitHub release as a pre-release (the Homebrew cask is not updated)
@@ -21,10 +22,18 @@ plist_version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' S
 [ "$code_version" = "$VERSION" ] || die "Pratico.version is $code_version, not $VERSION"
 [ "$plist_version" = "$VERSION" ] || die "Info.plist CFBundleShortVersionString is $plist_version, not $VERSION"
 [ -z "$(git status --porcelain)" ] || die "working tree is not clean"
-git rev-parse -q --verify "refs/tags/$TAG" >/dev/null && die "tag $TAG already exists locally"
-git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1 && die "tag $TAG already exists on origin"
 command -v gh >/dev/null || die "gh is required"
 gh auth status >/dev/null 2>&1 || die "gh is not logged in"
+resume=0
+if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+    gh release view "$TAG" >/dev/null 2>&1 && die "release $TAG already exists"
+    [ "$(git rev-parse "$TAG^{commit}")" = "$(git rev-parse HEAD)" ] || die "tag $TAG exists on another commit"
+    [ "$(git ls-remote --tags origin "refs/tags/$TAG^{}" | cut -f1)" = "$(git rev-parse HEAD)" ] || die "tag $TAG differs on origin"
+    resume=1
+    echo "release: $TAG is tagged but not released: resuming"
+elif git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+    die "tag $TAG already exists on origin"
+fi
 
 IDENTITY="${SIGN_IDENTITY:--}"
 if [ -n "${NOTARY_PROFILE:-}" ]; then
@@ -47,9 +56,11 @@ if [ -n "${NOTARY_PROFILE:-}" ]; then
 fi
 (cd dist && shasum -a 256 "Pratico-$VERSION.dmg" >"Pratico-$VERSION.dmg.sha256")
 
-git tag -a "$TAG" -m "Pratico $VERSION"
-git push origin HEAD
-git push origin "$TAG"
+if [ "$resume" = 0 ]; then
+    git tag -a "$TAG" -m "Pratico $VERSION"
+    git push origin HEAD
+    git push origin "$TAG"
+fi
 
 flags=()
 if [ "${PRERELEASE:-0}" = 1 ]; then flags+=(--prerelease); fi
