@@ -14,7 +14,8 @@ SDK_SHA256=87c3eaf908e67c0e13a84367119e12273cec1d2cd3d81f7d74bb36722d6b607b  # s
 export DOCKER_HOST="${DOCKER_HOST:-unix://$HOME/.pratico/docker.sock}"
 
 # libarchive and its codecs, which ContainerizationArchive links (dev headers: the image has none).
-deps='apt-get -qq update >/dev/null && apt-get -qq install -y --no-install-recommends libarchive-dev libbz2-dev liblzma-dev libssl-dev >/dev/null'
+# apparmor: its parser checks the shim's profile (HostInstallTests).
+deps='apt-get -qq update >/dev/null && apt-get -qq install -y --no-install-recommends libarchive-dev libbz2-dev liblzma-dev libssl-dev apparmor >/dev/null'
 
 case "${1:-test}" in
 build) cmd='swift build --scratch-path /build --product pratico-daemon && swift build --scratch-path /build --product pratico-shim' ;;

@@ -321,11 +321,15 @@ public final class HTTPServer: @unchecked Sendable {
     let handler: Handler
     /// Routes whose request bodies are streamed to a file (see `Request.bodyFile`).
     let spool: @Sendable (String, String) -> Bool
+    /// The socket's mode: the owner only (NFR-9), or its group too on a Linux host, where
+    /// the `pratico` group are the users the service serves.
+    let mode: mode_t
     private var listenFD: Int32 = -1
     private let slots = DispatchSemaphore(value: Limits.maxConnections)
 
-    public init(path: String, spool: @escaping @Sendable (String, String) -> Bool = { _, _ in false }, handler: @escaping Handler) {
+    public init(path: String, mode: mode_t = 0o600, spool: @escaping @Sendable (String, String) -> Bool = { _, _ in false }, handler: @escaping Handler) {
         self.path = path
+        self.mode = mode
         self.loopbackPort = nil
         self.spool = spool
         self.handler = handler
@@ -335,6 +339,7 @@ public final class HTTPServer: @unchecked Sendable {
     public init(loopbackPort port: UInt16, handler: @escaping Handler) {
         precondition(port > 0, "port 0 is not a fixed endpoint")
         self.path = ""
+        self.mode = 0o600
         self.loopbackPort = port
         self.spool = { _, _ in false }
         self.handler = handler
@@ -404,7 +409,7 @@ public final class HTTPServer: @unchecked Sendable {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, len) }
         }
         guard rc == 0 else { throw DaemonError.system("bind \(path)", errno) }
-        chmod(path, 0o600)  // NFR-9
+        chmod(path, mode)  // NFR-9
         guard listen(fd, 128) == 0 else { throw DaemonError.system("listen", errno) }
         return fd
     }

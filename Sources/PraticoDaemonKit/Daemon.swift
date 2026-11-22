@@ -13,6 +13,8 @@ public struct RuntimeUnavailable: Error, CustomStringConvertible {
 public final class Daemon: @unchecked Sendable {
     public let home: URL
     public let socketPath: String
+    /// `0o600` (NFR-9); `0o660` for a Linux host's service, shared with its group.
+    let socketMode: mode_t
     let images: ImageService
     let containers: ContainerService
     let execs: ExecService
@@ -39,10 +41,11 @@ public final class Daemon: @unchecked Sendable {
     /// settings: the daemon refuses to start (exit 4) rather than trust less, or more, than
     /// `config.toml` says. Throws `RuntimeUnavailable` when the kernel, init, or shim are
     /// missing (exit 3).
-    public init(home: URL, config: Config = Config(), socketPath: String? = nil) throws {
+    public init(home: URL, config: Config = Config(), socketPath: String? = nil, socketMode: mode_t = 0o600) throws {
         let policy = try RegistryPolicy.load(config)
         self.home = home
         self.socketPath = socketPath ?? home.appending(path: "docker.sock").path
+        self.socketMode = socketMode
         let embedded: EmbeddedContainers
         let store: ImageStore
         let content: LocalContentStore
@@ -125,7 +128,7 @@ public final class Daemon: @unchecked Sendable {
         }
         Uplink.raiseDescriptorLimit()  // pratico-net holds a socket per container connection
         try networks.startSwitch()  // pratico-net
-        let s = HTTPServer(path: socketPath, spool: Self.streamsBody) { [self] req, conn in handle(req, conn) }
+        let s = HTTPServer(path: socketPath, mode: socketMode, spool: Self.streamsBody) { [self] req, conn in handle(req, conn) }
         try s.start()
         server = s
         scans.startBackground()

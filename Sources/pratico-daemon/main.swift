@@ -5,8 +5,11 @@ import PraticoDaemonKit
 // Started by Pratico.app's launch agent, never by the user directly (SPEC D-13); its
 // output goes to `~/.pratico/daemon.log`.
 // `--home <dir>` relocates all state (the e2e suite uses a temporary home).
+// On a Linux host, `install` and `uninstall` set up the systemd service (HostInstall), which
+// runs the daemon with `--socket`, shared with the `pratico` group.
 
 var home = Pratico.home()
+var socketPath: String?
 
 /// Exits, leaving the reason in `daemon.err` for the menubar to show (SPEC FR-3).
 @MainActor func fail(_ message: String, code: Int32 = 1) -> Never {
@@ -18,6 +21,30 @@ var home = Pratico.home()
 
 var args = Array(CommandLine.arguments.dropFirst())
 
+#if os(Linux)
+if let verb = args.first, verb == "install" || verb == "uninstall" {
+    var options = HostInstall.Options()
+    for flag in args.dropFirst() {
+        switch flag {
+        case "--yes": options.yes = true
+        case "--files-only" where verb == "install": options.filesOnly = true
+        case "--purge" where verb == "uninstall": options.purge = true
+        default:
+            print("usage: pratico-daemon install [--yes] [--files-only] | uninstall [--yes] [--purge]")
+            exit(2)
+        }
+    }
+    let source = Bundle.main.executableURL?.resolvingSymlinksInPath().deletingLastPathComponent().path ?? "."
+    do {
+        if verb == "install" { try HostInstall.install(source: source, options: options) } else { try HostInstall.uninstall(options: options) }
+    } catch {
+        FileHandle.standardError.write(Data("pratico-daemon \(verb): \(error)\n".utf8))
+        exit(1)
+    }
+    exit(0)
+}
+#endif
+
 while let arg = args.first {
     args.removeFirst()
     switch arg {
@@ -28,6 +55,10 @@ while let arg = args.first {
         guard let v = args.first else { fail("--home needs a directory", code: 2) }
         args.removeFirst()
         home = URL(filePath: v, directoryHint: .isDirectory)
+    case "--socket":
+        guard let v = args.first else { fail("--socket needs a path", code: 2) }
+        args.removeFirst()
+        socketPath = v
     default:
         fail("unknown argument \(arg)", code: 2)
     }
@@ -43,7 +74,8 @@ do { config = try Config.load(home: home) } catch { fail("\(error)", code: 4) }
 signal(SIGPIPE, SIG_IGN)
 
 let daemon: Daemon
-do { daemon = try Daemon(home: home, config: config) } catch let e as RuntimeUnavailable { fail("\(e)", code: 3) } catch { fail("\(error)", code: 4) }
+// A socket of its own is the Linux service's, shared with its group (the users it serves).
+do { daemon = try Daemon(home: home, config: config, socketPath: socketPath, socketMode: socketPath == nil ? 0o600 : 0o660) } catch let e as RuntimeUnavailable { fail("\(e)", code: 3) } catch { fail("\(error)", code: 4) }
 do { try daemon.start() } catch let e as DaemonError {
     // A second copy says why in the log, but leaves no startup error: the first is fine.
     if case .alreadyServing = e { Pratico.log("pratico-daemon: \(e)"); exit(1) }

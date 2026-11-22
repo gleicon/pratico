@@ -205,15 +205,23 @@ public enum ShimHost {
     }
 
     /// Virtualization.framework on the Mac; Cloud Hypervisor on KVM on Linux hosts
-    /// (docs/design/remote.md), `cloud-hypervisor` and `virtiofsd` from `PATH`, their
-    /// sockets under `<home>/run/ch` rather than a directory every daemon on the host shares.
+    /// (docs/design/remote.md), `cloud-hypervisor` and `virtiofsd` beside the shim or from
+    /// `PATH`, their sockets under `<home>/run/ch` rather than a directory every daemon on
+    /// the host shares.
     private static func manager(_ spec: ShimSpec, files: ShimFiles, interfaces: [SwitchNIC]) throws -> any VirtualMachineManager {
         let kernel = Kernel(path: URL(filePath: spec.kernel), platform: .linuxArm)
         let initfs = Mount.block(format: "ext4", source: spec.initfs, destination: "/", options: ["ro"])
         #if canImport(Virtualization)
         return VZVirtualMachineManager(kernel: kernel, initialFilesystem: initfs)
         #else
-        return try CHVirtualMachineManager(kernel: kernel, initialFilesystem: initfs, runtimeRoot: files.vmmRuntime,
+        // Installed side by side (/usr/lib/pratico): a service's PATH is not where they are.
+        let dir = Bundle.main.executableURL?.deletingLastPathComponent()
+        func beside(_ name: String) -> URL? {
+            guard let url = dir?.appending(path: name), FileManager.default.isExecutableFile(atPath: url.path) else { return nil }
+            return url
+        }
+        return try CHVirtualMachineManager(kernel: kernel, initialFilesystem: initfs, chBinary: beside("cloud-hypervisor"),
+                                           virtiofsdBinary: beside("virtiofsd"), runtimeRoot: files.vmmRuntime,
                                            namespaces: interfaces.first?.namespaces)
         #endif
     }
