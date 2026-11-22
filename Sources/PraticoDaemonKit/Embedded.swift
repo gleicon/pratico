@@ -100,12 +100,29 @@ public actor EmbeddedRuntime {
     /// content store creates `ingest/` in it, and the assets are read-only (a signed app
     /// bundle, a root-owned host install).
     private static func loadInit(from layout: URL, into store: ImageStore, root: URL) async throws {
-        let fm = FileManager.default
         let copy = root.appending(path: "vminit-load", directoryHint: .isDirectory)
-        try? fm.removeItem(at: copy)
-        try fm.copyItem(at: layout, to: copy)
-        defer { try? fm.removeItem(at: copy) }
+        try? FileManager.default.removeItem(at: copy)
+        defer { try? FileManager.default.removeItem(at: copy) }
+        try copyContents(of: layout, to: copy)
         _ = try await store.load(from: copy)
+    }
+
+    /// Contents only: `copyItem` keeps the owner, which a Linux service's user (the assets
+    /// are root's) is not permitted to.
+    private static func copyContents(of source: URL, to target: URL) throws {
+        let fm = FileManager.default
+        guard let files = fm.enumerator(at: source, includingPropertiesForKeys: [.isDirectoryKey]) else {
+            throw APIError(500, "pratico: cannot read \(source.path)")
+        }
+        try fm.createDirectory(at: target, withIntermediateDirectories: true)
+        for case let file as URL in files {
+            let to = target.appending(path: String(file.standardizedFileURL.path.dropFirst(source.standardizedFileURL.path.count)))
+            if try file.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true {
+                try fm.createDirectory(at: to, withIntermediateDirectories: true)
+            } else {
+                try Data(contentsOf: file).write(to: to)
+            }
+        }
     }
 
     #if canImport(Virtualization)
