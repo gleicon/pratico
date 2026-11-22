@@ -126,9 +126,31 @@ extension HostInstall {
         try? fm.removeItem(atPath: previous)
         try fm.createDirectory(atPath: staging, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o755])
         for name in payload { try fm.copyItem(atPath: "\(source)/\(name)", toPath: "\(staging)/\(name)") }
+        try ownByRoot(staging)
         if fm.fileExists(atPath: prefix) { try fm.moveItem(atPath: prefix, toPath: previous) }
         try fm.moveItem(atPath: staging, toPath: prefix)
         try? fm.removeItem(atPath: previous)
+    }
+
+    /// The release is extracted by a user, and `copyItem` keeps owners: left so, that user
+    /// could replace what the service runs. Every entry becomes root's, 0755 for directories
+    /// and executables, 0644 otherwise; a symbolic link (which could point the install at a
+    /// directory the user writes) is refused.
+    static func ownByRoot(_ dir: String) throws {
+        let fm = FileManager.default
+        let entries = try fm.subpathsOfDirectory(atPath: dir).map { "\(dir)/\($0)" } + [dir]
+        for path in entries {
+            var st = stat()
+            guard lstat(path, &st) == 0 else { throw InstallError("cannot read \(path): errno \(errno)") }
+            let kind = st.st_mode & S_IFMT
+            guard kind == S_IFDIR || kind == S_IFREG else {
+                throw InstallError("\(path) is not a plain file or directory: extract the release again")
+            }
+            let mode: mode_t = kind == S_IFDIR || st.st_mode & 0o111 != 0 ? 0o755 : 0o644
+            guard lchown(path, 0, 0) == 0, chmod(path, mode) == 0 else {
+                throw InstallError("cannot make \(path) root's: errno \(errno)")
+            }
+        }
     }
 
     static func write(_ file: File) throws {

@@ -110,6 +110,7 @@ check "test host: /dev/kvm" onhost test -c /dev/kvm
 check "test host: pratico is statically linked" onhost "for b in pratico-daemon pratico-shim; do ldd /opt/pratico/\$b 2>&1 | grep -q 'not a dynamic executable' || exit 1; done"
 asdev sudo /opt/pratico/pratico-daemon install --yes >"$HOME_DIR/install.log" 2>&1
 expect_eq "install: sudo pratico-daemon install --yes" "$?" "0"
+expect_eq "install: every installed file is root's, writable by root only" "$(onhost "find /usr/lib/pratico \\( ! -user root -o ! -group root -o -perm /022 -o -type l \\) | wc -l" 2>&1)" "0"
 expect_eq "install: the service runs" "$(onhost systemctl is-active pratico.service 2>&1)" "active"
 expect_eq "install: as the pratico user, not root" "$(onhost ps -o user= -C pratico-daemon 2>&1 | sort -u)" "pratico"
 expect_eq "install: its socket is the pratico group's" "$(onhost "stat -c '%U:%G %a' /run/pratico/docker.sock" 2>&1)" "pratico:pratico 660"
