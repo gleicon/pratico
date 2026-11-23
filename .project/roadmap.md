@@ -162,6 +162,7 @@ Local Mac development still comes first. When pratico runs on remote hosts:
 - [x] Slice 4 (2026-11-22): `sudo pratico-daemon install` from the release's Linux tarball (`make linux-dist`): hardened systemd unit as the `pratico` user with no capability, sysusers, AppArmor profile for the shim, upgrade keeps containers, `uninstall` (keeps images unless `--purge`); static (musl) daemon and shim, no libcurl, libarchive and codecs at current releases (`scripts/build-libs.sh`); the test host boots systemd and a non-root user installs, uses, upgrades and uninstalls (docs/linux-hosts.md)
 - [x] Slice 5 (2026-11-23): Docker Host menu over the docker contexts; each Linux host's version, containers and alerts through pratico's own SSH (swift-nio-ssh, key files, known_hosts only); ssh-agent when swift-nio-ssh supports it (#230)
 - [ ] ssh-agent for the menubar's SSH, once apple/swift-nio-ssh ships agent signing (#189, #230, PR #220)
+- [ ] Swift 6.4: checked 2026-11-23, staying on 6.3.3 (the newest 6.3 patch) while apple/containerization builds vminitd with 6.3.0 and Xcode ships 6.3.3; the static SDK's C libraries pratico links come from `scripts/build-libs.sh` at current releases. Move when upstream or Xcode moves to 6.4
 - Memory follows use there too, through virtio-balloon free page reporting (KVM returns pages the guest frees); same criterion as on the Mac
 
 ## Components as their own projects (backlog, after the Linux hosts slices; planned 2026-11-20)
