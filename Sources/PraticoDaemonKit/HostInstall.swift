@@ -20,6 +20,13 @@ public enum HostInstall {
     /// What a release carries, beside `pratico-daemon` itself.
     static let payload = ["pratico-daemon", "pratico-shim", "cloud-hypervisor", "virtiofsd", "runtime", "THIRD_PARTY_NOTICES"]
 
+    /// `uname -m` of the hosts this build runs on: the release is one architecture.
+    #if arch(x86_64)
+    public static let buildMachine = "x86_64"
+    #else
+    public static let buildMachine = "aarch64"
+    #endif
+
     /// What the host offers, read by `inspect()` on Linux; tests build it directly.
     public struct Host: Sendable, Equatable {
         public var isRoot: Bool
@@ -58,8 +65,8 @@ public enum HostInstall {
     /// Refuses a host pratico cannot serve, before anything is written.
     public static func check(_ host: Host) throws {
         guard host.isRoot else { throw InstallError("run it as root: sudo \(host.source)/pratico-daemon install") }
-        guard host.machine == "aarch64" else {
-            throw InstallError("this build is for arm64 (aarch64) hosts; this one is \(host.machine), not supported yet")
+        guard host.machine == buildMachine else {
+            throw InstallError("this release is for \(buildMachine) hosts; this one is \(host.machine): use the release built for it")
         }
         guard host.hasSystemd else { throw InstallError("pratico runs as a systemd service: this host does not run systemd") }
         guard let group = host.kvmGroup else {
@@ -71,7 +78,8 @@ public enum HostInstall {
         guard host.source != prefix else { throw InstallError("run the install from the extracted release, not from \(prefix)") }
     }
 
-    public static func plan(_ host: Host) -> Plan {
+    /// `hardening` nil: `--no-harden`, the host left as it is.
+    public static func plan(_ host: Host, hardening: HostHardening.State? = nil, allow: [Int] = []) -> Plan {
         var p = Plan()
         p.files = [
             File(path: unit, contents: unitFile()),
@@ -85,6 +93,12 @@ public enum HostInstall {
         p.commands = [["systemd-sysusers"], ["systemd-tmpfiles", "--create", tmpfiles]]
         if host.apparmor { p.commands.append(["apparmor_parser", "--replace", apparmorProfile]) }
         p.commands += [["systemctl", "daemon-reload"], ["systemctl", "enable", "pratico.service"], ["systemctl", "restart", "pratico.service"]]
+        if let hardening {
+            let h = HostHardening.plan(hardening, allow: allow)
+            p.files += h.files.map { File(path: $0.path, contents: $0.contents) }
+            p.commands += h.commands
+            p.notes += h.notes
+        }
         if host.dockerSocket == .other {
             p.notes.append("\(dockerSocket) belongs to another engine and is left alone: point the docker CLI at unix://\(socket) (a docker context)")
         }
@@ -179,7 +193,7 @@ public enum HostInstall {
 
     /// What `uninstall` removes; `/var/lib/pratico` (images, volumes) only with `purge`.
     public static func removals(host: Host, purge: Bool) -> [String] {
-        var paths = [unit, sysusers, members, tmpfiles, apparmorProfile, prefix]
+        var paths = [unit, sysusers, members, tmpfiles, apparmorProfile, prefix] + HostHardening.removals
         if host.dockerSocket == .pratico { paths.append(dockerSocket) }
         if purge { paths.append(home) }
         return paths

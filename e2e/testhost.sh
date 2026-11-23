@@ -116,6 +116,11 @@ expect_eq "install: as the pratico user, not root" "$(onhost ps -o user= -C prat
 expect_eq "install: its socket is the pratico group's" "$(onhost "stat -c '%U:%G %a' /run/pratico/docker.sock" 2>&1)" "pratico:pratico 660"
 expect_eq "install: the docker CLI's default socket points at it" "$(onhost readlink /run/docker.sock 2>&1)" "/run/pratico/docker.sock"
 expect_eq "install: dev is in the pratico group" "$(asdev id -nG 2>&1 | tr ' ' '\n' | grep -x pratico)" "pratico"
+# Hardening (HostHardening): the plan's kernel settings, security packages, firewall.
+expect_eq "harden: kernel settings applied" "$(onhost sysctl -n kernel.kptr_restrict net.core.bpf_jit_harden 2>&1 | xargs)" "2 2"
+expect_eq "harden: fail2ban runs" "$(onhost systemctl is-active fail2ban.service 2>&1)" "active"
+expect_eq "harden: security updates on" "$(onhost apt-config dump APT::Periodic::Unattended-Upgrade 2>&1 | grep -o '"1"')" '"1"'
+check "harden: the firewall is on and lets SSH in" onhost "ufw status | grep -q 'Status: active' && ufw status | grep -qE '^22/tcp +ALLOW'"
 caps='grep CapEff /proc/$(pgrep -o pratico-daemon)/status | cut -f2'
 expect_eq "install: no capability on the host" "$(onhost "$caps" 2>&1)" "0000000000000000"
 # The menubar's own SSH (PraticoRemote): key file, known_hosts, dial-stdio, as dev.
@@ -166,6 +171,7 @@ check "uninstall: the service is gone" sh -c "! '$HOME_DIR/bin/ssh' testhost sys
 check "uninstall: its files are gone" onhost "! test -e /usr/lib/pratico && ! test -e /run/docker.sock && ! test -e /usr/lib/sysusers.d/pratico.conf"
 eventually_eq "uninstall: its containers stopped" 0 onhost "pgrep -c -f /usr/lib/pratico/[c]loud-hypervisor || true"
 check "uninstall: images and volumes kept" onhost test -d /var/lib/pratico/store
+check "uninstall: its firewall off, its settings files gone" onhost "ufw status | grep -q 'Status: inactive' && ! test -e /etc/sysctl.d/90-pratico-hardening.conf && ! test -e /etc/apt/apt.conf.d/21pratico-auto-upgrades"
 
 echo "testhost: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

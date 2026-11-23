@@ -24,13 +24,18 @@ var args = Array(CommandLine.arguments.dropFirst())
 #if os(Linux)
 if let verb = args.first, verb == "install" || verb == "uninstall" {
     var options = HostInstall.Options()
-    for flag in args.dropFirst() {
+    var flags = Array(args.dropFirst())
+    while !flags.isEmpty {
+        let flag = flags.removeFirst()
         switch flag {
         case "--yes": options.yes = true
         case "--files-only" where verb == "install": options.filesOnly = true
+        case "--no-harden" where verb == "install": options.noHarden = true
+        case "--allow-port" where verb == "install" && flags.first.flatMap({ Int($0) }).map({ (1...65535).contains($0) }) == true:
+            options.allowPorts.append(Int(flags.removeFirst())!)
         case "--purge" where verb == "uninstall": options.purge = true
         default:
-            print("usage: pratico-daemon install [--yes] [--files-only] | uninstall [--yes] [--purge]")
+            print("usage: pratico-daemon install [--yes] [--files-only] [--no-harden] [--allow-port N]… | uninstall [--yes] [--purge]")
             exit(2)
         }
     }

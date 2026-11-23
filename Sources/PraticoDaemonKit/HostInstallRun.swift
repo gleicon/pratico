@@ -8,6 +8,10 @@ extension HostInstall {
         public var yes = false
         public var filesOnly = false
         public var purge = false
+        /// Leave the host's kernel settings, updates, and firewall as they are.
+        public var noHarden = false
+        /// Ports the firewall lets in besides SSH (services already on the host).
+        public var allowPorts: [Int] = []
         public init() {}
     }
 
@@ -43,7 +47,7 @@ extension HostInstall {
         for name in payload where !FileManager.default.fileExists(atPath: "\(source)/\(name)") {
             throw InstallError("\(source)/\(name) is missing: extract the whole release")
         }
-        let p = plan(host)
+        let p = plan(host, hardening: options.noHarden ? nil : HostHardening.inspect(), allow: options.allowPorts)
         print(describe(p))
         if !options.filesOnly {
             print("The pratico service starts now; an existing one restarts, keeping its containers.")
@@ -69,6 +73,7 @@ extension HostInstall {
         let paths = removals(host: host, purge: options.purge).filter { FileManager.default.fileExists(atPath: $0) }
         let stop = ["systemctl", "kill", "--kill-whom=all", "--signal=SIGTERM", "pratico.service"]
         var commands: [[String]] = [["systemctl", "disable", "--now", "pratico.service"]]
+        commands += HostHardening.revertCommands()
         if host.apparmor && FileManager.default.fileExists(atPath: apparmorProfile) {
             commands.append(["apparmor_parser", "--remove", apparmorProfile])
         }
@@ -77,7 +82,9 @@ extension HostInstall {
         print("and remove:")
         paths.forEach { print("  \($0)") }
         if !options.purge { print("\(home) (images, volumes, logs) is kept: --purge removes it too.") }
-        print("The pratico user and group are kept (userdel pratico removes them).")
+        print("The pratico user and group are kept (userdel pratico removes them), and so are the")
+        print("security packages install added (\(HostHardening.packages.joined(separator: ", "))). Kernel settings")
+        print("from \(HostHardening.sysctlFile) hold until the next boot.")
         try confirm(options)
         try? run(stop)  // a service already stopped is not a failure
         if !awaitUnitEmpty() { try? run(["systemctl", "kill", "--kill-whom=all", "--signal=SIGKILL", "pratico.service"]) }
@@ -171,6 +178,8 @@ extension HostInstall {
         let p = Process()
         p.executableURL = URL(filePath: path)
         p.arguments = Array(command.dropFirst())
+        // No package stops the install to ask a question.
+        if name == "apt-get" { p.environment = ProcessInfo.processInfo.environment.merging(["DEBIAN_FRONTEND": "noninteractive"]) { $1 } }
         try p.run()
         p.waitUntilExit()
         guard p.terminationStatus == 0 else {

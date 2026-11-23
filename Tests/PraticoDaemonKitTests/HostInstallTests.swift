@@ -4,7 +4,7 @@ import Testing
 @testable import PraticoDaemonKit
 
 private func host(_ edit: (inout HostInstall.Host) -> Void = { _ in }) -> HostInstall.Host {
-    var h = HostInstall.Host(isRoot: true, machine: "aarch64", hasSystemd: true, kvmGroup: "kvm", kvmGroupWritable: true,
+    var h = HostInstall.Host(isRoot: true, machine: HostInstall.buildMachine, hasSystemd: true, kvmGroup: "kvm", kvmGroupWritable: true,
                              apparmor: true, dockerSocket: .absent, hasDockerCLI: true, sudoUser: "ana", source: "/home/ana/pratico-0.3.0-linux-arm64")
     edit(&h)
     return h
@@ -14,7 +14,7 @@ private func host(_ edit: (inout HostInstall.Host) -> Void = { _ in }) -> HostIn
     #expect(throws: Never.self) { try HostInstall.check(host()) }
     for (edit, says) in [
         ({ (h: inout HostInstall.Host) in h.isRoot = false }, "as root"),
-        ({ $0.machine = "x86_64" }, "x86_64"),
+        ({ $0.machine = "riscv64" }, "riscv64"),
         ({ $0.hasSystemd = false }, "systemd"),
         ({ $0.kvmGroup = nil }, "/dev/kvm"),
         ({ $0.kvmGroupWritable = false }, "not open to its group"),
@@ -94,3 +94,54 @@ private func host(_ edit: (inout HostInstall.Host) -> Void = { _ in }) -> HostIn
     #expect(p.terminationStatus == 0)
 }
 #endif
+
+private func hardening(_ edit: (inout HostHardening.State) -> Void = { _ in }) -> HostHardening.State {
+    var h = HostHardening.State(sshPorts: [22], otherListeners: [], missingPackages: [], ufwActive: false)
+    edit(&h)
+    return h
+}
+
+@Test func hardeningIsOptInAndTouchesNothingWithNoHarden() {
+    let plain = HostInstall.plan(host())
+    #expect(!plain.files.map(\.path).contains("/etc/sysctl.d/90-pratico-hardening.conf"))
+    #expect(!plain.commands.contains { $0.first == "ufw" || $0.first == "sysctl" })
+    let hardened = HostInstall.plan(host(), hardening: hardening())
+    #expect(hardened.files.map(\.path).contains("/etc/sysctl.d/90-pratico-hardening.conf"))
+    #expect(hardened.commands.contains(["sysctl", "--system"]))
+    #expect(hardened.commands.contains(["systemctl", "enable", "--now", "fail2ban.service"]))
+}
+
+@Test func hardeningSysctlsOnlyTighten() {
+    let s = HostHardening.sysctlFileContents()
+    for line in ["kernel.kptr_restrict = 2", "kernel.unprivileged_bpf_disabled = 1", "net.core.bpf_jit_harden = 2", "kernel.kexec_load_disabled = 1"] {
+        #expect(s.contains(line + "\n"))
+    }
+    // Ubuntu's perf_event_paranoid is 4, stricter than upstream's 3: never set lower.
+    #expect(!s.contains("\nkernel.perf_event_paranoid"))
+    // User namespaces stay: each VM's network needs one (the shim's AppArmor profile allows it).
+    #expect(!s.contains("userns"))
+}
+
+@Test func firewallNeverCutsOffAServiceItDoesNotKnow() {
+    let web = HostHardening.State.Listener(proto: "tcp", port: 443, program: "nginx")
+    let cut = HostInstall.plan(host(), hardening: hardening { $0.otherListeners = [web] })
+    #expect(!cut.commands.contains { $0.first == "ufw" })
+    #expect(cut.notes.contains { $0.contains("443/tcp (nginx)") && $0.contains("--allow-port") })
+    #expect(!cut.files.map(\.path).contains("/etc/pratico/firewall-enabled-by-pratico"))
+
+    let allowed = HostInstall.plan(host(), hardening: hardening { $0.otherListeners = [web]; $0.sshPorts = [22, 2222] }, allow: [443])
+    #expect(allowed.commands.contains(["ufw", "allow", "22/tcp"]) && allowed.commands.contains(["ufw", "allow", "2222/tcp"]))
+    #expect(!allowed.commands.contains { $0.first == "ufw" && $0.dropFirst().first == "limit" })  // docker over ssh opens many connections
+    #expect(allowed.commands.contains(["ufw", "allow", "443"]))
+    #expect(allowed.commands.last == ["ufw", "--force", "enable"])
+    #expect(allowed.files.map(\.path).contains("/etc/pratico/firewall-enabled-by-pratico"))
+
+    let admins = HostInstall.plan(host(), hardening: hardening { $0.ufwActive = true })
+    #expect(!admins.commands.contains { $0.first == "ufw" })
+}
+
+@Test func hardeningInstallsOnlyMissingPackages() {
+    #expect(!HostInstall.plan(host(), hardening: hardening()).commands.contains { $0.first == "apt-get" })
+    let p = HostInstall.plan(host(), hardening: hardening { $0.missingPackages = ["fail2ban"] })
+    #expect(p.commands.contains(["apt-get", "-q", "install", "-y", "--no-install-recommends", "fail2ban"]))
+}
