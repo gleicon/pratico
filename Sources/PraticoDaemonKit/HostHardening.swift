@@ -160,7 +160,8 @@ public enum HostHardening {
     }
 
     /// Sockets listening beyond loopback, from /proc/net: (port, socket inode). UDP counts
-    /// as listening when unconnected; the DHCP client (68) is the host's own and skipped.
+    /// as listening when unconnected; the DHCP clients (68, and 546 for DHCPv6) are the
+    /// host's own, and ufw's default rules let their replies in.
     static func listeners(_ proto: String) -> [(Int, String)] {
         var out: [(Int, String)] = []
         for file in ["/proc/net/\(proto)", "/proc/net/\(proto)6"] {
@@ -171,7 +172,7 @@ public enum HostHardening {
                 let local = f[1].split(separator: ":"), state = f[3]
                 guard local.count == 2, let port = Int(local[1], radix: 16) else { continue }
                 let listening = proto == "tcp" ? state == "0A" : (state == "07" && f[2].hasSuffix(":0000"))
-                guard listening, port != 68, !isLoopback(String(local[0])) else { continue }
+                guard listening, !(proto == "udp" && dhcpClientPorts.contains(port)), !isLoopback(String(local[0])) else { continue }
                 out.append((port, String(f[9])))
             }
         }
@@ -179,6 +180,8 @@ public enum HostHardening {
     }
 
     /// 127.0.0.0/8 and ::1 as /proc/net writes them (hex, host byte order per 32-bit word).
+    static let dhcpClientPorts: Set<Int> = [68, 546]
+
     static func isLoopback(_ hex: String) -> Bool {
         if hex.count == 8 { return hex.hasSuffix("7F") }
         return hex == "00000000000000000000000001000000" || (hex.hasPrefix("0000000000000000FFFF0000") && hex.hasSuffix("7F"))

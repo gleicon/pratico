@@ -1,3 +1,4 @@
+import ContainerizationOCI
 import Crypto
 import Foundation
 
@@ -10,7 +11,7 @@ extension ImageService {
         let layout = work.appending(path: "layout")
         try FileManager.default.createDirectory(at: layout, withIntermediateDirectories: true)
         guard let from = base.refs.first else { throw APIError(500, "pratico: image \(base.shortId) has no reference to save") }
-        try backend.saveLayout(from, os: "linux", arch: "arm64", into: layout)
+        try backend.saveLayout(from, os: "linux", arch: Platform.current.architecture, into: layout)
         let (manifest, imageConfig) = try Self.baseManifest(layout)
         let layerBlob = try Self.addBlob(file: layer, to: layout)
         let now = Timestamp.format(Date())
@@ -37,7 +38,7 @@ extension ImageService {
         let manifestBlob = try Self.addBlob(data: newManifest.encoded(), to: layout)
         var descriptor: [String: JSON] = [
             "mediaType": "application/vnd.oci.image.manifest.v1+json", "digest": .string(manifestBlob.digest), "size": .int(manifestBlob.size),
-            "platform": ["architecture": "arm64", "os": "linux"],
+            "platform": ["architecture": .string(Platform.current.architecture), "os": "linux"],
         ]
         if let target { descriptor["annotations"] = ["io.containerd.image.name": .string(target)] }
         let index: JSON = ["schemaVersion": 2, "mediaType": "application/vnd.oci.image.index.v1+json", "manifests": [.object(descriptor)]]
@@ -67,7 +68,7 @@ extension ImageService {
         var manifest = try blob(top["digest"]?.string)
         // An image index, at most two levels deep: pick the arm64 manifest.
         for _ in 0..<2 where manifest["manifests"] != nil {
-            let arm = manifest["manifests"]?.array?.first { $0["platform"]?["architecture"]?.string == "arm64" }
+            let arm = manifest["manifests"]?.array?.first { $0["platform"]?["architecture"]?.string == Platform.current.architecture }
             manifest = try blob(arm?["digest"]?.string)
         }
         guard manifest["layers"] != nil else { throw APIError(500, "pratico: no arm64 manifest in the saved image") }

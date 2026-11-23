@@ -1,3 +1,4 @@
+import ContainerizationOCI
 import Foundation
 
 /// The archive `docker save` wrote before Docker 25, and what go-containerregistry writes
@@ -58,7 +59,7 @@ enum DockerArchive {
                 "layers": .array(layers),
             ]
             let manifestBlob = try ImageService.addBlob(data: manifest.encoded(), to: dir)
-            let platform: JSON = ["architecture": .string(config["architecture"]?.string ?? "arm64"), "os": .string(config["os"]?.string ?? "linux")]
+            let platform: JSON = ["architecture": .string(config["architecture"]?.string ?? Platform.current.architecture), "os": .string(config["os"]?.string ?? "linux")]
             // One index entry per tag, as Docker gives the image every name it lists; an
             // image without one loads untagged.
             let tags = image["RepoTags"]?.strings ?? []

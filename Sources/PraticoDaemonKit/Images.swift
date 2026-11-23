@@ -86,7 +86,7 @@ public final class ImageService: Sendable {
 
     static func variant(_ img: JSON) -> JSON? {
         let variants = img["variants"]?.array ?? []
-        return variants.first { $0["platform"]?["architecture"]?.string == "arm64" } ?? variants.first
+        return variants.first { $0["platform"]?["architecture"]?.string == Platform.current.architecture } ?? variants.first
     }
 
     /// Image runtime config (`Cmd`, `Entrypoint`, `Env`, `WorkingDir`, ...).
@@ -199,7 +199,7 @@ public final class ImageService: Sendable {
             "DockerVersion": "",
             "Author": variant(img.record)?["config"]?["author"] ?? "",
             "Config": cfg,
-            "Architecture": v?["platform"]?["architecture"] ?? "arm64",
+            "Architecture": v?["platform"]?["architecture"] ?? .string(Platform.current.architecture),
             "Variant": v?["platform"]?["variant"] ?? .null,
             "Os": v?["platform"]?["os"] ?? "linux",
             "Size": v?["size"] ?? 0,
@@ -455,7 +455,7 @@ public final class ImageService: Sendable {
             let one = work.appending(path: "one-\(n)")
             try fm.createDirectory(at: one, withIntermediateDirectories: true)
             let platform = Self.variant(img.record)?["platform"]
-            let arch = platform?["architecture"]?.string ?? "arm64"
+            let arch = platform?["architecture"]?.string ?? Platform.current.architecture
             let os = platform?["os"]?.string ?? "linux"
             do { try backend.saveLayout(ref, os: os, arch: arch, into: one) } catch {
                 throw APIError(500, "cannot save \(ImageRef.familiar(ref)): \(error)")

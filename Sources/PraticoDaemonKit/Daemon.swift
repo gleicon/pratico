@@ -471,7 +471,7 @@ public final class Daemon: @unchecked Sendable {
             "Components": [[
                 "Name": "Engine", "Version": .string(DaemonInfo.version),
                 "Details": ["ApiVersion": .string(DockerAPI.version), "MinAPIVersion": .string(DockerAPI.minVersion),
-                            "Os": "linux", "Arch": "arm64", "Experimental": "false"],
+                            "Os": "linux", "Arch": .string(Platform.current.architecture), "Experimental": "false"],
             ]],
             "Version": .string(DaemonInfo.version),
             "ApiVersion": .string(DockerAPI.version),
@@ -479,7 +479,7 @@ public final class Daemon: @unchecked Sendable {
             "GitCommit": "",
             "GoVersion": "",
             "Os": "linux",
-            "Arch": "arm64",
+            "Arch": .string(Platform.current.architecture),
             "KernelVersion": .string(ProcessInfo.processInfo.operatingSystemVersionString),
             "BuildTime": "",
         ]
@@ -498,7 +498,7 @@ public final class Daemon: @unchecked Sendable {
             "DockerRootDir": .string(home.path),
             "OperatingSystem": "macOS (pratico)",
             "OSType": "linux",
-            "Architecture": "aarch64",
+            "Architecture": .string(HostInstall.buildMachine),
             "NCPU": .int(Int64(ProcessInfo.processInfo.activeProcessorCount)),
             "MemTotal": .int(Int64(ProcessInfo.processInfo.physicalMemory)),
             "Name": .string(Host.current().localizedName ?? "pratico"),
