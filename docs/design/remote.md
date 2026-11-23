@@ -1,6 +1,6 @@
 # Remote Linux hosts (design, 2026-11-20)
 
-Status: in progress, slices 1 to 4 done (below): installable on arm64 hosts
+Status: in progress, slices 1 to 5 done (below): installable on arm64 hosts
 ([linux-hosts.md](../linux-hosts.md)). The
 roadmap's "Remote Linux hosts" section holds what is decided.
 
@@ -139,6 +139,17 @@ switch, egress, scanning, and the flight recorder are the same code. How to inst
    bzip2 and xz at their current releases, pinned by SHA-256, and the build fails unless
    the binary carries that libarchive. Every Swift package is at its latest release
    (swift-crypto 5.1.2, past the vendored containerization's `<5.0.0`).
-5. Menubar: hosts list over swift-nio-ssh, `/pratico/*` from each, active host written to
-   the docker context.
+5. Menubar: done 2026-11-23. Docker Host lists the docker contexts (pratico keeps no
+   list) and makes one current by writing `currentContext` in `config.json`, 0600 from
+   creation, through a symlink. Each `ssh://` context shows its daemon's version,
+   containers, and alerts (`GET /pratico/alerts`, added for it), from PraticoRemote:
+   swift-nio-ssh, `docker system dial-stdio` on the host, one request per channel.
+   swift-nio-ssh reads no key files and signs with no agent (#94, #189, #230, PR #220), so
+   pratico parses `openssh-key-v1` ed25519 and ECDSA keys itself and refuses passphrase and
+   agent-only keys with that reason; ssh-agent comes when upstream has it (decided with
+   the user: data now from key files, the agent later, no patched fork). Host keys only
+   from `known_hosts`, hashed entries included, never trust on first use; `~/.ssh/config`
+   for HostName, Port, User, IdentityFile, UserKnownHostsFile, Include; ProxyJump and
+   ProxyCommand refused. `make e2e-testhost` runs PraticoRemote against the installed
+   service as `dev`.
 6. x86_64: kernel, init, probes, and the seccomp syscall table; e2e on an x86_64 KVM host.

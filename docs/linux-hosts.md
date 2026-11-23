@@ -58,6 +58,29 @@ docker -H ssh://you@host run --rm alpine echo hello
 docker context create myhost --docker host=ssh://you@host
 ```
 
+## The menubar
+
+**Docker Host** lists your docker contexts, the current one checked; picking another is
+`docker context use`, so the docker CLI and Compose go there. A shell with `DOCKER_HOST`
+or `DOCKER_CONTEXT` set goes where those say instead.
+
+Under each `ssh://` host it shows that host's pratico version, how many containers run,
+and its open alerts, refreshed each minute (or with Refresh Linux Hosts). pratico fetches
+them itself, over SSH, without running `ssh`:
+
+- It reads `~/.ssh/config` for `HostName`, `Port`, `User`, `IdentityFile`,
+  `UserKnownHostsFile`, and `Include`. A host reached through `ProxyJump` or
+  `ProxyCommand` is not reached; `Match` blocks are not evaluated.
+- It signs with key files: ed25519 and ECDSA, without a passphrase (`~/.ssh/id_ed25519`,
+  `~/.ssh/id_ecdsa`, or the host's `IdentityFile`). Keys with a passphrase and keys that
+  live only in an agent (1Password, Secretive, the macOS keychain) need ssh-agent
+  support, which pratico adds when the SSH library it uses has it
+  ([swift-nio-ssh#230](https://github.com/apple/swift-nio-ssh/issues/230)); until then the
+  host shows why it was not reached, and the docker CLI, which runs your `ssh`, still
+  works there.
+- The host's key must already be in `known_hosts`: pratico never trusts a key on first
+  use. Connect once with `ssh` to check and trust it. A changed or revoked key is refused.
+
 ## Differences from a Docker host
 
 - The engine runs as the `pratico` user, not root. Being in the `pratico` group is not
@@ -91,8 +114,8 @@ logs) stays unless you add `--purge`. The `pratico` user and group stay
 `make e2e-testhost` runs on the Mac: an Ubuntu 24.04 container with systemd and KVM
 (nested virtualization) where a non-root user installs the release payload with
 `sudo pratico-daemon install --yes`, then drives the service from the Mac's docker CLI over
-`ssh://`: networking, published ports, bind mounts and volumes, an upgrade that keeps a
-running container, and the uninstall. Not covered there: loading the AppArmor profile,
+`ssh://`: networking, published ports, bind mounts and volumes, the menubar's own SSH
+client reading the service, an upgrade that keeps a running container, and the uninstall. Not covered there: loading the AppArmor profile,
 since pratico's own kernel, which that test host runs, has no AppArmor (the Linux unit
 tests check that Ubuntu's `apparmor_parser` accepts it); real hardware, since its KVM is
 nested; and other distributions.
