@@ -57,6 +57,8 @@ struct StatusMenu: View {
             Button("View Daemon Log…") { daemon.openLog() }
             Button("Copy Diagnostics") { daemon.copyDiagnostics() }
         }
+        // Which daemon the docker CLI talks to: this Mac's pratico, or a Linux host's.
+        HostsMenu(daemon: daemon)
         // Space used and cleanup, better than `docker system df` and `prune`.
         if daemon.isRunning {
             EgressQuestionsMenu(daemon: daemon)

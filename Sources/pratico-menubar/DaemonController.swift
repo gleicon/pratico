@@ -27,6 +27,9 @@ final class DaemonController {
     /// Whether one of the app's menus is open, tracked from AppKit's menu notifications.
     @ObservationIgnored private var menuOpen = false
     private(set) var alerts: [Alert] = []
+    /// The docker CLI's contexts, pratico's list of hosts, and the current one.
+    private(set) var contexts: [DockerContexts.Context] = []
+    private(set) var currentContext = DockerContexts.defaultName
     /// Ask mode's open questions (D-62), oldest first.
     private(set) var questions: [EgressQuestion] = []
     private(set) var registries = Registries()
@@ -261,6 +264,24 @@ final class DaemonController {
                 """)
     }
 
+    /// A Linux host (docs/linux-hosts.md): installed there once, then a docker context here.
+    func showAddHost() {
+        showCommands(
+            title: "Add a Linux host",
+            text: """
+                pratico runs on an arm64 Linux server with KVM and systemd. Install it there once                 (it shows what it changes and asks first), open a new SSH session so the pratico                 group applies, then add the host here as a docker context; it shows in Docker Host.
+                """,
+            commands: """
+                # On the server, from the release's pratico-<version>-linux-arm64.tar.gz:
+                tar -xzf pratico-<version>-linux-arm64.tar.gz
+                sudo ./pratico-<version>-linux-arm64/pratico-daemon install
+
+                # On this Mac (the docker CLI connects with your ssh, keys and config):
+                docker context create your-server --docker host=ssh://you@your-server
+                docker --context your-server version --format '{{.Server.Os}} {{.Server.Version}}'
+                """)
+    }
+
     /// Agents through MCP (D-48): how to turn it on, or the command that adds pratico to
     /// Claude Code, with this Mac's token.
     func showAgentSetup() {
@@ -447,6 +468,7 @@ final class DaemonController {
                 if self.isRunning { await self.refreshQuestions() }
                 self.refreshRegistries()
                 self.refreshDefaultSocket()
+                if tick % 3 == 0 { self.refreshContexts() }
                 if changed || tick % 30 == 0 { await self.refreshAfterChange() }
                 // Usage moves without events; the daemon samples it every 4 s.
                 if changed || tick % 2 == 0 { await self.refreshContainers() }
@@ -460,6 +482,22 @@ final class DaemonController {
                 try? await Task.sleep(for: .seconds(1))
             }
         }
+    }
+
+    func refreshContexts() {
+        let c = DockerContexts()
+        update(\.contexts, c.list())
+        update(\.currentContext, c.current())
+    }
+
+    /// `docker context use`, for every docker CLI, Compose, and tool that reads contexts.
+    func useContext(_ name: String) {
+        do {
+            try DockerContexts().use(name)
+        } catch {
+            Dialogs.report("Could not switch the docker host", "\(error)")
+        }
+        refreshContexts()
     }
 
     /// Writes only changes: every write re-renders the open menu, which closes its submenus.
