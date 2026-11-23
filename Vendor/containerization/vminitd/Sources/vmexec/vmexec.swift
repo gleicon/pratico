@@ -255,7 +255,7 @@ extension App {
     /// with it, as late as possible.
     static func installSeccomp(_ profile: ContainerizationOCI.LinuxSeccomp?) throws {
         guard let profile else { return }
-        let program = try profile.compileARM64()
+        let program = try profile.compile()
         var bytes: [UInt8] = []
         bytes.reserveCapacity(program.instructions.count * 8)
         for i in program.instructions {  // struct sock_filter, little-endian

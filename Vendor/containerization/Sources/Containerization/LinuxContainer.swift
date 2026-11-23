@@ -62,7 +62,7 @@ public final class LinuxContainer: Container, Sendable {
         ///
         /// Installed by the OCI runtime when ``Configuration/ociRuntimePath`` is set,
         /// and by `vmexec` otherwise, compiled with
-        /// ``ContainerizationOCI/LinuxSeccomp/compileARM64()``.
+        /// ``ContainerizationOCI/LinuxSeccomp/compile(for:)``.
         public enum SeccompProfile: Sendable {
             /// No seccomp filter.
             ///
@@ -422,7 +422,7 @@ public final class LinuxContainer: Container, Sendable {
             self.seccomp = profile
         }
         // Compiled once here so a profile vmexec cannot install fails before a VM boots.
-        if configuration.ociRuntimePath == nil, let seccomp = self.seccomp { _ = try seccomp.compileARM64() }
+        if configuration.ociRuntimePath == nil, let seccomp = self.seccomp { _ = try seccomp.compile() }
         self.id = id
         self.vmm = vmm
         self.vm = vm

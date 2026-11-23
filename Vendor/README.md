@@ -56,3 +56,8 @@ git subtree pull --prefix Vendor/containerization https://github.com/apple/conta
   `offload_tso`, `offload_ufo` and `offload_csum`, so pratico's switch gets plain frames.
 - `Package.swift` (2026-11-21): swift-crypto up to `6.0.0`, not `5.0.0`, so pratico takes
   5.1.2's fixes (GHSA-rch3-xxjq-365j, GHSA-c24m-vphm-p22w); upstream still stops at 4.x.
+- `Sources/ContainerizationOCI/LinuxSeccomp+SyscallsX86_64.swift` (added, 2026-11-23), and
+  `LinuxSeccomp+BPF.swift`, `LinuxSeccomp+Docker.swift`: x86_64's call numbers (from Linux
+  6.18's `syscall_64.tbl`), `SeccompArch`, and `compile(for:)`, the host's architecture by
+  default; on x86_64 the filter also kills x32 calls (`__X32_SYSCALL_BIT`).
+  `LinuxContainer.swift` and `vmexec.swift` call `compile()`.

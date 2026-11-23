@@ -31,7 +31,7 @@ private func run(_ program: [SeccompInstruction], nr: UInt32, arch: UInt32 = Lin
 
 /// The profile read directly, independently of the compiler: first rule naming the call
 /// whose arguments all hold decides, else the default.
-private func expected(_ p: LinuxSeccomp, nr: UInt32, args: [UInt64]) -> UInt32 {
+private func expected(_ p: LinuxSeccomp, nr: UInt32, args: [UInt64], table: [String: UInt32] = LinuxSeccomp.syscallsARM64) -> UInt32 {
     func value(_ action: LinuxSeccompAction, _ errno: UInt?) -> UInt32 {
         switch action {
         case .actAllow: return 0x7FFF_0000
@@ -44,7 +44,7 @@ private func expected(_ p: LinuxSeccomp, nr: UInt32, args: [UInt64]) -> UInt32 {
         case .actNotify: return 0x7FC0_0000
         }
     }
-    let names = LinuxSeccomp.syscallsARM64.filter { $0.value == nr }.map(\.key)
+    let names = table.filter { $0.value == nr }.map(\.key)
     for rule in p.syscalls where rule.names.contains(where: names.contains) {
         let holds = rule.args.allSatisfy { arg in
             let v = args.count > Int(arg.index) ? args[Int(arg.index)] : 0
@@ -135,4 +135,47 @@ private let samples: [[UInt64]] = [[], [0x7E02_0000], [0x1_0000_0000], [8], [0x0
     // The OCI format still decodes as itself.
     let oci = try LinuxSeccomp.decodeAnyFormat(from: Data(#"{"defaultAction":"SCMP_ACT_ALLOW"}"#.utf8), for: .init(capabilities: [], kernel: (6, 18)))
     #expect(oci.defaultAction == .actAllow)
+}
+
+@Test func seccompDefaultProfileMatchesItsRulesOnX86_64() throws {
+    for caps in [["CAP_CHOWN", "CAP_NET_BIND_SERVICE"], ["CAP_SYS_ADMIN", "CAP_SYS_PTRACE", "CAP_BPF"]] {
+        let set = LinuxCapabilities(bounding: caps, effective: caps, inheritable: [], permitted: caps, ambient: [])
+        let profile = LinuxSeccomp.defaultProfile(capabilities: set, arch: .archX86_64)
+        let program = try profile.compile(for: .x86_64)
+        #expect(program.instructions.count < LinuxSeccomp.maxInstructions)
+        for nr in Set(LinuxSeccomp.syscallsX86_64.values).union([999, 0x3FFF_FFFF]) {
+            for args in samples {
+                #expect(run(program.instructions, nr: nr, arch: LinuxSeccomp.auditArchX86_64, args: args)
+                        == expected(profile, nr: nr, args: args, table: LinuxSeccomp.syscallsX86_64), "call \(nr) args \(args)")
+            }
+        }
+    }
+}
+
+/// x32 calls are x86_64's with __X32_SYSCALL_BIT set: they pass the arch check, so the
+/// filter refuses them by number, whatever the profile allows.
+@Test func seccompX32AndOtherArchitecturesAreKilledOnX86_64() throws {
+    let all = LinuxSeccomp(defaultAction: .actAllow, defaultErrnoRet: nil, architectures: [], flags: [], listenerPath: "", listenerMetadata: "", syscalls: [])
+    let program = try all.compile(for: .x86_64)
+    let x86 = LinuxSeccomp.auditArchX86_64
+    #expect(run(program.instructions, nr: 0, arch: x86) == 0x7FFF_0000)
+    #expect(run(program.instructions, nr: 0x4000_0000, arch: x86) == 0x8000_0000)  // x32 read
+    #expect(run(program.instructions, nr: 0x4000_0000 | 59, arch: x86) == 0x8000_0000)  // x32 execve
+    #expect(run(program.instructions, nr: 56, arch: LinuxSeccomp.auditArchAARCH64) == 0x8000_0000)
+    #expect(try all.compile(for: .arm64).instructions.count < program.instructions.count)  // arm64 has no x32 check
+}
+
+@Test func seccompDockerConditionsFollowTheArchitecture() throws {
+    let json = """
+        {"defaultAction":"SCMP_ACT_ERRNO","defaultErrnoRet":1,
+         "archMap":[{"architecture":"SCMP_ARCH_X86_64","subArchitectures":["SCMP_ARCH_X86","SCMP_ARCH_X32"]},
+                    {"architecture":"SCMP_ARCH_AARCH64","subArchitectures":["SCMP_ARCH_ARM"]}],
+         "syscalls":[{"names":["clone3"],"action":"SCMP_ACT_ERRNO","errnoRet":38,"includes":{"arches":["amd64"]}},
+                     {"names":["arch_prctl"],"action":"SCMP_ACT_ALLOW","excludes":{"arches":["arm64"]}}]}
+        """
+    let x86 = try LinuxSeccomp.decodeAnyFormat(from: Data(json.utf8), for: .init(capabilities: [], kernel: (6, 18), arch: .x86_64))
+    let arm = try LinuxSeccomp.decodeAnyFormat(from: Data(json.utf8), for: .init(capabilities: [], kernel: (6, 18), arch: .arm64))
+    #expect(Set(x86.syscalls.flatMap(\.names)) == ["clone3", "arch_prctl"])
+    #expect(arm.syscalls.isEmpty)
+    #expect(x86.architectures.map(\.rawValue) == ["SCMP_ARCH_X86_64", "SCMP_ARCH_X86", "SCMP_ARCH_X32"])
 }

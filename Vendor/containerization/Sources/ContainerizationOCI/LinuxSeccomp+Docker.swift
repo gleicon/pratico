@@ -20,23 +20,26 @@ import ContainerizationError
 import Foundation
 
 extension LinuxSeccomp {
-    /// What a profile's conditions are resolved against: one container on arm64.
+    /// What a profile's conditions are resolved against: one container, on the host's
+    /// architecture by default.
     public struct Target: Sendable {
         /// The container's bounding capabilities (`CAP_SYS_ADMIN`, …), as Docker checks.
         public var capabilities: [String]
         /// The guest kernel's version, for `minKernel`.
         public var kernel: (major: Int, minor: Int)
+        public var arch: SeccompArch
 
-        public init(capabilities: [String], kernel: (major: Int, minor: Int)) {
+        public init(capabilities: [String], kernel: (major: Int, minor: Int), arch: SeccompArch = .native) {
             self.capabilities = capabilities
             self.kernel = kernel
+            self.arch = arch
         }
     }
 
     /// Decodes a profile in either format: the OCI runtime spec's (`decode(from:)`) or
     /// Docker's, whose `includes` / `excludes` conditions are resolved for `target` as
     /// moby's `setupSeccomp` does, so a rule gated on `CAP_SYS_ADMIN` applies only when
-    /// the container has it. Docker's architecture names are Go's (`arm64`).
+    /// the container has it. Docker's architecture names are Go's (`arm64`, `amd64`).
     public static func decodeAnyFormat(from data: Data, for target: Target) throws -> LinuxSeccomp {
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any], dockerFormatMarker(in: object) != nil else {
             return try decode(from: data)
@@ -80,9 +83,6 @@ private struct DockerProfile: Decodable {
     var listenerMetadata: String?
     var syscalls: [Syscall]?
 
-    static let goArch = "arm64"
-    static let seccompArch = "SCMP_ARCH_AARCH64"
-
     func resolved(for target: LinuxSeccomp.Target) throws -> LinuxSeccomp {
         var rules: [LinuxSyscall] = []
         for call in syscalls ?? [] {
@@ -93,11 +93,11 @@ private struct DockerProfile: Decodable {
             let names = call.names ?? call.name.map { [$0] } ?? []
             rules.append(LinuxSyscall(names: names, action: call.action, errnoRet: call.errnoRet, args: call.args ?? []))
         }
-        // archMap lists the native architecture with the ones it also runs; only arm64's
-        // matters here, and the filter admits arm64 calls alone.
+        // archMap lists the native architecture with the ones it also runs; only the
+        // target's matters here, and the filter admits its calls alone.
         var arches = architectures ?? []
         if let map = archMap, !map.isEmpty {
-            arches = map.filter { $0.architecture == Self.seccompArch }.flatMap { [$0.architecture] + ($0.subArchitectures ?? []) }
+            arches = map.filter { $0.architecture == target.arch.seccompArch }.flatMap { [$0.architecture] + ($0.subArchitectures ?? []) }
         }
         return LinuxSeccomp(
             defaultAction: defaultAction, defaultErrnoRet: defaultErrnoRet,
@@ -107,12 +107,12 @@ private struct DockerProfile: Decodable {
 
     private func applies(_ call: Syscall, _ target: LinuxSeccomp.Target) throws -> Bool {
         if let ex = call.excludes {
-            if let a = ex.arches, a.contains(Self.goArch) { return false }
+            if let a = ex.arches, a.contains(target.arch.goArch) { return false }
             if let c = ex.caps, c.contains(where: target.capabilities.contains) { return false }
             if let k = ex.minKernel, try atLeast(target.kernel, k) { return false }
         }
         if let inc = call.includes {
-            if let a = inc.arches, !a.isEmpty, !a.contains(Self.goArch) { return false }
+            if let a = inc.arches, !a.isEmpty, !a.contains(target.arch.goArch) { return false }
             if let c = inc.caps, !c.allSatisfy(target.capabilities.contains) { return false }
             if let k = inc.minKernel, try !atLeast(target.kernel, k) { return false }
         }

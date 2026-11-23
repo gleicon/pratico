@@ -65,7 +65,7 @@ struct RunOptions: Codable, Sendable, Equatable {
         do {
             let target = LinuxSeccomp.Target(capabilities: capabilities ?? defaultCapabilities, kernel: guestKernel)
             let profile = try LinuxSeccomp.decodeAnyFormat(from: Data(json.utf8), for: target)
-            _ = try profile.compileARM64()
+            _ = try profile.compile()
             return profile
         } catch {
             throw APIError(400, "pratico: seccomp profile: \(error)")

@@ -39,11 +39,38 @@ public struct SeccompProgram: Sendable {
     public var flags: UInt32
 }
 
+/// The architectures the filter is compiled for: the host's, which its VMs' guests run.
+public enum SeccompArch: Sendable, Equatable {
+    case arm64
+    case x86_64
+
+    #if arch(x86_64)
+    public static let native = SeccompArch.x86_64
+    #else
+    public static let native = SeccompArch.arm64
+    #endif
+
+    public var syscalls: [String: UInt32] {
+        self == .arm64 ? LinuxSeccomp.syscallsARM64 : LinuxSeccomp.syscallsX86_64
+    }
+    public var auditArch: UInt32 {
+        self == .arm64 ? LinuxSeccomp.auditArchAARCH64 : LinuxSeccomp.auditArchX86_64
+    }
+    /// Docker's name for it, Go's (`includes.arches`).
+    public var goArch: String { self == .arm64 ? "arm64" : "amd64" }
+    /// libseccomp's (`archMap`).
+    public var seccompArch: String { self == .arm64 ? "SCMP_ARCH_AARCH64" : "SCMP_ARCH_X86_64" }
+}
+
 extension LinuxSeccomp {
     /// The kernel's limit on a filter's length (`BPF_MAXINSNS`).
     public static let maxInstructions = 4096
     /// `AUDIT_ARCH_AARCH64`: EM_AARCH64 (183), 64-bit, little-endian.
     public static let auditArchAARCH64: UInt32 = 0xC000_00B7
+    /// `AUDIT_ARCH_X86_64`: EM_X86_64 (62), 64-bit, little-endian.
+    public static let auditArchX86_64: UInt32 = 0xC000_003E
+    /// `__X32_SYSCALL_BIT`: x86_64's x32 ABI numbers its calls from here.
+    public static let x32SyscallBit: UInt32 = 0x4000_0000
 
     enum Ret {
         static let killProcess: UInt32 = 0x8000_0000
@@ -65,14 +92,18 @@ extension LinuxSeccomp {
         static let ret: UInt16 = 0x06  // BPF_RET | BPF_K
     }
 
-    /// Compiles the profile for arm64 into a filter. Calls are found by number through a
+    /// Compiles the profile for arm64 (`compile(for: .arm64)`).
+    public func compileARM64() throws -> SeccompProgram { try compile(for: .arm64) }
+
+    /// Compiles the profile for `arch`, by default the one this is built for (a container's
+    /// guest runs the host's architecture) into a filter. Calls are found by number through a
     /// balanced tree (about 30 instructions per call for Docker's default profile, not a
     /// scan of every rule); a call's rules are tried in profile order and the first that
-    /// matches decides; a call no rule names gets `defaultAction`. Names arm64 does not
+    /// matches decides; a call no rule names gets `defaultAction`. Names `arch` does not
     /// have are skipped, as libseccomp does. Calls from any other architecture kill the
-    /// process (the kernel runs no 32-bit code). Refused: notification (no listener),
-    /// errno values outside 0...4095.
-    public func compileARM64() throws -> SeccompProgram {
+    /// process (the kernel runs no 32-bit code), and so do x86_64's x32 calls. Refused:
+    /// notification (no listener), errno values outside 0...4095.
+    public func compile(for arch: SeccompArch = .native) throws -> SeccompProgram {
         guard listenerPath.isEmpty else { throw Self.refused("a seccomp notification listener (listenerPath)") }
         let flags = try Self.filterFlags(self.flags)
         let fallback = try Self.retValue(defaultAction, errno: defaultErrnoRet)
@@ -83,7 +114,7 @@ extension LinuxSeccomp {
                 throw ContainerizationError(.invalidArgument, message: "seccomp: argument index \(arg.index) does not exist (system calls have 6)")
             }
             for name in syscall.names {
-                guard let nr = Self.syscallsARM64[name] else { continue }
+                guard let nr = arch.syscalls[name] else { continue }
                 rules[nr, default: []].append((action, syscall.args))
             }
         }
@@ -91,8 +122,9 @@ extension LinuxSeccomp {
         var asm = Assembler()
         let killArch = asm.label()
         asm.load(offset: 4)  // seccomp_data.arch
-        asm.jumpUnless(Op.jeq, Self.auditArchAARCH64, to: killArch)
+        asm.jumpUnless(Op.jeq, arch.auditArch, to: killArch)
         asm.load(offset: 0)  // seccomp_data.nr
+        if arch == .x86_64 { asm.jumpIf(Op.jge, Self.x32SyscallBit, to: killArch) }
         let numbers = rules.keys.sorted()
         var bodies: [UInt32: Assembler.Label] = [:]
         for nr in numbers { bodies[nr] = asm.label() }
