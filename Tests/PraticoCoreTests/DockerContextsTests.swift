@@ -49,3 +49,16 @@ private func dockerDir() throws -> URL {
     #expect(throws: DockerContexts.ContextError.self) { try c.use("vps") }
     #expect(try String(contentsOf: dir.appending(path: "config.json"), encoding: .utf8) == "[1,2]")
 }
+
+@Test func useKeepsASymlinkedConfigALinkAndItsTarget0600() throws {
+    let dir = try dockerDir()
+    let real = dir.appending(path: "dotfiles-config.json")
+    try FileManager.default.moveItem(at: dir.appending(path: "config.json"), to: real)
+    try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: real.path)
+    try FileManager.default.createSymbolicLink(at: dir.appending(path: "config.json"), withDestinationURL: real)
+    try DockerContexts(directory: dir).use("vps")
+    #expect(try FileManager.default.destinationOfSymbolicLink(atPath: dir.appending(path: "config.json").path) == real.path)
+    #expect(try String(contentsOf: real, encoding: .utf8).contains("\"currentContext\" : \"vps\""))
+    #expect(try FileManager.default.attributesOfItem(atPath: real.path)[.posixPermissions] as? Int == 0o600)
+    #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path).allSatisfy { !$0.contains(".pratico-") })
+}

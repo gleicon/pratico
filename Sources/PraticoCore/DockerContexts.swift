@@ -64,8 +64,31 @@ public struct DockerContexts: Sendable {
         if name == Self.defaultName { json.removeValue(forKey: "currentContext") } else { json["currentContext"] = name }
         let data = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        try data.write(to: configFile, options: .atomic)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: configFile.path)
+        try Self.replace(configFile.resolvingSymlinksInPath(), with: data)
+    }
+
+    /// The file holds registry logins: the new copy is 0600 from its creation (never
+    /// readable by others in between), synced, then renamed over the target. A symlinked
+    /// `config.json` (a dotfiles repository) stays a link: its target is what is replaced.
+    static func replace(_ target: URL, with data: Data) throws {
+        let temp = target.deletingLastPathComponent().appending(path: ".\(target.lastPathComponent).pratico-\(getpid())")
+        let fd = open(temp.path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0o600)
+        guard fd >= 0 else { throw ContextError(description: "cannot create \(temp.path): errno \(errno)") }
+        var ok = data.withUnsafeBytes { buf in
+            var off = 0
+            while off < buf.count {
+                let n = Posix.write(fd, buf.baseAddress! + off, buf.count - off)
+                if n <= 0 { return false }
+                off += n
+            }
+            return true
+        }
+        ok = ok && fsync(fd) == 0
+        Posix.close(fd)
+        guard ok, rename(temp.path, target.path) == 0 else {
+            unlink(temp.path)
+            throw ContextError(description: "cannot write \(target.path): errno \(errno)")
+        }
     }
 
     /// The file as JSON; nil when there is none. A file that is not a JSON object is an
