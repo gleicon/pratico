@@ -36,7 +36,7 @@ public enum DaemonProbe {
         }
         guard rc == 0 else { return nil }
 
-        let request = Array("\(method) \(path) HTTP/1.1\r\nHost: pratico\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n".utf8) + Array(body)
+        let request = Array(requestBytes(method, path, body: body))
         guard write(fd, request, request.count) == request.count else { return nil }
 
         // Up to Content-Length when the reply has one, else until the daemon closes.
@@ -56,6 +56,17 @@ public enum DaemonProbe {
             if n <= 0 { break }
             data.append(contentsOf: chunk[0..<n])
         }
+        return parse(data)
+    }
+
+    /// One request, the connection closed after it: what a Linux host's daemon gets too,
+    /// through `docker system dial-stdio` over SSH (PraticoRemote).
+    public static func requestBytes(_ method: String, _ path: String, body: Data = Data()) -> Data {
+        Data("\(method) \(path) HTTP/1.1\r\nHost: pratico\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n".utf8) + body
+    }
+
+    /// A whole response: its status and the body after the head.
+    public static func parse(_ data: Data) -> Response? {
         guard let split = data.range(of: Data("\r\n\r\n".utf8)),
             let head = String(data: data[..<split.lowerBound], encoding: .utf8),
             let status = head.split(separator: " ").dropFirst().first.flatMap({ Int($0) })

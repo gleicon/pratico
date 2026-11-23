@@ -19,6 +19,8 @@ extension Daemon {
             conn.json(200, try activity(p[1], limit: req.query["limit"]))
         case ("GET", 1, "disk"):
             conn.json(200, disk.usage())
+        case ("GET", 1, "alerts"):
+            conn.json(200, .array(alerts.list))
         case ("DELETE", 1, "alerts"):
             alerts.clear()
             conn.respond(204)

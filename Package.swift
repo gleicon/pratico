@@ -20,6 +20,8 @@ let package = Package(
         .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.37.0"),
         .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.37.6"),
         .package(url: "https://github.com/apple/swift-certificates.git", from: "1.21.1"),
+        // The menubar's SSH to Linux hosts (docs/design/remote.md, slice 5): no spawned ssh.
+        .package(url: "https://github.com/apple/swift-nio-ssh.git", from: "0.15.2"),
     ],
     targets: [
         .target(name: "CPratico"),
@@ -56,7 +58,16 @@ let package = Package(
 #if os(macOS)
 package.products.append(.executable(name: "pratico-menubar", targets: ["pratico-menubar"]))
 package.targets += [
-    .executableTarget(name: "pratico-menubar", dependencies: ["PraticoCore"]),
+    // pratico's own SSH to Linux hosts, for the menubar (docs/design/remote.md, slice 5).
+    .target(name: "PraticoRemote", dependencies: [
+        "PraticoCore",
+        .product(name: "NIOSSH", package: "swift-nio-ssh"),
+        .product(name: "NIOCore", package: "swift-nio"),
+        .product(name: "NIOPosix", package: "swift-nio"),
+        .product(name: "Crypto", package: "swift-crypto"),
+    ]),
+    .testTarget(name: "PraticoRemoteTests", dependencies: ["PraticoRemote", .product(name: "NIOSSH", package: "swift-nio-ssh")]),
+    .executableTarget(name: "pratico-menubar", dependencies: ["PraticoCore", "PraticoRemote"]),
     .executableTarget(name: "pratico-runtime-probe", dependencies: ["PraticoDaemonKit"]),
 ]
 #endif

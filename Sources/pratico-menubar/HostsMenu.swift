@@ -14,9 +14,11 @@ struct HostsMenu: View {
                                      set: { if $0 { daemon.useContext(context.name) } })) {
                     Text(context.name)
                     Text(Self.where(context))
+                    if let r = daemon.remote[context.name] { Text(r.failed ? "⚠︎ \(r.line)" : r.line) }
                 }
             }
             Divider()
+            Button("Refresh Linux Hosts") { Task { await daemon.refreshRemote() } }
             Text("A shell with DOCKER_HOST or DOCKER_CONTEXT set goes there instead.")
             Button("Add a Linux Host…") { daemon.showAddHost() }
         }

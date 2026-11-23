@@ -118,6 +118,12 @@ expect_eq "install: the docker CLI's default socket points at it" "$(onhost read
 expect_eq "install: dev is in the pratico group" "$(asdev id -nG 2>&1 | tr ' ' '\n' | grep -x pratico)" "pratico"
 caps='grep CapEff /proc/$(pgrep -o pratico-daemon)/status | cut -f2'
 expect_eq "install: no capability on the host" "$(onhost "$caps" 2>&1)" "0000000000000000"
+# The menubar's own SSH (PraticoRemote): key file, known_hosts, dial-stdio, as dev.
+remote_ssh() {
+    PRATICO_REMOTE_TEST_TARGET=devhost PRATICO_REMOTE_TEST_CONFIG="$HOME_DIR/ssh_config" \
+        swift test --package-path "$ROOT" --filter remoteHostAnswersOverPraticosOwnSSH 2>&1 | grep -q "remoteHostAnswersOverPraticosOwnSSH() passed"
+}
+check "menubar SSH: pratico's own client reaches the service" remote_ssh
 expect_eq "ssh://: server is pratico on Linux" "$(remote version --format '{{.Server.Os}}/{{.Server.Arch}}' 2>&1)" "linux/arm64"
 check "ssh://: pull alpine" remote pull -q alpine
 expect_eq "ssh://: run alpine true" "$(remote run --rm --network none alpine sh -c 'echo ran' 2>&1)" "ran"

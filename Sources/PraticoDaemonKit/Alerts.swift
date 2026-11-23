@@ -88,6 +88,9 @@ final class AlertLog: @unchecked Sendable {
         write([])
     }
 
+    /// Every open alert, for a menubar that cannot read this file (a Linux host's).
+    var list: [JSON] { read() }
+
     private func read() -> [JSON] { (try? Data(contentsOf: path)).flatMap { JSON.parse($0)?.array } ?? [] }
     private func write(_ list: [JSON]) { try? JSON.array(list).encoded().write(to: path, options: .atomic) }
 }
