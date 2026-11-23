@@ -36,7 +36,9 @@ extension HostInstall {
         return Host(isRoot: geteuid() == 0, machine: machine, hasSystemd: fm.fileExists(atPath: "/run/systemd/system"),
                     kvmGroup: kvmGroup, kvmGroupWritable: hasKVM && kvm.st_mode & 0o060 == 0o060,
                     apparmor: fm.fileExists(atPath: "/sys/kernel/security/apparmor"), dockerSocket: socketState,
-                    hasDockerCLI: ["/usr/bin/docker", "/usr/local/bin/docker"].contains { fm.isExecutableFile(atPath: $0) },
+                    hasDockerCLI: ["/usr/bin/docker", "/usr/local/bin/docker"].contains {
+                        fm.isExecutableFile(atPath: $0) && (try? fm.destinationOfSymbolicLink(atPath: $0)) != "\(prefix)/pratico-daemon"
+                    },
                     sudoUser: sudoUser, source: source)
     }
 
@@ -55,6 +57,16 @@ extension HostInstall {
         try confirm(options)
         try copyPayload(from: source)
         for file in p.files { try write(file) }
+        for link in p.links {
+            let fm = FileManager.default
+            if let existing = try? fm.destinationOfSymbolicLink(atPath: link.path) {
+                guard existing == link.target else { throw InstallError("\(link.path) links to \(existing): not pratico's, left alone") }
+                try fm.removeItem(atPath: link.path)  // an earlier install's
+            } else if fm.fileExists(atPath: link.path) {
+                throw InstallError("\(link.path) exists and is not pratico's: left alone")
+            }
+            try fm.createSymbolicLink(atPath: link.path, withDestinationPath: link.target)
+        }
         if options.filesOnly {
             print("Files written. To finish:")
             for c in p.commands { print("  sudo " + c.joined(separator: " ")) }
@@ -70,7 +82,8 @@ extension HostInstall {
     public static func uninstall(options: Options) throws {
         let host = inspect(source: "")
         guard host.isRoot else { throw InstallError("run it as root: sudo \(prefix)/pratico-daemon uninstall") }
-        let paths = removals(host: host, purge: options.purge).filter { FileManager.default.fileExists(atPath: $0) }
+        var paths = removals(host: host, purge: options.purge).filter { FileManager.default.fileExists(atPath: $0) }
+        if (try? FileManager.default.destinationOfSymbolicLink(atPath: dialStdioLink)) == "\(prefix)/pratico-daemon" { paths.append(dialStdioLink) }
         let stop = ["systemctl", "kill", "--kill-whom=all", "--signal=SIGTERM", "pratico.service"]
         var commands: [[String]] = [["systemctl", "disable", "--now", "pratico.service"]]
         commands += HostHardening.revertCommands()

@@ -45,8 +45,9 @@ switch, egress, scanning, and the flight recorder are the same code. How to inst
 - Shims outlive their daemon, as containers do, so an e2e run killed outright leaves its
   VMs holding memory: seven left test hosts (6 GB each) made a later VM fail to start
   (`VZErrorDomain Code=1`). `e2e/reap.sh` stops those of earlier runs whose daemon is gone.
-- `docker` over `ssh://` runs `docker system dial-stdio` on the host: the host needs the
-  docker CLI (only the CLI package, no engine), with `DOCKER_HOST` pointing at pratico's socket.
+- `docker` over `ssh://` runs `docker system dial-stdio` on the host. pratico answers it
+  itself (`pratico-daemon dial-stdio`, linked as `/usr/local/bin/docker` where no docker is
+  installed): a host gets nothing from Docker (decided with the user, 2026-11-23).
 - Most VPSes do not expose `/dev/kvm`. KVM is there on bare-metal servers and on clouds
   that enable nested virtualization; most cheap VPSes are x86_64.
 

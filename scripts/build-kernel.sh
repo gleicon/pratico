@@ -5,7 +5,11 @@
 # UPDATE=1 records a new one (a new kernel or config), REPRO=1 builds twice and compares.
 #
 #   scripts/build-kernel.sh <out-dir>   # writes <out-dir>/vmlinux, config, and vmlinux.btf
+#   KARCH=x86_64 scripts/build-kernel.sh <out-dir>   # Linux hosts on x86_64 (docs/design/remote.md):
+#                                       # cross-compiled, the ELF vmlinux Cloud Hypervisor boots (PVH)
 set -euo pipefail
+KARCH="${KARCH:-arm64}"
+case "$KARCH" in arm64|x86_64) ;; *) echo "kernel: KARCH is arm64 or x86_64" >&2; exit 2 ;; esac
 
 KERNEL_VERSION=6.18.63
 KERNEL_SHA256=81764a545072d160748beff4d9de2e7d95aa9f16e8261110288f067a2cc61d71  # kernel.org sha256sums.asc
@@ -17,7 +21,7 @@ APT_SNAPSHOT=20261115T000000Z
 OUT="${1:?usage: scripts/build-kernel.sh <out-dir>}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CACHE="$ROOT/.cache/kernel"
-LOCK="$ROOT/vm/kernel/vmlinux.sha256"
+if [ "$KARCH" = arm64 ]; then LOCK="$ROOT/vm/kernel/vmlinux.sha256"; else LOCK="$ROOT/vm/kernel/vmlinux-$KARCH.sha256"; fi
 export DOCKER_HOST="${DOCKER_HOST:-unix://$HOME/.pratico/docker.sock}"
 mkdir -p "$CACHE/in" "$OUT"
 
@@ -32,26 +36,29 @@ if [ ! -f "$tarball" ]; then
 fi
 verify "$tarball" "$KERNEL_SHA256"
 ln -f "$tarball" "$CACHE/in/linux.tar.xz"
-cp "$ROOT/Vendor/containerization/kernel/config-arm64" "$ROOT/vm/kernel/config-pratico" "$ROOT/vm/kernel/build.sh" "$ROOT/vm/snapshot.sh" "$CACHE/in/"
+cp "$ROOT/Vendor/containerization/kernel/config-arm64" "$ROOT/Vendor/containerization/kernel/config-x86_64" \
+    "$ROOT/vm/kernel/config-pratico" "$ROOT/vm/kernel/build.sh" "$ROOT/vm/snapshot.sh" "$CACHE/in/"
 
 build() {  # out-dir
     mkdir -p "$1"
-    docker volume create pratico-kernel-build >/dev/null
+    local volume=pratico-kernel-build
+    [ "$KARCH" = arm64 ] || volume="pratico-kernel-build-$KARCH"
+    docker volume create "$volume" >/dev/null
     docker run --rm --cpus "${CPUS:-8}" --memory "${MEMORY:-8g}" \
-        -e APT_SNAPSHOT="$APT_SNAPSHOT" -e KBUILD_BUILD_TIMESTAMP="$KERNEL_DATE" \
-        -v "$CACHE/in:/in:ro" -v "$1:/out" -v pratico-kernel-build:/kbuild \
+        -e APT_SNAPSHOT="$APT_SNAPSHOT" -e KBUILD_BUILD_TIMESTAMP="$KERNEL_DATE" -e KARCH="$KARCH" \
+        -v "$CACHE/in:/in:ro" -v "$1:/out" -v "$volume:/kbuild" \
         "$BUILD_IMAGE" /in/build.sh
 }
 
 build "$OUT"
 sum=$(shasum -a 256 "$OUT/vmlinux" | cut -d' ' -f1)
 if [ "${REPRO:-0}" = 1 ]; then
-    build "$CACHE/again"
-    verify "$CACHE/again/vmlinux" "$sum" || { echo "kernel: two builds differ: not reproducible" >&2; exit 1; }
+    build "$CACHE/again-$KARCH"
+    verify "$CACHE/again-$KARCH/vmlinux" "$sum" || { echo "kernel: two builds differ: not reproducible" >&2; exit 1; }
     echo "kernel: two builds match"
 fi
 if [ "${UPDATE:-0}" = 1 ]; then
-    echo "$sum  vmlinux  # Linux $KERNEL_VERSION, vm/kernel/config-pratico" > "$LOCK"
+    echo "$sum  vmlinux  # Linux $KERNEL_VERSION $KARCH, vm/kernel/config-pratico" > "$LOCK"
     echo "kernel: recorded $sum"
 elif [ -f "$LOCK" ]; then
     verify "$OUT/vmlinux" "$(cut -d' ' -f1 "$LOCK")"

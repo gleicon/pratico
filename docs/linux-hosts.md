@@ -11,10 +11,10 @@ your Mac's docker CLI over SSH. The design and its reasons are in
   and clouds that enable nested virtualization; most VPSes do not. pratico refuses a host
   without it.
 - systemd.
-- The docker CLI, for `docker -H ssh://` (it runs `docker system dial-stdio` on the
-  host). Only the CLI: pratico is the engine.
 
-Nothing else: pratico's binaries are static.
+Nothing else, and nothing from Docker: pratico's binaries are static, and the docker CLI
+stays on your Mac. Over `ssh://` it runs `docker system dial-stdio` on the host, which
+pratico answers itself (below).
 
 ## Install
 
@@ -40,6 +40,10 @@ answers for scripts). It:
   group that owns `/dev/kvm`, and adds the user who ran `sudo` to the `pratico` group
 - links `/run/docker.sock` to pratico's socket, `/run/pratico/docker.sock`, unless
   another engine already has it (then it says so and leaves it alone)
+- links `/usr/local/bin/docker` to `pratico-daemon`, which then answers
+  `docker system dial-stdio`, what the Mac's docker CLI runs over `ssh://`, and refuses
+  anything else (`docker ps` on the host says to use the docker CLI on your Mac). It is
+  made only where no docker is installed; uninstall removes it
 - on hosts with AppArmor (Ubuntu), writes and loads a profile that lets `pratico-shim`
   make user namespaces, which Ubuntu 24.04 allows only to programs with a profile
 - enables and starts the service, and waits until it answers

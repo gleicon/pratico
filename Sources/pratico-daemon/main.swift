@@ -21,6 +21,19 @@ var socketPath: String?
 
 var args = Array(CommandLine.arguments.dropFirst())
 
+// Run as `docker` (the link install makes on a Linux host): only `docker system dial-stdio`,
+// which the Mac's docker CLI runs over ssh://; nothing else of Docker's is here.
+if URL(filePath: CommandLine.arguments[0]).lastPathComponent == "docker" {
+    guard args == ["system", "dial-stdio"] else {
+        FileHandle.standardError.write(Data("this host runs pratico, not Docker: use the docker CLI on your Mac, with docker -H ssh://this-host\n".utf8))
+        exit(1)
+    }
+    exit(DialStdio.run(socket: ProcessInfo.processInfo.environment["PRATICO_SOCKET"] ?? HostInstall.socket))
+}
+if args.first == "dial-stdio" {
+    exit(DialStdio.run(socket: args.dropFirst().first ?? HostInstall.socket))
+}
+
 #if os(Linux)
 if let verb = args.first, verb == "install" || verb == "uninstall" {
     var options = HostInstall.Options()

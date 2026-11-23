@@ -5,7 +5,8 @@ import NIOSSH
 import PraticoCore
 
 /// pratico's own SSH to a Linux host (docs/design/remote.md, slice 5): no `ssh` spawned.
-/// It runs `docker system dial-stdio` there, as `docker -H ssh://` does, and speaks to the
+/// It runs `pratico-daemon dial-stdio` there (what `docker -H ssh://` reaches as `docker system
+/// dial-stdio`), and speaks to the
 /// host's daemon through it as the menubar speaks to this Mac's: one request per channel,
 /// all on one connection. Keys come from files (OpenSSHKey); host keys must be in
 /// `known_hosts` (KnownHosts).
@@ -46,7 +47,7 @@ public enum RemoteHost {
             if let refusal = hostKeys.refusal { throw refusal }
             guard let r = DaemonProbe.parse(out) else {
                 let reason = String(decoding: err, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-                throw Failure(description: reason.isEmpty ? "\(target.alias): no answer from docker system dial-stdio" : "\(target.alias): \(reason)")
+                throw Failure(description: reason.isEmpty ? "\(target.alias): no answer from pratico-daemon dial-stdio (is pratico installed there?)" : "\(target.alias): \(reason)")
             }
             responses.append(r)
         }
@@ -67,7 +68,7 @@ public enum RemoteHost {
         return keys
     }
 
-    /// One exec channel: the request written to `docker system dial-stdio`, its stdout and
+    /// One exec channel: the request written to `pratico-daemon dial-stdio`, its stdout and
     /// stderr read until the daemon closes the connection (the request says `close`).
     static func exchange(_ request: Data, on connection: Channel) async throws -> (Data, Data) {
         let ssh = try await connection.pipeline.handler(type: NIOSSHHandler.self).get()
@@ -90,7 +91,7 @@ public enum RemoteHost {
     }
 }
 
-/// Runs `docker system dial-stdio` and relays one request through it.
+/// Runs `pratico-daemon dial-stdio` and relays one request through it.
 final class DialStdio: ChannelDuplexHandler, @unchecked Sendable {
     typealias InboundIn = SSHChannelData
     typealias OutboundIn = Never
@@ -112,7 +113,8 @@ final class DialStdio: ChannelDuplexHandler, @unchecked Sendable {
     }
 
     func channelActive(context: ChannelHandlerContext) {
-        let exec = SSHChannelRequestEvent.ExecRequest(command: "docker system dial-stdio", wantReply: true)
+        // pratico's own, never a docker that may lead to another engine on the host.
+        let exec = SSHChannelRequestEvent.ExecRequest(command: "/usr/lib/pratico/pratico-daemon dial-stdio", wantReply: true)
         context.triggerUserOutboundEvent(exec, promise: nil)
         var buffer = context.channel.allocator.buffer(capacity: request.count)
         buffer.writeBytes(request)

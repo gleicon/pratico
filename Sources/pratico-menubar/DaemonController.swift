@@ -279,7 +279,8 @@ final class DaemonController {
                 tar -xzf pratico-<version>-linux-arm64.tar.gz
                 sudo ./pratico-<version>-linux-arm64/pratico-daemon install
 
-                # On this Mac (the docker CLI connects with your ssh, keys and config):
+                # On this Mac (the docker CLI connects with your ssh, keys and config;
+                # the server needs nothing from Docker):
                 docker context create your-server --docker host=ssh://you@your-server
                 docker --context your-server version --format '{{.Server.Os}} {{.Server.Version}}'
                 """)

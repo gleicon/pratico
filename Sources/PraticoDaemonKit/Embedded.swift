@@ -36,7 +36,7 @@ public actor EmbeddedRuntime {
         if fm.fileExists(atPath: disk.path), (try? String(contentsOf: marker, encoding: .utf8)) == reference { return }
         let fresh = root.appending(path: "initfs.ext4.new")
         try? fm.removeItem(at: fresh)
-        _ = try await store.getInitImage(reference: reference).initBlock(at: fresh, for: .linuxArm)
+        _ = try await store.getInitImage(reference: reference).initBlock(at: fresh, for: .host)
         try Posix.replace(disk, with: fresh)
         try reference.write(to: marker, atomically: true, encoding: .utf8)
     }
@@ -92,7 +92,7 @@ public actor EmbeddedRuntime {
         for img in try await store.list() where isInitImage(img.reference) && img.reference != reference {
             try? await store.delete(reference: img.reference)  // an earlier pratico's init; its blobs go with prune
         }
-        let kernel = Kernel(path: assets.appending(path: "vmlinux"), platform: .linuxArm)
+        let kernel = Kernel(path: assets.appending(path: "vmlinux"), platform: .host)
         return try await EmbeddedRuntime(assets: assets, store: store, content: content, kernel: kernel, reference: reference)
     }
 
@@ -244,5 +244,17 @@ final class EmbeddedContainers: Sendable {
         for name in (try? FileManager.default.contentsOfDirectory(atPath: rootfsCache.path)) ?? [] where !keep.contains(name) {
             try? FileManager.default.removeItem(at: rootfsCache.appending(path: name))
         }
+    }
+}
+
+extension SystemPlatform {
+    /// A VM's guest runs the host's architecture: arm64 on the Mac and arm64 Linux hosts,
+    /// amd64 on x86_64 ones (docs/design/remote.md).
+    static var host: SystemPlatform {
+        #if arch(x86_64)
+        .linuxAmd
+        #else
+        .linuxArm
+        #endif
     }
 }

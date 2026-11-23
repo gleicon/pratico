@@ -15,7 +15,9 @@ KERNEL="${1:?usage: scripts/build-bpf.sh <kernel-out-dir> <out-dir>}"
 OUT="${2:?usage: scripts/build-bpf.sh <kernel-out-dir> <out-dir>}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CACHE="$ROOT/.cache/bpf"
-LOCK="$ROOT/vm/bpf/recorder.sha256"
+KARCH="${KARCH:-arm64}"  # x86_64: probes for the x86_64 kernel (its own types)
+case "$KARCH" in arm64) sfx="" ;; x86_64) sfx="-x86_64" ;; *) echo "bpf: KARCH is arm64 or x86_64" >&2; exit 2 ;; esac
+LOCK="$ROOT/vm/bpf/recorder$sfx.sha256"
 export DOCKER_HOST="${DOCKER_HOST:-unix://$HOME/.pratico/docker.sock}"
 mkdir -p "$CACHE/in" "$OUT"
 
@@ -24,7 +26,7 @@ verify() {  # file, expected digest
 }
 
 # The types must be the shipped kernel's: its BTF came out of the same build as vmlinux.
-verify "$KERNEL/vmlinux" "$(cut -d' ' -f1 "$ROOT/vm/kernel/vmlinux.sha256")"
+verify "$KERNEL/vmlinux" "$(cut -d' ' -f1 "$ROOT/vm/kernel/vmlinux$sfx.sha256")"
 [ -s "$KERNEL/vmlinux.btf" ] || { echo "bpf: $KERNEL/vmlinux.btf is missing: run scripts/build-kernel.sh" >&2; exit 1; }
 cp "$KERNEL/vmlinux.btf" "$ROOT/vm/bpf/recorder.bpf.c" "$ROOT/vm/bpf/recorder.h" "$ROOT/vm/bpf/build.sh" "$ROOT/vm/snapshot.sh" "$CACHE/in/"
 
@@ -36,12 +38,12 @@ build() {  # out-dir
 build "$OUT"
 sum=$(shasum -a 256 "$OUT/recorder.bpf.o" | cut -d' ' -f1)
 if [ "${REPRO:-0}" = 1 ]; then
-    build "$CACHE/again"
-    verify "$CACHE/again/recorder.bpf.o" "$sum" || { echo "bpf: two builds differ: not reproducible" >&2; exit 1; }
+    build "$CACHE/again$sfx"
+    verify "$CACHE/again$sfx/recorder.bpf.o" "$sum" || { echo "bpf: two builds differ: not reproducible" >&2; exit 1; }
     echo "bpf: two builds match"
 fi
 if [ "${UPDATE:-0}" = 1 ]; then
-    echo "$sum  recorder.bpf.o  # vm/bpf, against vm/kernel/vmlinux.sha256's kernel" > "$LOCK"
+    echo "$sum  recorder.bpf.o  # vm/bpf, against vm/kernel/vmlinux$sfx.sha256's kernel" > "$LOCK"
     echo "bpf: recorded $sum"
 elif [ -f "$LOCK" ]; then
     verify "$OUT/recorder.bpf.o" "$(cut -d' ' -f1 "$LOCK")"

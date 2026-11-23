@@ -16,9 +16,11 @@ IMAGE_REPO=dev.pratico/vminit  # not a registry: never pulled, loaded from the a
 UPSTREAM_COMMIT=baf212e5a8e432e539beee325050aa26443a154d  # Vendor/README.md
 
 OUT="${1:?usage: scripts/build-init.sh <out-dir>}"
+KARCH="${KARCH:-arm64}"  # x86_64: the init of Linux hosts on x86_64
+case "$KARCH" in arm64) sfx="" ;; x86_64) sfx="-x86_64" ;; *) echo "init: KARCH is arm64 or x86_64" >&2; exit 2 ;; esac
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CACHE="$ROOT/.cache/init"
-LOCK="$ROOT/vm/init/vminit.sha256"
+LOCK="$ROOT/vm/init/vminit$sfx.sha256"
 export DOCKER_HOST="${DOCKER_HOST:-unix://$HOME/.pratico/docker.sock}"
 mkdir -p "$CACHE/sdk" "$OUT"
 
@@ -30,17 +32,17 @@ fi
 [ "$(shasum -a 256 "$sdk" | cut -d' ' -f1)" = "$SDK_SHA256" ] || { echo "init: $sdk does not match its SHA-256" >&2; exit 1; }
 
 # The flight recorder's probes (scripts/build-bpf.sh), as pinned.
-BPF="${BPF_DIR:-$ROOT/.cache/bpf/out}"
-[ "$(shasum -a 256 "$BPF/recorder.bpf.o" 2>/dev/null | cut -d' ' -f1)" = "$(cut -d' ' -f1 "$ROOT/vm/bpf/recorder.sha256")" ] ||
-    { echo "init: $BPF/recorder.bpf.o is missing or does not match vm/bpf/recorder.sha256: run scripts/build-bpf.sh" >&2; exit 1; }
+BPF="${BPF_DIR:-$ROOT/.cache/bpf/out$sfx}"
+[ "$(shasum -a 256 "$BPF/recorder.bpf.o" 2>/dev/null | cut -d' ' -f1)" = "$(cut -d' ' -f1 "$ROOT/vm/bpf/recorder$sfx.sha256")" ] ||
+    { echo "init: $BPF/recorder.bpf.o is missing or does not match vm/bpf/recorder$sfx.sha256: run scripts/build-bpf.sh" >&2; exit 1; }
 
 build() {  # out-dir
     mkdir -p "$1"
-    docker volume create pratico-init-build >/dev/null
+    docker volume create "pratico-init-build$sfx" >/dev/null
     docker run --rm --cpus "${CPUS:-8}" --memory "${MEMORY:-8g}" --network bridge \
-        -e SDK_SHA256="$SDK_SHA256" -e IMAGE_REPO="$IMAGE_REPO" -e INIT_VERSION="$INIT_VERSION" \
+        -e SDK_SHA256="$SDK_SHA256" -e IMAGE_REPO="$IMAGE_REPO" -e INIT_VERSION="$INIT_VERSION" -e KARCH="$KARCH" \
         -e BUILD_TIME="$INIT_VERSION" -e GIT_COMMIT="$UPSTREAM_COMMIT" \
-        -v "$ROOT/Vendor/containerization:/src:ro" -v "$ROOT/vm/init:/in:ro" -v "$CACHE/sdk:/sdk:ro" -v "$BPF:/bpf:ro" -v "$1:/out" -v pratico-init-build:/build \
+        -v "$ROOT/Vendor/containerization:/src:ro" -v "$ROOT/vm/init:/in:ro" -v "$CACHE/sdk:/sdk:ro" -v "$BPF:/bpf:ro" -v "$1:/out" -v "pratico-init-build$sfx:/build" \
         "$SWIFT_IMAGE" /in/build.sh
 }
 digest() { sed -n 's/.*"digest":"sha256:\([0-9a-f]*\)".*/\1/p' "$1/vminit/index.json"; }

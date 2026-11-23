@@ -4,21 +4,27 @@
 # against the digest GitHub records for it, virtiofsd (scripts/build-virtiofsd.sh), the
 # kernel and init, and THIRD_PARTY_NOTICES. The test host runs it; the release tars it.
 #
-#   scripts/host-payload.sh <out-dir>
+#   [KARCH=x86_64] scripts/host-payload.sh <out-dir>
 set -euo pipefail
 
 CH_VERSION=v55.0
-CH_SHA256=446de7552dacc83bc86d1137e7ffa7c2d204cdda4850eac4f2d2666d63c0f697
-CH_URL="https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/$CH_VERSION/cloud-hypervisor-static-aarch64"
+KARCH="${KARCH:-arm64}"
+case "$KARCH" in
+arm64) ch_asset=cloud-hypervisor-static-aarch64 CH_SHA256=446de7552dacc83bc86d1137e7ffa7c2d204cdda4850eac4f2d2666d63c0f697 sfx="" ;;
+x86_64) ch_asset=cloud-hypervisor-static CH_SHA256=ce7133bf535ed5a4e2a63ea1f26025445a5b1241f73ddfb81ff2fbcb2e803a59 sfx="-x86_64" ;;
+*) echo "host-payload: KARCH is arm64 or x86_64" >&2; exit 2 ;;
+esac
+export KARCH
+CH_URL="https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/$CH_VERSION/$ch_asset"
 
-OUT="$(mkdir -p "${1:?usage: scripts/host-payload.sh <out-dir>}" && cd "$1" && pwd)"
+OUT="$(mkdir -p "${1:?usage: [KARCH=x86_64] scripts/host-payload.sh <out-dir>}" && cd "$1" && pwd)"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-ASSETS="${PRATICO_RUNTIME_ASSETS:-$ROOT/.build/runtime-assets}"
-CACHE="$ROOT/.cache/host"
-[ -f "$ASSETS/vmlinux" ] || { echo "host-payload: runtime assets missing: run make assets" >&2; exit 1; }
+ASSETS="${PRATICO_RUNTIME_ASSETS:-$ROOT/.build/runtime-assets$sfx}"
+CACHE="$ROOT/.cache/host$sfx"
+[ -f "$ASSETS/vmlinux" ] || { echo "host-payload: runtime assets missing in $ASSETS: run KARCH=$KARCH scripts/fetch-runtime-assets.sh $ASSETS" >&2; exit 1; }
 mkdir -p "$CACHE" "$OUT/runtime"
 
-ch="$CACHE/cloud-hypervisor-$CH_VERSION"
+ch="$CACHE/$ch_asset-$CH_VERSION"
 if [ ! -f "$ch" ]; then
     curl -fsSL --retry 3 -o "$ch.part" "$CH_URL" && mv "$ch.part" "$ch"
 fi

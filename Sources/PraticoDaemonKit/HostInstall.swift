@@ -17,6 +17,9 @@ public enum HostInstall {
     static let members = "/etc/sysusers.d/pratico-members.conf"
     static let tmpfiles = "/usr/lib/tmpfiles.d/pratico.conf"
     static let apparmorProfile = "/etc/apparmor.d/pratico-shim"
+    /// Where the Mac's docker CLI finds `docker system dial-stdio` over ssh://: pratico's own,
+    /// so the host needs nothing from Docker (DialStdio).
+    public static let dialStdioLink = "/usr/local/bin/docker"
     /// What a release carries, beside `pratico-daemon` itself.
     static let payload = ["pratico-daemon", "pratico-shim", "cloud-hypervisor", "virtiofsd", "runtime", "THIRD_PARTY_NOTICES"]
 
@@ -38,6 +41,7 @@ public enum HostInstall {
         public var apparmor: Bool
         /// What is at `/run/docker.sock`: nothing, pratico's link, or something else.
         public var dockerSocket: DockerSocket
+        /// A docker on the PATH that is not pratico's link: left alone.
         public var hasDockerCLI: Bool
         /// The user who ran `sudo`, added to the `pratico` group.
         public var sudoUser: String?
@@ -58,6 +62,8 @@ public enum HostInstall {
 
     public struct Plan: Sendable {
         public var files: [File] = []
+        /// Symbolic links: (path, target).
+        public var links: [(path: String, target: String)] = []
         public var commands: [[String]] = []
         public var notes: [String] = []
     }
@@ -102,8 +108,10 @@ public enum HostInstall {
         if host.dockerSocket == .other {
             p.notes.append("\(dockerSocket) belongs to another engine and is left alone: point the docker CLI at unix://\(socket) (a docker context)")
         }
-        if !host.hasDockerCLI {
-            p.notes.append("`docker -H ssh://` needs the docker CLI on this host (the CLI only, no engine)")
+        if host.hasDockerCLI {
+            p.notes.append("a docker CLI is already installed: `docker -H ssh://` reaches the engine it is set up for, pratico through a docker context with host=unix://\(socket) on this host")
+        } else {
+            p.links.append((dialStdioLink, "\(prefix)/pratico-daemon"))
         }
         p.notes.append("members of the pratico group use the socket; a new group takes effect at the next login")
         return p
@@ -203,6 +211,7 @@ public enum HostInstall {
     public static func describe(_ p: Plan) -> String {
         var lines = ["pratico will install to \(prefix) and write:"]
         lines += p.files.map { "  \($0.path)" }
+        lines += p.links.map { "  \($0.path) -> \($0.target) (answers docker system dial-stdio only)" }
         lines.append("then run:")
         lines += p.commands.map { "  " + $0.joined(separator: " ") }
         lines += p.notes.map { "note: \($0)" }

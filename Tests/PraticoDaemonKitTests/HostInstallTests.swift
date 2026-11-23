@@ -52,7 +52,11 @@ private func host(_ edit: (inout HostInstall.Host) -> Void = { _ in }) -> HostIn
     #expect(!plain.commands.contains { $0.first == "apparmor_parser" })
     #expect(!plain.files.map(\.path).contains("/etc/sysusers.d/pratico-members.conf"))
     #expect(plain.files.first { $0.path.hasSuffix("sysusers.d/pratico.conf") }?.contents.contains("m pratico hypervisor") == true)
-    #expect(plain.notes.contains { $0.contains("docker CLI") })
+    // No docker on the host: pratico's own answers `docker system dial-stdio`.
+    #expect(plain.links.map(\.path) == ["/usr/local/bin/docker"] && plain.links.first?.target == "/usr/lib/pratico/pratico-daemon")
+    let withDocker = HostInstall.plan(host { $0.hasDockerCLI = true })
+    #expect(withDocker.links.isEmpty)
+    #expect(withDocker.notes.contains { $0.contains("docker CLI is already installed") })
 }
 
 @Test func installedUnitRunsUnprivilegedWithOnlyWhatVMsNeed() {

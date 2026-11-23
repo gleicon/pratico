@@ -2,8 +2,12 @@
 # Runs inside the build container (scripts/build-init.sh): builds vminitd and vmexec from
 # Vendor/containerization with Swift's static Linux SDK, then writes the init image as an
 # OCI layout in /out/vminit, with fixed timestamps and owners so the bytes repeat.
+# KARCH: arm64, or x86_64 for Linux hosts on x86_64 (cross-built with the same SDK).
 set -euo pipefail
 : "${SDK_SHA256:?}" "${IMAGE_REPO:?}" "${INIT_VERSION:?}" "${BUILD_TIME:?}" "${GIT_COMMIT:?}"
+KARCH="${KARCH:-arm64}"
+if [ "$KARCH" = arm64 ]; then triple=aarch64-swift-linux-musl oci=arm64 scratch=/build/scratch
+else triple=x86_64-swift-linux-musl oci=amd64 scratch=/build/scratch-x86_64; fi
 
 sdk=/sdk/static-sdk.artifactbundle.tar.gz  # downloaded and verified by the host
 swift sdk list | grep -q static-linux || swift sdk install "$sdk" --checksum "$SDK_SHA256" >/dev/null
@@ -14,10 +18,10 @@ cp -a /src /build/src
 # SwiftPM in a kept scratch directory misses source files added since its last build
 # ("cannot find 'X' in scope"): start it over whenever the set of files changes.
 files=$(cd /build/src && find . -name '*.swift' -o -name '*.c' -o -name '*.h' | LC_ALL=C sort | sha256sum)
-[ "$(cat /build/scratch.files 2>/dev/null)" = "$files" ] || rm -rf /build/scratch
-echo "$files" > /build/scratch.files
+[ "$(cat "$scratch.files" 2>/dev/null)" = "$files" ] || rm -rf "$scratch"
+echo "$files" > "$scratch.files"
 cd /build/src/vminitd
-flags=(-c release --swift-sdk aarch64-swift-linux-musl -Xlinker -s -Xlinker --build-id=none --scratch-path /build/scratch)
+flags=(-c release --swift-sdk "$triple" -Xlinker -s -Xlinker --build-id=none --scratch-path "$scratch")
 export BUILD_TIME GIT_COMMIT
 swift build "${flags[@]}" --quiet --product vminitd  # errors go to stdout: keep them
 swift build "${flags[@]}" --quiet --product vmexec
@@ -50,7 +54,7 @@ blob() {  # file: stores it by digest, prints the digest
     echo "$d"
 }
 layer=$(blob /build/layer.tar.gz)
-printf '{"architecture":"arm64","config":{"Labels":{"org.opencontainers.image.source":"https://github.com/gleicon/pratico"}},"os":"linux","rootfs":{"diff_ids":["sha256:%s"],"type":"layers"}}' "$diff_id" > /build/config.json
+printf '{"architecture":"%s","config":{"Labels":{"org.opencontainers.image.source":"https://github.com/gleicon/pratico"}},"os":"linux","rootfs":{"diff_ids":["sha256:%s"],"type":"layers"}}' "$oci" "$diff_id" > /build/config.json
 config=$(blob /build/config.json)
 printf '{"config":{"digest":"sha256:%s","mediaType":"application/vnd.oci.image.config.v1+json","size":%d},"layers":[{"digest":"sha256:%s","mediaType":"application/vnd.oci.image.layer.v1.tar+gzip","size":%d}],"mediaType":"application/vnd.oci.image.manifest.v1+json","schemaVersion":2}' \
     "$config" "$(stat -c %s /build/config.json)" "$layer" "$(stat -c %s /build/layer.tar.gz)" > /build/manifest.json
@@ -58,6 +62,6 @@ manifest=$(blob /build/manifest.json)
 # Tagged by content: the daemon rebuilds its init disk when the reference changes.
 tag="$INIT_VERSION-${manifest:0:12}"
 printf '{"imageLayoutVersion":"1.0.0"}' > "$out/oci-layout"
-printf '{"schemaVersion":2,"manifests":[{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:%s","size":%d,"platform":{"architecture":"arm64","os":"linux"},"annotations":{"org.opencontainers.image.ref.name":"%s","io.containerd.image.name":"%s"}}]}' \
-    "$manifest" "$(stat -c %s /build/manifest.json)" "$tag" "$IMAGE_REPO:$tag" > "$out/index.json"
+printf '{"schemaVersion":2,"manifests":[{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:%s","size":%d,"platform":{"architecture":"%s","os":"linux"},"annotations":{"org.opencontainers.image.ref.name":"%s","io.containerd.image.name":"%s"}}]}' \
+    "$manifest" "$(stat -c %s /build/manifest.json)" "$oci" "$tag" "$IMAGE_REPO:$tag" > "$out/index.json"
 echo "init: vminitd $(stat -c %s "$root/sbin/vminitd") bytes, vmexec $(stat -c %s "$root/sbin/vmexec") bytes, $IMAGE_REPO:$tag"

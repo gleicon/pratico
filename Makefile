@@ -9,11 +9,10 @@ ENTITLEMENTS := Support/pratico.entitlements
 SIGN_IDENTITY ?= -
 VERSION      ?= $(shell sed -n 's/.*static let version = "\(.*\)"/\1/p' Sources/PraticoCore/Pratico.swift)
 DMG          := $(DIST_DIR)/Pratico-$(VERSION).dmg
-LINUX_TAR    := $(DIST_DIR)/pratico-$(VERSION)-linux-arm64.tar.gz
 
 ASSETS_DIR   := $(BUILD_DIR)/runtime-assets
 
-.PHONY: e2e-tools e2e-testhost linux-dist all build assets probe test e2e e2e-embedded e2e-registry bench app sign dmg release install run uninstall clean
+.PHONY: e2e-tools e2e-testhost e2e-worker linux-dist all build assets probe test e2e e2e-embedded e2e-registry bench app sign dmg release install run uninstall clean
 
 all: build
 
@@ -81,8 +80,15 @@ dmg: app
 	scripts/dmg.sh "$(APP)" "$(DMG)" "$(VERSION)" "$(SIGN_IDENTITY)"
 
 # The Linux host release: static daemon and shim, Cloud Hypervisor, virtiofsd, kernel and init.
+# LINUX_ARCH=x86_64 for x86_64 hosts.
+LINUX_ARCH   ?= arm64
 linux-dist: build assets
-	scripts/linux-dist.sh "$(VERSION)" "$(LINUX_TAR)"
+	KARCH=$(LINUX_ARCH) scripts/fetch-runtime-assets.sh "$(BUILD_DIR)/runtime-assets$(if $(filter x86_64,$(LINUX_ARCH)),-x86_64)"
+	KARCH=$(LINUX_ARCH) scripts/linux-dist.sh "$(VERSION)" "$(DIST_DIR)/pratico-$(VERSION)-linux-$(LINUX_ARCH).tar.gz"
+
+# The release on a real Linux host: make e2e-worker WORKER=user@host WORKER_KEY=~/.ssh/key [LINUX_ARCH=x86_64]
+e2e-worker: linux-dist
+	WORKER_KEY="$(WORKER_KEY)" e2e/worker.sh "$(WORKER)" "$(DIST_DIR)/pratico-$(VERSION)-linux-$(LINUX_ARCH).tar.gz"
 
 # Tags vVERSION and publishes the DMG and the Linux host tarball to GitHub; see
 # scripts/release.sh for the checks.

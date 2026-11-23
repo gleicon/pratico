@@ -209,7 +209,7 @@ public enum ShimHost {
     /// `PATH`, their sockets under `<home>/run/ch` rather than a directory every daemon on
     /// the host shares.
     private static func manager(_ spec: ShimSpec, files: ShimFiles, interfaces: [SwitchNIC]) throws -> any VirtualMachineManager {
-        let kernel = Kernel(path: URL(filePath: spec.kernel), platform: .linuxArm)
+        let kernel = Kernel(path: URL(filePath: spec.kernel), platform: .host)
         let initfs = Mount.block(format: "ext4", source: spec.initfs, destination: "/", options: ["ro"])
         #if canImport(Virtualization)
         return VZVirtualMachineManager(kernel: kernel, initialFilesystem: initfs)

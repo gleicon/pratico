@@ -16,7 +16,11 @@
 # Once built, both are reused from .cache, so later builds are offline.
 set -euo pipefail
 
-OUT="${1:?usage: scripts/fetch-runtime-assets.sh <out-dir>}"
+OUT="${1:?usage: [KARCH=x86_64] scripts/fetch-runtime-assets.sh <out-dir>}"
+# x86_64: the assets of Linux hosts on x86_64, each with its own pin (…-x86_64.sha256).
+KARCH="${KARCH:-arm64}"
+case "$KARCH" in arm64) sfx="" ;; x86_64) sfx="-x86_64" ;; *) echo "assets: KARCH is arm64 or x86_64" >&2; exit 2 ;; esac
+export KARCH
 
 sha() { shasum -a 256 "$1" | cut -d' ' -f1; }
 verify() {  # file, expected digest
@@ -28,8 +32,8 @@ verify() {  # file, expected digest
 mkdir -p "$OUT"
 
 # --- Kernel ------------------------------------------------------------------
-KERNEL_SHA256=$(cut -d' ' -f1 vm/kernel/vmlinux.sha256)
-built=.cache/kernel/out
+KERNEL_SHA256=$(cut -d' ' -f1 vm/kernel/vmlinux$sfx.sha256)
+built=.cache/kernel/out$sfx
 if [ ! -f "$built/vmlinux" ] || [ ! -f "$built/vmlinux.btf" ] || [ "$(sha "$built/vmlinux")" != "$KERNEL_SHA256" ]; then
     scripts/build-kernel.sh "$built"
 fi
@@ -38,16 +42,16 @@ cp "$built/vmlinux" "$OUT/vmlinux"
 cp "$built/config" "$OUT/kernel-config"
 
 # --- Flight recorder probes ----------------------------------------------------
-BPF_SHA256=$(cut -d' ' -f1 vm/bpf/recorder.sha256)
-probes=.cache/bpf/out
+BPF_SHA256=$(cut -d' ' -f1 vm/bpf/recorder$sfx.sha256)
+probes=.cache/bpf/out$sfx
 if [ ! -f "$probes/recorder.bpf.o" ] || [ "$(sha "$probes/recorder.bpf.o")" != "$BPF_SHA256" ]; then
     scripts/build-bpf.sh "$built" "$probes"
 fi
 verify "$probes/recorder.bpf.o" "$BPF_SHA256"
 
 # --- vminit OCI layout ----------------------------------------------------------
-INIT_SHA256=$(cut -d' ' -f1 vm/init/vminit.sha256)
-init=.cache/init/out
+INIT_SHA256=$(cut -d' ' -f1 vm/init/vminit$sfx.sha256)
+init=.cache/init/out$sfx
 manifest() { sed -n 's/.*"digest":"sha256:\([0-9a-f]*\)".*/\1/p' "$init/vminit/index.json" 2>/dev/null; }
 if [ "$(manifest)" != "$INIT_SHA256" ]; then
     BPF_DIR="$probes" scripts/build-init.sh "$init"
