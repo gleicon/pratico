@@ -252,7 +252,13 @@ public enum ShimHost {
         config.memoryInBytes = UInt64(spec.memoryMiB).mib()
         config.hostname = spec.hostname
         // With PRATICO_TRACE, the guest kernel's console goes to boot.log beside shim.log.
-        if Trace.on { config.bootLog = .file(path: files.dir.appending(path: "boot.log"), append: false) }
+        // On Linux, Cloud Hypervisor's own output goes there too: a start that fails says why.
+        #if canImport(Virtualization)
+        let keepBootLog = Trace.on
+        #else
+        let keepBootLog = true
+        #endif
+        if keepBootLog { config.bootLog = .file(path: files.dir.appending(path: "boot.log"), append: false) }
         config.process.arguments = spec.arguments
         config.process.environmentVariables = spec.environment
         config.process.workingDirectory = spec.workingDirectory.isEmpty ? "/" : spec.workingDirectory

@@ -53,11 +53,37 @@ struct ShimClient: Sendable {
             Thread.sleep(forTimeInterval: 0.02)
         }
         // Going on would send `/start` to a shim not yet listening, and the start would fail
-        // later in a confusing way. The shim leads its session: its VMM goes with it.
+        // later in a confusing way. The shim leads its session; on Linux, Cloud Hypervisor and
+        // virtiofsd lead sessions of their own, so they are found by parent and killed too.
+        let descendants = Self.descendants(of: pid)
         kill(-pid, SIGKILL)
+        for child in descendants { kill(child, SIGKILL) }
         var status: Int32 = 0
         _ = waitpid(pid, &status, 0)
         throw APIError(500, "pratico-shim did not boot the VM within \(Int(Self.bootPatience)) s")
+    }
+
+    /// Every process below `pid`, from /proc, collected before any is killed (a killed
+    /// parent's children are reparented). Empty where there is no /proc (the Mac, whose VM
+    /// ends with the shim). Bounded: a host has far fewer processes than this.
+    static func descendants(of pid: pid_t) -> [pid_t] {
+        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: "/proc") else { return [] }
+        var parent: [pid_t: pid_t] = [:]
+        for e in entries.prefix(65_536) {
+            guard let p = pid_t(e), let stat = try? String(contentsOfFile: "/proc/\(e)/stat", encoding: .utf8),
+                  let close = stat.lastIndex(of: ")") else { continue }
+            // pid (comm) state ppid …: comm may hold spaces and parentheses, so read after the last ")".
+            let fields = stat[stat.index(after: close)...].split(separator: " ")
+            if fields.count > 1, let pp = pid_t(fields[1]) { parent[p] = pp }
+        }
+        var found: [pid_t] = []
+        var frontier = [pid]
+        while let next = frontier.popLast(), found.count < 4096 {
+            let kids = parent.filter { $0.value == next }.map(\.key)
+            found += kids
+            frontier += kids
+        }
+        return found
     }
 
     /// How long a VM may take to boot. A nested test host needs tens of seconds under load.
