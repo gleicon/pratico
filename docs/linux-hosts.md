@@ -6,7 +6,8 @@ your Mac's docker CLI over SSH. The design and its reasons are in
 
 ## What the host needs
 
-- arm64 (aarch64). x86_64 hosts are not supported yet.
+- arm64 (aarch64) or x86_64: each has its own release tarball, `linux-arm64` or
+  `linux-x86_64`. Containers run images of the host's architecture.
 - KVM: `/dev/kvm`, open to its group (Ubuntu's `kvm` group). Bare-metal servers have it,
   and clouds that enable nested virtualization; most VPSes do not. pratico refuses a host
   without it.
@@ -18,13 +19,13 @@ pratico answers itself (below).
 
 ## Install
 
-Download `pratico-<version>-linux-arm64.tar.gz` and its `.sha256` from the
+Download `pratico-<version>-linux-<arch>.tar.gz` (`arm64` or `x86_64`) and its `.sha256` from the
 [releases](https://github.com/gleicon/pratico/releases), on the host:
 
 ```sh
-sha256sum -c pratico-<version>-linux-arm64.tar.gz.sha256
-tar -xzf pratico-<version>-linux-arm64.tar.gz
-sudo ./pratico-<version>-linux-arm64/pratico-daemon install
+sha256sum -c pratico-<version>-linux-<arch>.tar.gz.sha256
+tar -xzf pratico-<version>-linux-<arch>.tar.gz
+sudo ./pratico-<version>-linux-<arch>/pratico-daemon install
 ```
 
 It shows everything it will write and run, and asks before it changes anything (`--yes`
@@ -115,11 +116,15 @@ logs) stays unless you add `--purge`. The `pratico` user and group stay
 
 ## How it is tested
 
-`make e2e-testhost` runs on the Mac: an Ubuntu 24.04 container with systemd and KVM
-(nested virtualization) where a non-root user installs the release payload with
-`sudo pratico-daemon install --yes`, then drives the service from the Mac's docker CLI over
-`ssh://`: networking, published ports, bind mounts and volumes, the menubar's own SSH
-client reading the service, an upgrade that keeps a running container, and the uninstall. Not covered there: loading the AppArmor profile,
-since pratico's own kernel, which that test host runs, has no AppArmor (the Linux unit
-tests check that Ubuntu's `apparmor_parser` accepts it); real hardware, since its KVM is
-nested; and other distributions.
+Two suites, the same checks (`e2e/host-checks.sh`): install, use through the docker CLI
+over `ssh://` (networking, published ports, bind mounts, volumes), hardening, an upgrade
+that keeps a running container, and the uninstall.
+
+- `make e2e-testhost`, on the Mac: arm64, an Ubuntu 24.04 container with systemd and
+  nested KVM, where a non-root user installs the release payload. It also runs the
+  menubar's own SSH client against the service.
+- `make e2e-worker WORKER=user@host LINUX_ARCH=x86_64`, on a real x86_64 Ubuntu 24.04 host
+  with KVM and AppArmor, where the shim's AppArmor profile is loaded and in force. Every
+  release runs it before the x86_64 tarball ships.
+
+Not covered: other distributions, and arm64 on real hardware rather than nested KVM.

@@ -1,6 +1,6 @@
 # Remote Linux hosts (design, 2026-11-20)
 
-Status: in progress, slices 1 to 5 done (below): installable on arm64 hosts
+Status: slices 1 to 6 done (below): installable on arm64 and x86_64 hosts
 ([linux-hosts.md](../linux-hosts.md)). The
 roadmap's "Remote Linux hosts" section holds what is decided.
 
@@ -153,4 +153,14 @@ switch, egress, scanning, and the flight recorder are the same code. How to inst
    for HostName, Port, User, IdentityFile, UserKnownHostsFile, Include; ProxyJump and
    ProxyCommand refused. `make e2e-testhost` runs PraticoRemote against the installed
    service as `dev`.
-6. x86_64: kernel, init, probes, and the seccomp syscall table; e2e on an x86_64 KVM host.
+6. x86_64: done 2026-11-25. The kernel (upstream's `config-x86_64` plus
+   `config-pratico`, cross-built, the ELF Cloud Hypervisor boots through PVH), probes and
+   init build reproducibly with `KARCH=x86_64`, each pinned (`…-x86_64.sha256`); the
+   seccomp compiler has x86_64's table and refuses x32 calls; daemon, shim, virtiofsd, and
+   the C libraries (`scripts/build-libs.sh`, now from upstream sources for both
+   architectures) are static. `make e2e-worker` runs the host checks on a real x86_64 host
+   with AppArmor. Found there: containerization waited for cloud-hypervisor and virtiofsd
+   with a blocking `wait4` on Swift's cooperative pool, sized to the CPUs, so a 2-vCPU host
+   never started a VM with a bind mount (fixed, Vendor/README.md); a failed start left its
+   VMM and virtiofsd running, as they lead sessions of their own (now killed by parent);
+   the DHCPv6 client kept the firewall off; the daemon reported arm64.

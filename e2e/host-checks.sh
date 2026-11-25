@@ -68,7 +68,8 @@ asuser sudo "$PAYLOAD/pratico-daemon" install --yes >>"$INSTALL_LOG" 2>&1
 expect_eq "upgrade: install again" "$?" "0"
 expect_eq "upgrade: the container kept running" "$(remote inspect sleeper --format '{{.State.Running}}' 2>&1)" "true"
 check "ssh://: rm -f" remote rm -f sleeper
-check "host: its VM is gone" not onhost pgrep -f /usr/lib/pratico/cloud-hypervisor
+# rm -f returns once the container is stopped; its VMM may take a moment more on a slow host.
+eventually_eq "host: its VM is gone" 0 onhost "pgrep -c -f /usr/lib/pratico/[c]loud-hypervisor || true"
 
 remote run -d --name left --network none alpine sleep 600 >/dev/null 2>&1
 asuser sudo /usr/lib/pratico/pratico-daemon uninstall --yes >>"$INSTALL_LOG" 2>&1

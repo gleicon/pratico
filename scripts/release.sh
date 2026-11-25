@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Cuts a GitHub release: version tag vX.Y.Z plus the DMG, the Linux host tarball
-# (scripts/linux-dist.sh), and their SHA-256s.
+# Cuts a GitHub release: version tag vX.Y.Z plus the DMG, the Linux host tarballs for
+# arm64 and x86_64 (scripts/linux-dist.sh), and their SHA-256s.
 # Refuses to run unless the version is proper semver, matches the code and
 # Info.plist, the tree is clean, and the tag does not exist yet. A run that pushed its tag
 # but did not publish the release (an upload that failed) is resumed: same tag, same commit.
 # Usage: scripts/release.sh <version>    (or: make release VERSION=x.y.z)
 #   SKIP_E2E=1   skip the end-to-end suites, the Mac's and the Linux test host's (unit tests still run)
+#   WORKER=user@host [WORKER_KEY=key]  an x86_64 Linux host with KVM the x86_64 tarball is
+#                tested on before it ships (e2e/worker.sh); required unless SKIP_E2E=1
 #   PRERELEASE=1 mark the GitHub release as a pre-release (the Homebrew cask is not updated)
 #   SIGN_IDENTITY="Developer ID Application: …"  sign with a Developer ID instead of ad hoc
 #   NOTARY_PROFILE=<name>  notarize and staple the DMG with the credentials saved by
@@ -23,6 +25,7 @@ plist_version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' S
 [ "$code_version" = "$VERSION" ] || die "Pratico.version is $code_version, not $VERSION"
 [ "$plist_version" = "$VERSION" ] || die "Info.plist CFBundleShortVersionString is $plist_version, not $VERSION"
 [ -z "$(git status --porcelain)" ] || die "working tree is not clean"
+[ "${SKIP_E2E:-0}" = 1 ] || [ -n "${WORKER:-}" ] || die "WORKER=user@host is needed: the x86_64 tarball ships only after e2e/worker.sh passes on an x86_64 host"
 command -v gh >/dev/null || die "gh is required"
 gh auth status >/dev/null 2>&1 || die "gh is not logged in"
 resume=0
@@ -49,8 +52,11 @@ make test
 make dmg VERSION="$VERSION" SIGN_IDENTITY="$IDENTITY"
 DMG="dist/Pratico-$VERSION.dmg"
 hdiutil verify "$DMG" >/dev/null
-make linux-dist VERSION="$VERSION"
-LINUX_TAR="dist/pratico-$VERSION-linux-arm64.tar.gz"
+make linux-dist VERSION="$VERSION" LINUX_ARCH=arm64
+make linux-dist VERSION="$VERSION" LINUX_ARCH=x86_64
+LINUX_ARM="dist/pratico-$VERSION-linux-arm64.tar.gz"
+LINUX_X86="dist/pratico-$VERSION-linux-x86_64.tar.gz"
+[ "${SKIP_E2E:-0}" = 1 ] || WORKER_KEY="${WORKER_KEY:-}" e2e/worker.sh "$WORKER" "$LINUX_X86"
 notarized=0
 if [ -n "${NOTARY_PROFILE:-}" ]; then
     xcrun notarytool submit "$DMG" --keychain-profile "$NOTARY_PROFILE" --wait
@@ -73,9 +79,11 @@ if [ "$notarized" = 1 ]; then
 else
     open_note='Ad-hoc signed, not notarized: approve the first launch in System Settings > Privacy & Security ("Open Anyway"), or run `xattr -dr com.apple.quarantine /Applications/Pratico.app`.'
 fi
-linux_note="Linux hosts (arm64, KVM, systemd): extract pratico-$VERSION-linux-arm64.tar.gz and run \`sudo ./pratico-$VERSION-linux-arm64/pratico-daemon install\`; https://github.com/gleicon/pratico/blob/$TAG/docs/linux-hosts.md says what it changes."
-gh release create "$TAG" "$DMG" "$DMG.sha256" "$LINUX_TAR" "$LINUX_TAR.sha256" --title "Pratico $VERSION" --verify-tag "${flags[@]}" \
-    --notes "$(printf '%s Requires macOS 26 on Apple silicon; nothing else to install.\n\nSHA-256: %s\n\n%s\n\nSHA-256: %s' "$open_note" "$(cut -d' ' -f1 "$DMG.sha256")" "$linux_note" "$(cut -d' ' -f1 "$LINUX_TAR.sha256")")"
+linux_note="Linux hosts (KVM, systemd; arm64 or x86_64): extract pratico-$VERSION-linux-<arch>.tar.gz and run \`sudo ./pratico-$VERSION-linux-<arch>/pratico-daemon install\`; nothing from Docker is needed on the host. https://github.com/gleicon/pratico/blob/$TAG/docs/linux-hosts.md says what it changes."
+sums=$(for f in "$LINUX_ARM" "$LINUX_X86"; do printf '%s: %s\n' "$(basename "$f")" "$(cut -d' ' -f1 "$f.sha256")"; done)
+gh release create "$TAG" "$DMG" "$DMG.sha256" "$LINUX_ARM" "$LINUX_ARM.sha256" "$LINUX_X86" "$LINUX_X86.sha256" \
+    --title "Pratico $VERSION" --verify-tag "${flags[@]}" \
+    --notes "$(printf '%s Requires macOS 26 on Apple silicon; nothing else to install.\n\nSHA-256: %s\n\n%s\n\n%s' "$open_note" "$(cut -d' ' -f1 "$DMG.sha256")" "$linux_note" "$sums")"
 echo "released $TAG"
 # The release stands either way; a failed cask update is rerun on its own.
 if [ "${PRERELEASE:-0}" != 1 ]; then

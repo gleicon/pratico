@@ -54,7 +54,7 @@ Or by hand:
 3. Open Pratico. The menubar item starts the daemon, which then starts at login
    (`start_at_login`). Status › View Daemon Log opens `~/.pratico/daemon.log`.
 
-On an arm64 Linux server with KVM, pratico runs as a systemd service that your Mac's
+On an arm64 or x86_64 Linux server with KVM, pratico runs as a systemd service that your Mac's
 docker CLI drives over SSH: [docs/linux-hosts.md](docs/linux-hosts.md).
 
 ## Use
