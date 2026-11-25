@@ -12,6 +12,8 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+// Modified by the Pratico project (2026-11-25): the exit wait runs on a thread of its own
+// (onOwnThread, CHProcess.swift), not on the cooperative pool.
 //===----------------------------------------------------------------------===//
 
 #if os(Linux)
@@ -111,11 +113,13 @@ final class VirtiofsdProcess: Sendable {
             throw error
         }
 
-        let exitTask = Task<Void, Never>.detached { [command, logger] in
-            do {
-                _ = try command.wait()
-            } catch {
-                logger?.error("virtiofsd wait failed: \(error)")
+        let exitTask = Task<Void, Never> { [command, logger] in
+            await onOwnThread {
+                do {
+                    _ = try command.wait()
+                } catch {
+                    logger?.error("virtiofsd wait failed: \(error)")
+                }
             }
         }
 

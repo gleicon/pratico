@@ -61,3 +61,7 @@ git subtree pull --prefix Vendor/containerization https://github.com/apple/conta
   6.18's `syscall_64.tbl`), `SeccompArch`, and `compile(for:)`, the host's architecture by
   default; on x86_64 the filter also kills x32 calls (`__X32_SYSCALL_BIT`).
   `LinuxContainer.swift` and `vmexec.swift` call `compile()`.
+- `Sources/Containerization/CHProcess.swift`, `VirtiofsdProcess.swift` (2026-11-25): their
+  `wait4` runs on a thread of its own (`onOwnThread`). On the cooperative pool, sized to the
+  CPUs, cloud-hypervisor's and virtiofsd's waits took both threads of a 2-vCPU host and a VM
+  with a bind mount never started.

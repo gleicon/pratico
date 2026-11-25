@@ -13,6 +13,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 //
+// Modified by the Pratico project (2026-11-25): the exit wait runs on a thread of its own
+// (onOwnThread), not on the cooperative pool.
 // Modified by the Pratico project (2026-11-21): cloud-hypervisor can run in a user and
 // network namespace the caller made (Vendor/README.md).
 //===----------------------------------------------------------------------===//
@@ -108,16 +110,18 @@ final class CHProcess: Sendable {
             throw error
         }
 
-        let exitTask = Task<ExitReason, Never>.detached { [command, logger] in
-            do {
-                let status = try command.wait()
-                if status >= 128 {
-                    return .signalled(status - 128)
+        let exitTask = Task<ExitReason, Never> { [command, logger] in
+            await onOwnThread {
+                do {
+                    let status = try command.wait()
+                    if status >= 128 {
+                        return .signalled(status - 128)
+                    }
+                    return .exited(status)
+                } catch {
+                    logger?.error("cloud-hypervisor wait failed: \(error)")
+                    return .unknown
                 }
-                return .exited(status)
-            } catch {
-                logger?.error("cloud-hypervisor wait failed: \(error)")
-                return .unknown
             }
         }
 
@@ -213,5 +217,14 @@ final class CHProcess: Sendable {
         }
     }
 
+}
+
+/// Runs a blocking call (`wait4`) on a thread of its own and resumes when it returns. On
+/// Swift's cooperative pool, sized to the CPUs, cloud-hypervisor's and virtiofsd's waits took
+/// both threads of a 2-vCPU host, and the VM start waiting behind them never ran.
+func onOwnThread<T: Sendable>(_ body: @escaping @Sendable () -> T) async -> T {
+    await withCheckedContinuation { continuation in
+        Thread { continuation.resume(returning: body()) }.start()
+    }
 }
 #endif
