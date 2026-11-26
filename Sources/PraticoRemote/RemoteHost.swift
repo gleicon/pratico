@@ -12,7 +12,24 @@ import PraticoCore
 /// `known_hosts` (KnownHosts).
 public enum RemoteHost {
     public struct Failure: Error, CustomStringConvertible {
+        /// What went wrong, so the menubar can say it in a few words and offer what fixes it.
+        public enum Kind: Sendable, Equatable {
+            case unreachable
+            /// Not in known_hosts: `ssh` there once to check and trust its key.
+            case unknownHostKey
+            case changedHostKey
+            /// No key pratico can sign with (none, RSA only, a passphrase, agent only).
+            case noUsableKey
+            /// SSH worked; pratico is not installed there, or the user is not in its group.
+            case notPratico
+            case other
+        }
+        public let kind: Kind
         public let description: String
+        public init(_ kind: Kind = .other, description: String) {
+            self.kind = kind
+            self.description = description
+        }
     }
 
     /// `GET` each path on `target`'s daemon; the responses in order.
@@ -34,7 +51,8 @@ public enum RemoteHost {
         do {
             connection = try await bootstrap.connect(host: target.hostName, port: target.port).get()
         } catch {
-            throw Failure(description: "cannot reach \(target.hostName):\(target.port): \(error)")
+            if let refusal = hostKeys.refusal { throw refusal }  // the handshake ended at the host key
+            throw Failure(.unreachable, description: "cannot reach \(target.hostName):\(target.port): \(error)")
         }
         let deadline = group.next().scheduleTask(in: timeout) { connection.close(promise: nil) }
         defer {
@@ -43,11 +61,17 @@ public enum RemoteHost {
         }
         var responses: [DaemonProbe.Response] = []
         for path in paths {
-            let (out, err) = try await exchange(DaemonProbe.requestBytes("GET", path), on: connection)
+            let (out, err): (Data, Data)
+            do {
+                (out, err) = try await exchange(DaemonProbe.requestBytes("GET", path), on: connection)
+            } catch {
+                if let refusal = hostKeys.refusal { throw refusal }
+                throw error
+            }
             if let refusal = hostKeys.refusal { throw refusal }
             guard let r = DaemonProbe.parse(out) else {
                 let reason = String(decoding: err, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-                throw Failure(description: reason.isEmpty ? "\(target.alias): no answer from pratico-daemon dial-stdio (is pratico installed there?)" : "\(target.alias): \(reason)")
+                throw Failure(.notPratico, description: reason.isEmpty ? "\(target.alias): no answer from pratico-daemon dial-stdio (is pratico installed there?)" : "\(target.alias): \(reason)")
             }
             responses.append(r)
         }
@@ -63,7 +87,7 @@ public enum RemoteHost {
         }
         guard !keys.isEmpty else {
             let why = reasons.isEmpty ? "no key in \(target.identityFiles.joined(separator: ", "))" : reasons.joined(separator: "; ")
-            throw Failure(description: "no SSH key pratico can use for \(target.alias): \(why)")
+            throw Failure(.noUsableKey, description: "no SSH key pratico can use for \(target.alias): \(why)")
         }
         return keys
     }
@@ -85,7 +109,8 @@ public enum RemoteHost {
             _ = try await opened.futureResult.get()
         } catch {
             done.fail(error)
-            throw Failure(description: "SSH: \(error)")
+            // The server refusing every key offered ends here too.
+            throw Failure("\(error)".localizedCaseInsensitiveContains("auth") ? .noUsableKey : .other, description: "SSH: \(error)")
         }
         return try await done.futureResult.get()
     }
@@ -177,11 +202,11 @@ final class HostKeyCheck: NIOSSHClientServerAuthenticationDelegate, @unchecked S
             validationCompletePromise.succeed(())
             return
         case .unknown:
-            refusal = .init(description: "\(name) is not in known_hosts: connect once with ssh \(target.alias) to check and trust its key")
+            refusal = .init(.unknownHostKey, description: "\(name) is not in known_hosts: connect once with ssh \(target.alias) to check and trust its key")
         case .changed:
-            refusal = .init(description: "\(name)'s host key is not the one in known_hosts: it changed, or someone is in between")
+            refusal = .init(.changedHostKey, description: "\(name)'s host key is not the one in known_hosts: it changed, or someone is in between")
         case .revoked:
-            refusal = .init(description: "\(name)'s host key is revoked in known_hosts")
+            refusal = .init(.changedHostKey, description: "\(name)'s host key is revoked in known_hosts")
         }
         validationCompletePromise.fail(refusal!)
     }

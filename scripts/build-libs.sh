@@ -26,11 +26,13 @@ LIBARCHIVE_URL="https://github.com/libarchive/libarchive/releases/download/v$LIB
 LIBSECCOMP_VERSION=2.6.2
 LIBSECCOMP_SHA256=6b845d352c6d7887d8d134c43d86850d40f5dcee11ad1675c18197ae4d869d42  # GitHub release asset digest
 LIBSECCOMP_URL="https://github.com/seccomp/libseccomp/releases/download/v$LIBSECCOMP_VERSION/libseccomp-$LIBSECCOMP_VERSION.tar.gz"
-# libcap-ng publishes 0.9 releases as git tags only (its tarball site stops at 0.8.5): the
-# tag's archive (commit c382c641ca5730442289c09d3c3d30cc2c8635a9), hashed when pinned.
+# libcap-ng's 0.9 release tarballs are not on its own site (it stops at 0.8.5): this is the
+# maintainer's tarball as Fedora packages it, whose SHA-512 Fedora's reviewed dist-git records
+# (src.fedoraproject.org/rpms/libcap-ng, file "sources"), fetched from Fedora's archive.
 LIBCAPNG_VERSION=0.9.6
-LIBCAPNG_SHA256=399040138e0ca62fa2bcabd63da9af4431a246ef7a654561a0ca3cb00010a539  # computed 2026-11-23
-LIBCAPNG_URL="https://github.com/stevegrubb/libcap-ng/archive/refs/tags/v$LIBCAPNG_VERSION.tar.gz"
+LIBCAPNG_SHA512=d5d8ce10d0eba731010a8c520e9052f470e7da144e79341ba5492aab30f83cf358269c06d43274311e44cd26754b428a0c3625b461bac0985ae64af207ef042f
+LIBCAPNG_SHA256=0062c06062e7358610b09f48b61fc62bbd69d732209e40f8f30c75433f9925eb  # the same file
+LIBCAPNG_URL="https://src.fedoraproject.org/repo/pkgs/rpms/libcap-ng/libcap-ng-$LIBCAPNG_VERSION.tar.gz/sha512/$LIBCAPNG_SHA512/libcap-ng-$LIBCAPNG_VERSION.tar.gz"
 SWIFT_IMAGE=swift@sha256:1ba0416be43dc57ba6ff7d02114356cad1ab17364024b7669385e3fe41a224aa  # 6.3.3-noble, as scripts/linux-check.sh
 KERNEL_VERSION=$(sed -n 's/^KERNEL_VERSION=//p' "$(dirname "$0")/build-kernel.sh")
 KERNEL_SHA256=$(sed -n 's/^KERNEL_SHA256=\([0-9a-f]*\).*/\1/p' "$(dirname "$0")/build-kernel.sh")
@@ -69,6 +71,7 @@ fetch "xz-$XZ_VERSION.tar.xz" "$XZ_URL" "$XZ_SHA256"
 fetch "libarchive-$LIBARCHIVE_VERSION.tar.xz" "$LIBARCHIVE_URL" "$LIBARCHIVE_SHA256"
 fetch "libseccomp-$LIBSECCOMP_VERSION.tar.gz" "$LIBSECCOMP_URL" "$LIBSECCOMP_SHA256"
 fetch "libcap-ng-$LIBCAPNG_VERSION.tar.gz" "$LIBCAPNG_URL" "$LIBCAPNG_SHA256"
+[ "$(shasum -a 512 "$CACHE/libcap-ng-$LIBCAPNG_VERSION.tar.gz" | cut -d' ' -f1)" = "$LIBCAPNG_SHA512" ] || { echo "libs: libcap-ng does not match Fedora's SHA-512" >&2; exit 1; }
 kernel="$ROOT/.cache/kernel/linux-$KERNEL_VERSION.tar.xz"
 [ "$(shasum -a 256 "$kernel" 2>/dev/null | cut -d' ' -f1)" = "$KERNEL_SHA256" ] || { echo "libs: $kernel missing or not its SHA-256: run scripts/build-kernel.sh" >&2; exit 1; }
 ln -f "$kernel" "$CACHE/in/linux.tar.xz"
@@ -82,12 +85,12 @@ docker run --rm --cpus "${CPUS:-8}" --memory "${MEMORY:-6g}" \
     -e LIBSECCOMP="libseccomp-$LIBSECCOMP_VERSION" -e LIBCAPNG="libcap-ng-$LIBCAPNG_VERSION" \
     "$SWIFT_IMAGE" bash -euc '
         apt-get -qq update >/dev/null && DEBIAN_FRONTEND=noninteractive apt-get -qq install -y --no-install-recommends \
-            make autoconf automake libtool pkg-config gperf xz-utils rsync >/dev/null
+            make pkg-config gperf xz-utils rsync >/dev/null
         mkdir -p /src /sysroot && cd /src
         tar -xzf /sdk.tar.gz -C /src --wildcards "*/musl-1.2.5.sdk/$SDKARCH/*"
         cp -a /src/*/*/swift-linux-musl/musl-1.2.5.sdk/$SDKARCH/. /sysroot/
         # The guest kernel'"'"'s own UAPI headers, for libseccomp and libcap-ng.
-        tar -xJf /in/linux.tar.xz && make -s -C linux-* ARCH=$KARCH headers_install INSTALL_HDR_PATH=/kh >/dev/null
+        tar -xJf /in/linux.tar.xz && make -s -C linux-* ARCH=$KARCH HOSTCC=clang CC=clang headers_install INSTALL_HDR_PATH=/kh >/dev/null
         # The SDK'"'"'s compiler-rt and crt objects, not libgcc, which a musl sysroot has none of.
         export CC="clang --target=$TRIPLE --sysroot=/sysroot -resource-dir=/sysroot/usr/lib/swift/clang"
         export AR=llvm-ar RANLIB=llvm-ranlib
@@ -107,7 +110,7 @@ docker run --rm --cpus "${CPUS:-8}" --memory "${MEMORY:-6g}" \
             --without-zstd --without-lz4 --without-openssl --without-xml2 --without-expat --without-libb2 --without-mbedtls \
             --without-nettle --without-cng --without-iconv --disable-acl --disable-xattr >/dev/null && make -s -j8 install >/dev/null)
         tar -xf /in/$LIBSECCOMP.tar.gz && (cd $LIBSECCOMP && ./configure -q "${host[@]}" --disable-python >/dev/null && make -s -j8 install >/dev/null)
-        tar -xf /in/$LIBCAPNG.tar.gz && (cd $LIBCAPNG && ./autogen.sh >/dev/null 2>&1 && ./configure -q "${host[@]}" \
+        tar -xf /in/$LIBCAPNG.tar.gz && (cd $LIBCAPNG && ./configure -q "${host[@]}" \
             --without-python3 >/dev/null && make -s -j8 -C src install >/dev/null \
             && install -m 644 src/cap-ng.h /out/include/)
         rm -rf /out/bin /out/share /out/lib/pkgconfig /out/lib/*.la /out/lib/cmake'

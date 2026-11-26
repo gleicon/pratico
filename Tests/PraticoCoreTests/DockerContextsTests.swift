@@ -62,3 +62,15 @@ private func dockerDir() throws -> URL {
     #expect(try FileManager.default.attributesOfItem(atPath: real.path)[.posixPermissions] as? Int == 0o600)
     #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path).allSatisfy { !$0.contains(".pratico-") })
 }
+
+@Test func hostKeysKeepOnlyPathsInA0600File() throws {
+    let home = FileManager.default.temporaryDirectory.appending(path: "pratico-hostkeys-\(UUID().uuidString)", directoryHint: .isDirectory)
+    let keys = HostKeys(home: home)
+    #expect(keys.identity(for: "vps") == nil)
+    try keys.setIdentity("/Users/me/.ssh/id_ed25519_vps", for: "vps")
+    try keys.setIdentity("/Users/me/.ssh/other", for: "box")
+    #expect(keys.identity(for: "vps") == "/Users/me/.ssh/id_ed25519_vps")
+    #expect(try FileManager.default.attributesOfItem(atPath: keys.file.path)[.posixPermissions] as? Int == 0o600)
+    try keys.setIdentity(nil, for: "vps")
+    #expect(keys.identity(for: "vps") == nil && keys.identity(for: "box") == "/Users/me/.ssh/other")
+}

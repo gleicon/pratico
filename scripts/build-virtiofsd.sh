@@ -13,6 +13,11 @@ VIRTIOFSD_VERSION=1.15.0
 VIRTIOFSD_SHA256=aeac41b813d490bb11941595b0ba09e49b8884dbe0d47f5df2fd891c8e0ecace  # index.crates.io/vi/rt/virtiofsd
 VIRTIOFSD_URL="https://static.crates.io/crates/virtiofsd/virtiofsd-$VIRTIOFSD_VERSION.crate"
 BUILD_IMAGE=rust@sha256:8d0e82abfdf9a38071e07cabc5afba4ddbe077631a80e4e742a760c38beadc33  # 1.100.0, alpine 3.24
+# x86_64's standard library for that toolchain, which the image lacks: pinned by the hash Rust's
+# signed channel manifest (channel-rust-1.100.0.toml) records for it, not fetched by rustup.
+RUST_STD_X86=rust-std-1.100.0-x86_64-unknown-linux-musl
+RUST_STD_X86_SHA256=9d5211bc7b40195f9700a6f9133831832a32f50d0e2a2c0ae8af801e7656de5c
+RUST_STD_X86_URL="https://static.rust-lang.org/dist/2026-11-12/$RUST_STD_X86.tar.xz"
 
 OUT="$(mkdir -p "${1:?usage: [KARCH=x86_64] scripts/build-virtiofsd.sh <out-dir>}" && cd "$1" && pwd)"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -36,13 +41,23 @@ if [ ! -f "$crate" ]; then
 fi
 [ "$(shasum -a 256 "$crate" | cut -d' ' -f1)" = "$VIRTIOFSD_SHA256" ] || { echo "virtiofsd: $crate does not match its SHA-256" >&2; exit 1; }
 ln -f "$crate" "$CACHE/in/virtiofsd.crate"
+if [ "$KARCH" = x86_64 ]; then
+    std="$CACHE/$RUST_STD_X86.tar.xz"
+    [ -f "$std" ] || { curl -fsSL --retry 3 -o "$std.part" "$RUST_STD_X86_URL" && mv "$std.part" "$std"; }
+    [ "$(shasum -a 256 "$std" | cut -d' ' -f1)" = "$RUST_STD_X86_SHA256" ] || { echo "virtiofsd: $std does not match its SHA-256" >&2; exit 1; }
+    ln -f "$std" "$CACHE/in/rust-std.tar.xz"
+fi
 
 docker volume create "pratico-virtiofsd-build-$KARCH" >/dev/null
 docker run --rm --cpus "${CPUS:-8}" --memory "${MEMORY:-8g}" -e TARGET="$target" \
     -v "$CACHE/in:/in:ro" -v "$LIBS:/libs:ro" -v "$OUT:/out" -v "pratico-virtiofsd-build-$KARCH:/build" "$BUILD_IMAGE" sh -euc '
         apk add -q --no-cache musl-dev
         # x86_64 from arm64: Rust'"'"'s musl target carries its own C runtime, linked with rust-lld.
-        [ "$TARGET" = aarch64-unknown-linux-musl ] || rustup target add "$TARGET" >/dev/null 2>&1
+        if [ "$TARGET" != aarch64-unknown-linux-musl ]; then
+            apk add -q --no-cache xz bash
+            mkdir -p /tmp/std && xz -dc /in/rust-std.tar.xz | tar -x -C /tmp/std --strip-components=1
+            /tmp/std/install.sh --prefix="$(rustc --print sysroot)" --disable-ldconfig >/dev/null
+        fi
         rm -rf /build/src && mkdir -p /build/src
         tar -xzf /in/virtiofsd.crate -C /build/src --strip-components=1
         cd /build/src
