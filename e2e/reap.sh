@@ -4,6 +4,10 @@
 # Homes are matched by their random basename: $TMPDIR's trailing slash makes the paths in
 # argv vary (`T//pratico-e2e.…`).
 
+# pgrep and pkill compile their patterns in the locale: some refuse them ("illegal byte
+# sequence") and match nothing, silently.
+export LC_ALL=C
+
 # reap_stale <home-prefix>: SIGTERM (a `docker stop`) the shims under <prefix>.* homes
 # that no daemon serves.
 reap_stale() {
