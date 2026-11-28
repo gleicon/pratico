@@ -11,6 +11,8 @@ docker() { "$DOCKER" "$@"; }
 ASSETS="${PRATICO_RUNTIME_ASSETS:-$(pwd)/.build/runtime-assets}"
 [ -f "$ASSETS/vmlinux" ] || { echo "runtime assets missing: run make assets"; exit 1; }
 
+. "$(dirname "$0")/reap.sh"
+reap_stale pratico-emb
 HOME_DIR="$(mktemp -d -t pratico-emb)"
 SOCK="$HOME_DIR/docker.sock"
 export DOCKER_HOST="unix://$SOCK"
