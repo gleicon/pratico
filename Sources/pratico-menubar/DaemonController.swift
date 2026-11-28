@@ -272,12 +272,15 @@ final class DaemonController {
         showCommands(
             title: "Add a Linux host",
             text: """
-                pratico runs on an arm64 Linux server with KVM and systemd. Install it there once                 (it shows what it changes and asks first), open a new SSH session so the pratico                 group applies, then add the host here as a docker context; it shows in Docker Host.
+                pratico runs on an arm64 or x86_64 Linux server with KVM and systemd. Install it there once \
+                (it shows what it changes and asks first), open a new SSH session so the pratico group \
+                applies, then add the host here as a docker context; it shows in Docker Host.
                 """,
             commands: """
-                # On the server, from the release's pratico-<version>-linux-arm64.tar.gz:
-                tar -xzf pratico-<version>-linux-arm64.tar.gz
-                sudo ./pratico-<version>-linux-arm64/pratico-daemon install
+                # On the server, from the release's pratico-<version>-linux-<arch>.tar.gz
+                # (<arch> is x86_64, or arm64 where uname -m says aarch64):
+                tar -xzf pratico-<version>-linux-<arch>.tar.gz
+                sudo ./pratico-<version>-linux-<arch>/pratico-daemon install
 
                 # On this Mac (the docker CLI connects with your ssh, keys and config;
                 # the server needs nothing from Docker):
@@ -498,38 +501,21 @@ final class DaemonController {
     /// A Linux host's daemon in one line, or why pratico could not reach it.
     struct RemoteSummary: Equatable, Sendable {
         var line: String
-        var failed: Bool
+        /// nil when the host answered as pratico.
+        var problem: RemoteHost.Failure.Kind?
+        var detail = ""
     }
 
     /// Every `ssh://` context at once, off the main actor; each answers within 20 s or fails.
     func refreshRemote() async {
         let targets = contexts.compactMap { c in c.sshTarget.map { (c.name, $0) } }
         let found = await withTaskGroup(of: (String, RemoteSummary).self) { group in
-            for (name, target) in targets { group.addTask { (name, await Self.summarize(target)) } }
+            for (name, endpoint) in targets { group.addTask { (name, await Self.summarize(endpoint, context: name)) } }
             var all: [String: RemoteSummary] = [:]
             for await (name, summary) in group { all[name] = summary }
             return all
         }
         update(\.remote, found)
-    }
-
-    nonisolated static func summarize(_ endpoint: String) async -> RemoteSummary {
-        do {
-            let target = try SSHTarget.resolve(endpoint)
-            let r = try await RemoteHost.get(["/version", "/pratico/status", "/pratico/alerts"], on: target)
-            let dec = JSONDecoder()
-            dec.dateDecodingStrategy = .iso8601
-            guard r[1].status == 200, let status = try? dec.decode(Status.self, from: r[1].body) else {
-                let version = (try? JSONSerialization.jsonObject(with: r[0].body) as? [String: Any])?["Version"] as? String
-                return RemoteSummary(line: "not pratico\(version.map { ": Docker \($0)" } ?? "")", failed: true)
-            }
-            let alerts = (try? JSONSerialization.jsonObject(with: r[2].body) as? [Any])?.count ?? 0
-            var line = "pratico \(status.Version) · \(status.ContainersRunning) of \(status.Containers) running"
-            if alerts > 0 { line += " · \(alerts) alert\(alerts == 1 ? "" : "s")" }
-            return RemoteSummary(line: line, failed: false)
-        } catch {
-            return RemoteSummary(line: "\(error)", failed: true)
-        }
     }
 
     /// `docker context use`, for every docker CLI, Compose, and tool that reads contexts.

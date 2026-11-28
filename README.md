@@ -212,7 +212,8 @@ other output is a failed run and keeps that scanner's earlier findings. Design:
 
 - **Docker Host**: your docker contexts; picking one is `docker context use`. Each Linux
   host shows its pratico version, running containers, and alerts, fetched over pratico's
-  own SSH ([linux-hosts](docs/linux-hosts.md#the-menubar)).
+  own SSH. When a host cannot be reached, its submenu says why and how to fix it, and
+  lets you choose the SSH key for that host ([linux-hosts](docs/linux-hosts.md#the-menubar)).
 - **Containers**: running containers with image, CPU, memory, health, and ports; open a
   published port, stop, restart.
 - **The icon**: pratico's mark, outlined when the daemon is stopped, filled when it runs,

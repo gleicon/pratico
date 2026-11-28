@@ -86,6 +86,21 @@ them itself, over SSH, without running `ssh`:
 - The host's key must already be in `known_hosts`: pratico never trusts a key on first
   use. Connect once with `ssh` to check and trust it. A changed or revoked key is refused.
 
+Each Linux host also has its own submenu, under **Linux Hosts**:
+
+- Its state in a few words: running containers, or what stopped pratico (host not
+  reachable, host key not trusted yet, host key changed, no SSH key pratico can use,
+  pratico not installed or the user not in its group).
+- An item for that problem that says what fixes it and gives the commands to run in
+  Terminal, with a Copy button. For a host key it is the `ssh` command that shows the
+  fingerprint to check. For a key it is `ssh-keygen -t ed25519` for a key made for that host
+  alone, plus `ssh-copy-id` to install it. pratico runs none of these itself.
+- **Choose SSH Key…** opens the standard file panel in `~/.ssh`. pratico checks that it can
+  sign with the key you pick and keeps only that key's path, in `~/.pratico/hosts.json`
+  (readable only by you). It tries that key first, then the keys `~/.ssh/config` gives.
+  **Use the Keys ~/.ssh/config Gives…** forgets the choice after asking; the key file stays.
+  pratico never writes `~/.ssh/config` or `known_hosts`.
+
 ## Differences from a Docker host
 
 - The engine runs as the `pratico` user, not root. Being in the `pratico` group is not

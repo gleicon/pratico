@@ -120,4 +120,26 @@ func remoteHostAnswersOverPraticosOwnSSH() async throws {
     #expect(responses.map(\.status) == [200, 200])
     let version = try JSONSerialization.jsonObject(with: responses[0].body) as? [String: Any]
     #expect(version?["Os"] as? String == "linux")
+
+    // Each way it fails says which, for the menubar to offer what fixes it.
+    let dir = try tempDir()
+    try keygen(["-t", "ed25519", "-N", "", "-f", dir.appending(path: "other").path])
+    let other = try String(contentsOfFile: dir.appending(path: "other.pub").path, encoding: .utf8).split(separator: " ")
+    let name = target.port == 22 ? target.hostName : "[\(target.hostName)]:\(target.port)"
+    try "".write(to: dir.appending(path: "empty"), atomically: true, encoding: .utf8)
+    try "\(name) \(other[0]) \(other[1])\n".write(to: dir.appending(path: "changed"), atomically: true, encoding: .utf8)
+    var unknown = target, changed = target, keyless = target, closed = target
+    unknown.knownHostsFiles = [dir.appending(path: "empty").path]
+    changed.knownHostsFiles = [dir.appending(path: "changed").path]
+    keyless.identityFiles = [dir.appending(path: "none").path]
+    closed.hostName = "127.0.0.1"
+    closed.port = 1
+    for (t, kind) in [(unknown, RemoteHost.Failure.Kind.unknownHostKey), (changed, .changedHostKey), (keyless, .noUsableKey), (closed, .unreachable)] {
+        do {
+            _ = try await RemoteHost.get(["/version"], on: t)
+            Issue.record("\(kind): answered")
+        } catch let failure as RemoteHost.Failure {
+            #expect(failure.kind == kind, "\(failure)")
+        }
+    }
 }
