@@ -4,7 +4,9 @@ import Foundation
 import PraticoCore
 
 /// Where pratico keeps a secret it must send again later (registry logins, the abuse.ch
-/// key), one item per host in `domain`. On the Mac, pratico's own Keychain items. On Linux
+/// key), one item per host in `domain`. On the Mac, pratico's own Keychain items; a daemon
+/// on another `--home` (the e2e suites) keeps its own, in a domain naming that home, and
+/// never reads the user's: a rebuilt binary reading them waits on a Keychain prompt. On Linux
 /// hosts (docs/design/remote.md), which have no Keychain a daemon can rely on, a file only
 /// the daemon's user can read: `<home>/secrets/<domain>.json`, mode 0600 in a 0700
 /// directory, replaced atomically.
@@ -23,7 +25,12 @@ struct SecretStore: Sendable {
     #endif
 
     init(domain: String, home: URL) {
+        #if canImport(Security)
+        let own = home.standardizedFileURL.path == Pratico.home().standardizedFileURL.path
+        self.domain = own ? domain : "\(domain) \(home.standardizedFileURL.path)"
+        #else
         self.domain = domain
+        #endif
         #if !canImport(Security)
         file = home.appending(path: "secrets/\(domain).json")
         #endif

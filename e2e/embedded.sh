@@ -427,7 +427,8 @@ openssl x509 -req -in "$REG_DIR/leaf.csr" -CA "$REG_DIR/ca.pem" -CAkey "$REG_DIR
     -extfile "$REG_DIR/leaf.ext" -out "$REG_DIR/cert.pem" >/dev/null 2>&1
 htpasswd -Bbn e2euser "$REG_PASS" >"$REG_DIR/htpasswd"
 reg_cleanup() {
-    for r in "$REG" "$PLAIN"; do security delete-internet-password -s "$r" -d dev.pratico.registry >/dev/null 2>&1; done
+    # Only the loopback test registries: the daemon keeps them in its home's own domain.
+    for r in "$REG" "$PLAIN"; do security delete-internet-password -s "$r" >/dev/null 2>&1; done
     cleanup
 }
 trap reg_cleanup EXIT

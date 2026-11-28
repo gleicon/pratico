@@ -1095,6 +1095,14 @@ final class LockedBox<T>: @unchecked Sendable {
     #expect(!Posix.cloneOrSparseCopy(a.path, b.path), "never over an existing file")
 }
 
+#if canImport(Security)
+@Test func keychainItemsBelongToTheDaemonsHome() {
+    #expect(SecretStore(domain: "dev.pratico.test", home: Pratico.home()).domain == "dev.pratico.test")
+    let other = SecretStore(domain: "dev.pratico.test", home: scratch.appending(path: "home"))
+    #expect(other.domain != "dev.pratico.test" && other.domain.hasPrefix("dev.pratico.test "))
+}
+#endif
+
 #if !canImport(Security)
 @Test func linuxSecretsAreOnlyTheDaemonUsers() throws {
     let home = scratch.appending(path: "home-\(UUID().uuidString)")
